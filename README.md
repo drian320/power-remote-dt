@@ -2,7 +2,9 @@
 
 Ultra-low-latency cross-platform remote desktop.
 
-**Status:** Phase 0 (Core Pipeline PoC) — see `docs/superpowers/specs/2026-04-22-phase0-core-pipeline-design.md`.
+**Status:** **Phase 0 functionally complete** — pipeline end-to-end verified
+on Windows 11 + NVIDIA. Formal benchmark sign-off (spec §7 exit criteria)
+deferred. See `docs/superpowers/PHASE0-STATUS.md` for the full accounting.
 
 ## Phase 0 Progress
 
@@ -11,7 +13,7 @@ Ultra-low-latency cross-platform remote desktop.
 - [x] Plan 2b: `media-win` DXGI capture + NVENC H.265 encoder
 - [x] Plan 2c: `media-win` Media Foundation decode + VideoProducer/VideoConsumer traits
 - [x] Plan 3: `input-win` + `host` + `viewer` binaries
-- [ ] Plan 4: Benchmarks & exit criteria
+- [ ] Plan 4 (deferred): formal benchmarks + Exit Criteria sign-off
 - [ ] Plan 2d (optional): cuvid/NVDEC direct for lower-latency decode
 
 ## Building
