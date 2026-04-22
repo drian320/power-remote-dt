@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 prdt-protocol = { path = "../protocol" }
+prdt-crypto = { path = "../crypto" }
 tokio.workspace = true
 bincode.workspace = true
 bytes.workspace = true
