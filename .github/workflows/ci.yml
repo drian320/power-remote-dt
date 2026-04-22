@@ -1,0 +1,23 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: clippy (protocol, transport のみ)
+        run: cargo clippy -p prdt-protocol -p prdt-transport --all-targets -- -D warnings
+      - name: test (protocol, transport)
+        run: cargo test -p prdt-protocol -p prdt-transport --all-targets
+      - name: build
+        run: cargo build --workspace
