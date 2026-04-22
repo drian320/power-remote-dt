@@ -6,6 +6,10 @@ Ultra-low-latency cross-platform remote desktop.
 on Windows 11 + NVIDIA. Formal benchmark sign-off (spec §7 exit criteria)
 deferred. See `docs/superpowers/PHASE0-STATUS.md` for the full accounting.
 
+**Phase 3a complete** — all host ↔ viewer UDP traffic is now end-to-end
+encrypted with Noise_NK (Curve25519 + ChaCha20-Poly1305 + BLAKE2s). See
+`docs/superpowers/phase3a-smoke.md` for the encrypted-pipeline smoke test.
+
 ## Phase 0 Progress
 
 - [x] Plan 1: Foundation (`protocol` + `transport` + `latency-bench` skeleton)
@@ -15,6 +19,13 @@ deferred. See `docs/superpowers/PHASE0-STATUS.md` for the full accounting.
 - [x] Plan 3: `input-win` + `host` + `viewer` binaries
 - [ ] Plan 4 (deferred): formal benchmarks + Exit Criteria sign-off
 - [ ] Plan 2d (optional): cuvid/NVDEC direct for lower-latency decode
+
+## Phase 3 Progress
+
+- [x] Phase 3a: E2E encryption (Noise_NK + Curve25519 + ChaCha20-Poly1305)
+- [ ] Phase 3b: Audio (Opus), clipboard sync
+- [ ] Phase 3c: File transfer, multi-monitor
+- [ ] Phase 3d: Authentication improvements (known-hosts file, key rotation)
 
 ## Building
 
@@ -30,17 +41,25 @@ cargo build --release
 
 ## Running (two machines, LAN)
 
-On the host machine (the one whose desktop is shared):
+On the host machine:
 ```powershell
-.\target\release\prdt-host.exe --bind 0.0.0.0:9000 --monitor 0 --bitrate-mbps 30
+$env:NV_CODEC_SDK_PATH = "C:\SDK\Video_Codec_SDK_13.0.37"
+.\target\release\prdt-host.exe --bind 0.0.0.0:9000 --monitor 0 `
+    --bitrate-mbps 30 --key-file host-key.bin
+# Copy the "Host public key: ..." line.
 ```
 
 On the viewer machine:
 ```powershell
-.\target\release\prdt-viewer.exe --host <host-ip>:9000
+.\target\release\prdt-viewer.exe --host <host-ip>:9000 `
+    --host-pubkey <paste-pubkey-from-host>
 ```
 
-See `docs/superpowers/plan3-manual-smoke.md` for full smoke test procedure.
+All traffic between host and viewer is now Noise_NK encrypted end-to-end.
+
+See `docs/superpowers/plan3-manual-smoke.md` for the Phase 0 smoke test
+procedure and `docs/superpowers/phase3a-smoke.md` for the Phase 3a
+encrypted-pipeline smoke test.
 
 ## Architecture (Phase 0)
 
@@ -50,7 +69,7 @@ See `docs/superpowers/plan3-manual-smoke.md` for full smoke test procedure.
     → D3D11 BGRA texture
     → NVENC H.265 encode (zero-copy via shared texture)
     → CustomUdpTransport send
-                                  ↓ UDP (custom protocol)
+                                  ↓ UDP (custom protocol, Noise_NK encrypted)
 [viewer machine]
   CustomUdpTransport recv
     → MF H.265 decode (zero-copy via IMFDXGIBuffer)
@@ -64,9 +83,9 @@ See `docs/superpowers/plan3-manual-smoke.md` for full smoke test procedure.
 ## Testing
 
 ```powershell
-cargo test -p prdt-protocol -p prdt-transport
+cargo test -p prdt-protocol -p prdt-transport -p prdt-crypto
 # With GPU + SDK:
 cargo test -p prdt-media-win -p prdt-input-win
 ```
 
-All 84+ tests pass.
+All 94+ tests pass.
