@@ -40,6 +40,10 @@ pub enum ControlMessage {
         fps_millis: u32,    // fps * 1000
         bitrate_bps: u32,
     },
+    /// Noise handshake stage 1 (initiator → responder).
+    NoiseE1 { payload: Vec<u8> },
+    /// Noise handshake stage 2 (responder → initiator).
+    NoiseE2 { payload: Vec<u8> },
 }
 
 impl ControlMessage {
@@ -54,6 +58,8 @@ impl ControlMessage {
             Self::RequestIdr => 5,
             Self::SetBitrate { .. } => 6,
             Self::Stats { .. } => 7,
+            Self::NoiseE1 { .. } => 10,
+            Self::NoiseE2 { .. } => 11,
         }
     }
 }
@@ -74,6 +80,24 @@ mod tests {
         assert_eq!(hello.kind_u8(), 0);
         assert_eq!(ControlMessage::Bye.kind_u8(), 2);
         assert_eq!(ControlMessage::RequestIdr.kind_u8(), 5);
+    }
+
+    #[test]
+    fn noise_kinds_are_stable() {
+        assert_eq!(
+            ControlMessage::NoiseE1 {
+                payload: vec![1, 2, 3]
+            }
+            .kind_u8(),
+            10,
+        );
+        assert_eq!(
+            ControlMessage::NoiseE2 {
+                payload: vec![4, 5, 6]
+            }
+            .kind_u8(),
+            11,
+        );
     }
 
     #[test]

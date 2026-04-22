@@ -16,6 +16,12 @@ pub const HEADER_LEN: usize = 16;
 /// We round down to 1200 for safety over tunneled paths.
 pub const DEFAULT_CHUNK_PAYLOAD_LEN: usize = 1200;
 
+/// Packet header flag bits (for PacketHeader.flags).
+pub mod packet_flags {
+    /// Set when the packet body is Noise-AEAD encrypted.
+    pub const ENCRYPTED: u8 = 0b0000_0001;
+}
+
 /// Wire-level packet type byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -548,7 +554,7 @@ pub fn decode_control(buf: &[u8]) -> Result<ControlMessage, ProtocolError> {
     let kind = buf[0];
     // We don't trust `kind` blindly; bincode will decode the whole tagged enum.
     // We keep the leading byte as a fast-path dispatch hint for future optimization.
-    if kind > 7 {
+    if kind > 11 {
         return Err(ProtocolError::UnknownControlKind(kind));
     }
     let msg: ControlMessage = bincode::deserialize(&buf[1..])?;
@@ -612,5 +618,22 @@ mod control_tests {
             decode_control(&buf).unwrap_err(),
             ProtocolError::UnknownControlKind(0xFF),
         ));
+    }
+
+    #[test]
+    fn control_noise_kinds_round_trip() {
+        let cases = [
+            ControlMessage::NoiseE1 {
+                payload: vec![0xAA; 48],
+            },
+            ControlMessage::NoiseE2 {
+                payload: vec![0xBB; 96],
+            },
+        ];
+        for msg in cases {
+            let buf = encode_control(&msg).unwrap();
+            let back = decode_control(&buf).unwrap();
+            assert_eq!(back, msg);
+        }
     }
 }
