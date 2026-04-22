@@ -3,12 +3,13 @@ use prdt_protocol::{wire::video_flags, EncodedFrame, VideoPacket, DEFAULT_CHUNK_
 use crate::error::TransportError;
 use crate::fec::FecCodec;
 
-/// Max source chunks per frame. Raised from spec §5.3's 32 to 64 to
-/// accommodate 4K60 at high bitrates (Plan 3 smoke feedback). The hard
-/// limit comes from reed-solomon GF(8) which supports k+m <= 255, so 64
-/// leaves plenty of headroom. Exceeding this should trigger IDR + bitrate
-/// drop at a higher layer (deferred to Plan 4).
-pub const MAX_SOURCE_CHUNKS: usize = 64;
+/// Max source chunks per frame. Raised from spec §5.3's 32 to 128 to
+/// accommodate 4K60 at high bitrates (Plan 3 smoke feedback: 20Mbps
+/// H.265 IDRs hit 40KB+). The hard limit comes from reed-solomon GF(8)
+/// which supports k+m <= 255, so 128 leaves headroom. Exceeding this
+/// should trigger IDR + bitrate drop at a higher layer (deferred to
+/// Plan 4's dynamic FEC sizing).
+pub const MAX_SOURCE_CHUNKS: usize = 128;
 
 /// Split an EncodedFrame into k source chunks, then apply FEC to produce
 /// m parity chunks. Returns exactly k + m VideoPackets.

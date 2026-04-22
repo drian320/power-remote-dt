@@ -30,12 +30,13 @@ impl Default for UdpTransportConfig {
         Self {
             session_id: 0,
             chunk_payload_len: prdt_protocol::DEFAULT_CHUNK_PAYLOAD_LEN,
-            // fec_k=32, fec_m=4 allows 32*1200 = 38,400B per frame, which
-            // covers most 4K60 P-frames at moderate bitrate. Peak IDRs at
-            // high bitrate may still exceed; Plan 4 will add dynamic FEC
-            // sizing per spec §5.3.
-            fec_k: 32,
-            fec_m: 4,
+            // fec_k=64, fec_m=6 allows 64*1200 = 76,800B per frame,
+            // covering 4K60 up to ~30 Mbps average. Smoke-test feedback
+            // showed lower defaults (k=8, k=32) were too tight. Plan 4
+            // will add dynamic FEC sizing per spec §5.3 so we pick the
+            // smallest k per frame rather than a one-size default.
+            fec_k: 64,
+            fec_m: 6,
         }
     }
 }
