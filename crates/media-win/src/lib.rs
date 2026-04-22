@@ -15,5 +15,5 @@ pub use adapter::{enumerate_adapters, pick_adapter_by_index, pick_default_adapte
 pub use d3d11::{D3d11Device, D3d11Texture, TextureFormat};
 pub use dxgi::{enumerate_outputs_for_adapter, AcquiredFrame, DesktopDuplication, OutputInfo};
 pub use error::{MediaError, Result};
-pub use nvenc::NvEncLibrary;
+pub use nvenc::{EncodedH265Frame, NvEncLibrary, NvencEncoder, NvencEncoderConfig};
 pub use platform::MmcssScope;
