@@ -273,20 +273,33 @@ impl H265Decoder {
         unsafe {
             let mut output_buffer = MFT_OUTPUT_DATA_BUFFER::default();
             let mut status: u32 = 0;
-            match self
-                .mft
-                .ProcessOutput(0, std::slice::from_mut(&mut output_buffer), &mut status)
-            {
-                Ok(()) => {}
-                Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => {
-                    return Ok(None);
+            let mut stream_change_retried = false;
+            loop {
+                match self.mft.ProcessOutput(
+                    0,
+                    std::slice::from_mut(&mut output_buffer),
+                    &mut status,
+                ) {
+                    Ok(()) => break,
+                    Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => {
+                        return Ok(None);
+                    }
+                    Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
+                        if stream_change_retried {
+                            return Err(MediaError::Other(
+                                "MF_E_TRANSFORM_STREAM_CHANGE after renegotiation".into(),
+                            ));
+                        }
+                        // The MFT discovered the real stream parameters
+                        // (e.g. SPS/PPS/VPS in the IDR) and wants us to
+                        // re-select an output type. Re-enumerate available
+                        // output types, set the first NV12 one, and retry.
+                        self.renegotiate_output_type()?;
+                        stream_change_retried = true;
+                        continue;
+                    }
+                    Err(e) => return Err(MediaError::Other(format!("ProcessOutput: {e}"))),
                 }
-                Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
-                    // Output type change — re-negotiation is Plan 3+ work.
-                    self.needs_idr = true;
-                    return Err(MediaError::Other("MF_E_TRANSFORM_STREAM_CHANGE".into()));
-                }
-                Err(e) => return Err(MediaError::Other(format!("ProcessOutput: {e}"))),
             }
 
             // Extract the sample through ManuallyDrop.
@@ -314,6 +327,54 @@ impl H265Decoder {
             std::mem::ManuallyDrop::drop(&mut output_buffer.pEvents);
 
             Ok(Some(bytes))
+        }
+    }
+
+    /// Re-enumerate the MFT's available output types (after
+    /// `MF_E_TRANSFORM_STREAM_CHANGE`), pick the first NV12 entry, and
+    /// install it as the active output type. Falls back to the first
+    /// available type if no NV12 entry is present.
+    ///
+    /// This is invoked from `process_output` when the MFT reports a stream
+    /// change, which typically happens right after the first IDR is
+    /// decoded and the true stream parameters (width/height/format) become
+    /// known to the MFT.
+    fn renegotiate_output_type(&mut self) -> Result<()> {
+        use windows::core::GUID;
+
+        unsafe {
+            // Walk available output types. First try to find NV12; if none,
+            // take the first (index 0) entry.
+            let mut chosen: Option<windows::Win32::Media::MediaFoundation::IMFMediaType> = None;
+            let mut fallback: Option<windows::Win32::Media::MediaFoundation::IMFMediaType> = None;
+            for index in 0..32u32 {
+                match self.mft.GetOutputAvailableType(0, index) {
+                    Ok(media_type) => {
+                        if fallback.is_none() {
+                            fallback = Some(media_type.clone());
+                        }
+                        if let Ok(subtype) = media_type.GetGUID(&MF_MT_SUBTYPE) {
+                            let nv12: GUID = MFVideoFormat_NV12;
+                            if subtype == nv12 {
+                                chosen = Some(media_type);
+                                break;
+                            }
+                        }
+                    }
+                    Err(_) => break, // MF_E_NO_MORE_TYPES or similar.
+                }
+            }
+
+            let output_type = chosen.or(fallback).ok_or_else(|| {
+                MediaError::Other(
+                    "no available output types after MF_E_TRANSFORM_STREAM_CHANGE".into(),
+                )
+            })?;
+
+            self.mft
+                .SetOutputType(0, &output_type, 0)
+                .map_err(|e| MediaError::Other(format!("SetOutputType (renegotiate): {e}")))?;
+            Ok(())
         }
     }
 }
