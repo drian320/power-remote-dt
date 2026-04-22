@@ -1,0 +1,10 @@
+/target
+**/*.rs.bk
+Cargo.lock
+*.pdb
+.vscode/
+.idea/
+*.log
+*.jsonl
+/tmp/
+/.omc/state/
