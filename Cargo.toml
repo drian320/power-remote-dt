@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/protocol",
+    "crates/transport",
+    "crates/media-win",
+    "crates/input-win",
+    "crates/host",
+    "crates/viewer",
+    "crates/latency-bench",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.78"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/your-org/power-remote-dt"
+
+[workspace.dependencies]
+# Async / IO
+tokio = { version = "1.40", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
+
+# Serialization
+bincode = "1.3"
+bytes = "1.7"
+serde = { version = "1.0", features = ["derive"] }
+
+# FEC
+reed-solomon-erasure = "6.0"
+
+# Error & logging
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Testing
+proptest = "1.5"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 1       # テストが 4K60 相当のバッファ処理で時間かかりすぎないように
+panic = "abort"
