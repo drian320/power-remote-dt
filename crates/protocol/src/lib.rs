@@ -3,6 +3,8 @@
 
 pub mod error;
 pub mod frame;
+pub mod input;
 
 pub use error::ProtocolError;
 pub use frame::{Codec, EncodedFrame};
+pub use input::{InputEvent, MouseButton};
