@@ -9,13 +9,14 @@ Ultra-low-latency cross-platform remote desktop.
 - [x] Plan 1: Foundation (`protocol` + `transport` + `latency-bench` skeleton)
 - [x] Plan 2a: `media-win` D3D11 foundation (device, texture, MMCSS)
 - [x] Plan 2b: `media-win` DXGI capture + NVENC H.265 encoder
-- [ ] Plan 2c: `media-win` NVDEC + render + producer/consumer
+- [x] Plan 2c: `media-win` Media Foundation decode + VideoProducer/VideoConsumer traits
 - [ ] Plan 3: `input-win` + `host` + `viewer` binaries
 - [ ] Plan 4: Benchmarks & exit criteria
+- [ ] Plan 2d (optional): cuvid/NVDEC direct for lower-latency decode
 
 ## Building
 
-Requires Rust stable (>= 1.78), Windows 11 + NVIDIA GPU for Plan 2b+.
+Requires Rust stable (>= 1.78), Windows 11 + NVIDIA GPU.
 
 ### Plan 1 (no GPU required)
 ```
@@ -23,20 +24,13 @@ cargo test -p prdt-protocol -p prdt-transport
 cargo run -p prdt-latency-bench --release -- --duration 2s
 ```
 
-### Plan 2a (D3D11 GPU)
-```
-cargo test -p prdt-media-win
-```
+### Plan 2a/2b/2c (full pipeline)
+Requires:
+- NVIDIA Video Codec SDK 12.x+ (set `NV_CODEC_SDK_PATH` env var)
+- LLVM for Windows (for bindgen — set `LIBCLANG_PATH` or add to PATH)
+- HEVC Video Extensions (Microsoft Store, for MF decode)
 
-### Plan 2b (NVENC)
-Requires NVIDIA Video Codec SDK + LLVM:
-
-1. Install NVIDIA Video Codec SDK from https://developer.nvidia.com/video-codec-sdk
-   Set `NV_CODEC_SDK_PATH` environment variable to the extracted SDK root.
-2. Install LLVM for Windows (https://github.com/llvm/llvm-project/releases),
-   ensuring `libclang.dll` is on PATH or `LIBCLANG_PATH` is set.
-
-Build:
+Build and test:
 ```
 NV_CODEC_SDK_PATH="C:/SDK/Video_Codec_SDK_13.0.37" \
   LIBCLANG_PATH="C:/Program Files/LLVM/bin" \
@@ -45,3 +39,15 @@ NV_CODEC_SDK_PATH="C:/SDK/Video_Codec_SDK_13.0.37" \
 
 If `NV_CODEC_SDK_PATH` is unset, NVENC modules build with empty stub bindings
 (the rest of `media-win` still works).
+
+## Architecture (Phase 0 current state)
+
+```
+[host] DXGI Desktop Duplication → NVENC H.265 encode → UDP (transport)
+                                                           ↓
+[viewer] MF H.265 decode ← NV12 → (Plan 3: D3D11 swapchain present) ← UDP
+```
+
+`VideoProducer` / `VideoConsumer` primary traits live in `prdt-protocol`;
+concrete Windows impls are `DxgiNvencProducer` and `MfD3d11Consumer` in
+`prdt-media-win::pipeline`.
