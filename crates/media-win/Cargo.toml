@@ -10,6 +10,7 @@ prdt-protocol = { path = "../protocol" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 bytes = { workspace = true }
+libloading = "0.8"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",
@@ -21,6 +22,9 @@ windows = { version = "0.58", features = [
     "Win32_System_Performance",
     "Win32_Media",
 ] }
+
+[target.'cfg(windows)'.build-dependencies]
+bindgen = "0.69"
 
 [target.'cfg(windows)'.dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
