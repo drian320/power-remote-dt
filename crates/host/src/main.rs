@@ -1,3 +1,151 @@
-fn main() {
-    println!("prdt-host placeholder (Phase 0 Plan 3 で実装)");
+#![cfg(windows)]
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use clap::Parser;
+use prdt_input_win::SendInputInjector;
+use prdt_media_win::{
+    dxgi::enumerate_outputs_for_adapter, pick_default_adapter, D3d11Device, DxgiNvencProducer,
+};
+use prdt_protocol::{ControlMessage, VideoProducer};
+use prdt_transport::{
+    host_handshake, now_monotonic_us, CustomUdpTransport, ReceivedMessage, Transport,
+    UdpTransportConfig,
+};
+use tracing::{info, warn};
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "prdt-host",
+    about = "power-remote-dt host (capture + encode + input inject)"
+)]
+struct Args {
+    /// Local bind address, e.g. 0.0.0.0:9000.
+    #[arg(long, default_value = "0.0.0.0:9000")]
+    bind: SocketAddr,
+
+    /// Monitor output index (from enumerate_outputs).
+    #[arg(long, default_value_t = 0u32)]
+    monitor: u32,
+
+    /// Target bitrate in Mbps (e.g., 30 for 30 Mbps).
+    #[arg(long, default_value_t = 30u32)]
+    bitrate_mbps: u32,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .init();
+
+    let args = Args::parse();
+
+    let adapter = pick_default_adapter().context("no GPU adapter")?;
+    let dev = D3d11Device::create(&adapter).context("D3D11 device")?;
+    let outputs = enumerate_outputs_for_adapter(&adapter).context("outputs")?;
+    if outputs.is_empty() {
+        anyhow::bail!("no display outputs found on adapter");
+    }
+    let output = outputs
+        .get(args.monitor as usize)
+        .with_context(|| {
+            format!(
+                "no output at index {} (available: 0..{})",
+                args.monitor,
+                outputs.len()
+            )
+        })?
+        .clone();
+
+    info!(
+        monitor = args.monitor,
+        device_name = %output.device_name,
+        bitrate_mbps = args.bitrate_mbps,
+        "host starting"
+    );
+
+    // Bind UDP first; wait for viewer to say Hello.
+    let cfg = UdpTransportConfig {
+        session_id: 0, // client picks
+        ..Default::default()
+    };
+    let transport = Arc::new(
+        CustomUdpTransport::bind(args.bind, cfg)
+            .await
+            .context("UDP bind")?,
+    );
+    info!(local = ?transport.local_addr()?, "listening");
+
+    // Wait for Hello, send HelloAck.
+    let session_id: u64 = 0xDEADBEEF; // stable ID for Phase 0; randomize in Plan 4
+    let bitrate_bps = args.bitrate_mbps.saturating_mul(1_000_000);
+    let req = host_handshake(
+        &*transport,
+        session_id,
+        now_monotonic_us(),
+        bitrate_bps,
+        Duration::from_secs(60),
+    )
+    .await
+    .context("handshake")?;
+    info!(?req, "handshake complete");
+
+    // Build producer after handshake so the viewer's negotiated params can
+    // eventually influence encoder setup (Phase 0 keeps this fixed).
+    let mut producer = DxgiNvencProducer::new(&dev, &output, bitrate_bps).context("producer")?;
+
+    // Spawn video loop.
+    let tx_video = Arc::clone(&transport);
+    let video = tokio::spawn(async move {
+        loop {
+            match producer.next_frame().await {
+                Ok(frame) => {
+                    if let Err(e) = tx_video.send_video(frame).await {
+                        warn!(?e, "send_video error; continuing");
+                    }
+                }
+                Err(e) => {
+                    warn!(?e, "producer error; continuing");
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+        }
+    });
+
+    // Spawn input injection loop.
+    let rx_input = Arc::clone(&transport);
+    let injector = SendInputInjector::new();
+    let input = tokio::spawn(async move {
+        loop {
+            match rx_input.recv().await {
+                Ok(ReceivedMessage::Input(ev)) => {
+                    if let Err(e) = injector.inject(ev) {
+                        warn!(?e, "inject error");
+                    }
+                }
+                Ok(ReceivedMessage::Control(ControlMessage::Bye)) => {
+                    info!("peer sent Bye");
+                    break;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    warn!(?e, "recv error");
+                    break;
+                }
+            }
+        }
+    });
+
+    tokio::select! {
+        _ = video => info!("video task ended"),
+        _ = input => info!("input task ended"),
+        _ = tokio::signal::ctrl_c() => info!("ctrl-c received"),
+    }
+    Ok(())
 }
