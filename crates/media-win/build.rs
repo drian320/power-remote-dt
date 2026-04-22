@@ -21,8 +21,11 @@ fn main() {
             );
             let out_dir = env::var("OUT_DIR").unwrap();
             let out_path = PathBuf::from(out_dir).join("nvenc_bindings.rs");
-            std::fs::write(&out_path, "// NVENC SDK not available; bindings are empty.\n")
-                .unwrap();
+            std::fs::write(
+                &out_path,
+                "// NVENC SDK not available; bindings are empty.\n",
+            )
+            .unwrap();
             return;
         }
     };
@@ -47,7 +50,9 @@ fn main() {
         .allowlist_function("NvEncodeAPIGetMaxSupportedVersion")
         .allowlist_var("NV_ENC.*")
         .allowlist_var("NVENC.*")
-        .default_enum_style(bindgen::EnumVariation::Rust { non_exhaustive: false })
+        .default_enum_style(bindgen::EnumVariation::Rust {
+            non_exhaustive: false,
+        })
         .derive_default(true)
         .derive_debug(false)
         .layout_tests(false)
@@ -55,7 +60,5 @@ fn main() {
         .expect("bindgen failed");
 
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap()).join("nvenc_bindings.rs");
-    bindings
-        .write_to_file(&out_path)
-        .expect("write bindings");
+    bindings.write_to_file(&out_path).expect("write bindings");
 }
