@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use prdt_crypto::PubKey;
 use prdt_input_win::RawInputCapturer;
 use prdt_media_win::{
     pick_default_adapter, D3d11Device, D3d11Texture, MfD3d11Consumer, Nv12Renderer, SwapChain,
@@ -43,6 +44,11 @@ struct Args {
     /// Requested FPS.
     #[arg(long, default_value_t = 60u32)]
     fps: u32,
+
+    /// Host's public key in base64 (shown on host startup). Required for
+    /// Noise handshake.
+    #[arg(long)]
+    host_pubkey: String,
 }
 
 fn parse_resolution(s: &str) -> Result<(u32, u32)> {
@@ -300,6 +306,8 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
     let (req_w, req_h) = parse_resolution(&args.resolution)?;
+    let pubkey = PubKey::from_base64(&args.host_pubkey)
+        .map_err(|e| anyhow::anyhow!("invalid --host-pubkey: {e}"))?;
 
     // D3D11 device. Created on the main thread, cloned into the worker so the
     // decoder uses the same device (required for zero-copy texture handoff).
@@ -339,6 +347,7 @@ fn main() -> Result<()> {
         Arc::clone(&shared),
         input_rx,
         args.host,
+        pubkey,
         req_w,
         req_h,
         args.fps,
@@ -368,6 +377,7 @@ fn spawn_worker_tasks(
     shared: Arc<ViewerShared>,
     mut input_rx: mpsc::UnboundedReceiver<InputEvent>,
     host_addr: SocketAddr,
+    pubkey: PubKey,
     req_w: u32,
     req_h: u32,
     req_fps: u32,
@@ -390,6 +400,13 @@ fn spawn_worker_tasks(
         };
         transport.configure_peer(host_addr).await;
         info!(%host_addr, local = ?transport.local_addr().ok(), "viewer transport ready");
+
+        // Noise client handshake first (establishes encrypted channel).
+        if let Err(e) = transport.handshake_as_client(&pubkey).await {
+            warn!(?e, "Noise client handshake failed");
+            return;
+        }
+        tracing::info!("Noise handshake complete");
 
         // Handshake.
         let req = HelloRequest {
