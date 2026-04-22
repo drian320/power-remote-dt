@@ -1,5 +1,5 @@
-/// Protocol-level error surface. Intentionally small - the caller can
-/// downcast `Other` for edge cases.
+/// Protocol-level error surface. Intentionally small and closed; add a
+/// variant if a new failure mode appears rather than stuffing into a catch-all.
 #[derive(Debug, thiserror::Error)]
 pub enum ProtocolError {
     #[error("packet too short: need >= {expected}, got {actual}")]
