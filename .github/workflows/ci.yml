@@ -15,8 +15,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: rustfmt
         run: cargo fmt --all -- --check
-      - name: clippy (protocol, transport のみ)
+      - name: clippy (protocol, transport)
         run: cargo clippy -p prdt-protocol -p prdt-transport --all-targets -- -D warnings
+      - name: clippy (media-win lib only, no GPU tests)
+        run: cargo clippy -p prdt-media-win --lib -- -D warnings
       - name: test (protocol, transport)
         run: cargo test -p prdt-protocol -p prdt-transport --all-targets
       - name: build
