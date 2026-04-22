@@ -1,0 +1,20 @@
+[package]
+name = "prdt-transport"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+prdt-protocol = { path = "../protocol" }
+tokio.workspace = true
+bincode.workspace = true
+bytes.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+reed-solomon-erasure.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "sync", "time", "test-util"] }
+proptest.workspace = true

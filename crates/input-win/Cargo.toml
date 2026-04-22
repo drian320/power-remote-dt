@@ -1,0 +1,9 @@
+[package]
+name = "prdt-input-win"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+prdt-protocol = { path = "../protocol" }

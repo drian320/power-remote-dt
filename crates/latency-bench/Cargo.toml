@@ -1,0 +1,18 @@
+[package]
+name = "prdt-latency-bench"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "prdt-latency-bench"
+path = "src/main.rs"
+
+[dependencies]
+prdt-protocol = { path = "../protocol" }
+prdt-transport = { path = "../transport" }
+tokio.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
