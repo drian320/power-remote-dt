@@ -103,7 +103,7 @@ impl PacketHeader {
 }
 
 #[cfg(test)]
-mod tests {
+mod header_tests {
     use super::*;
 
     #[test]
@@ -180,5 +180,169 @@ mod tests {
         buf[2] = 0xAB;
         let err = PacketHeader::decode(&buf).unwrap_err();
         assert!(matches!(err, ProtocolError::UnknownPacketType(0xAB)));
+    }
+}
+
+/// VideoPacket payload header length (before chunk data).
+pub const VIDEO_PAYLOAD_HDR_LEN: usize = 26;
+
+/// Flags packed into VideoPacket.video_flags byte.
+pub mod video_flags {
+    pub const IS_KEYFRAME: u8 = 0b0000_0001;
+    pub const IS_PARITY: u8 = 0b0000_0010;
+}
+
+/// A single video chunk on the wire. For a given frame_seq, the receiver
+/// collects all chunks with `chunk_idx in [0, source_chunks + parity_chunks)`
+/// and reconstructs the frame via FEC if necessary.
+///
+/// Payload layout (little-endian, starts at byte 16 of the UDP datagram):
+/// ```text
+/// offset | size | field
+/// 0      | 8    | frame_seq
+/// 8      | 8    | timestamp_host_us
+/// 16     | 2    | chunk_idx
+/// 18     | 2    | source_chunks (k)
+/// 20     | 2    | parity_chunks (m)
+/// 22     | 1    | video_flags
+/// 23     | 1    | reserved
+/// 24     | 2    | payload_bytes (valid bytes inside this chunk)
+/// 26     | N    | chunk_payload (up to DEFAULT_CHUNK_PAYLOAD_LEN)
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoPacket {
+    pub frame_seq: u64,
+    pub timestamp_host_us: u64,
+    pub chunk_idx: u16,
+    pub source_chunks: u16,
+    pub parity_chunks: u16,
+    pub video_flags: u8,
+    pub payload_bytes: u16,
+    pub chunk_payload: Vec<u8>,
+}
+
+impl VideoPacket {
+    pub fn is_keyframe(&self) -> bool {
+        self.video_flags & video_flags::IS_KEYFRAME != 0
+    }
+
+    pub fn is_parity(&self) -> bool {
+        self.video_flags & video_flags::IS_PARITY != 0
+    }
+
+    /// Serialize into a buffer (caller must prepend PacketHeader separately).
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(VIDEO_PAYLOAD_HDR_LEN + self.chunk_payload.len());
+        out.extend_from_slice(&self.frame_seq.to_le_bytes());
+        out.extend_from_slice(&self.timestamp_host_us.to_le_bytes());
+        out.extend_from_slice(&self.chunk_idx.to_le_bytes());
+        out.extend_from_slice(&self.source_chunks.to_le_bytes());
+        out.extend_from_slice(&self.parity_chunks.to_le_bytes());
+        out.push(self.video_flags);
+        out.push(0); // reserved
+        out.extend_from_slice(&self.payload_bytes.to_le_bytes());
+        out.extend_from_slice(&self.chunk_payload);
+        out
+    }
+
+    /// Parse from a payload slice (body-only, not including common 16B header).
+    pub fn decode(buf: &[u8]) -> Result<Self, ProtocolError> {
+        if buf.len() < VIDEO_PAYLOAD_HDR_LEN {
+            return Err(ProtocolError::PacketTooShort {
+                expected: VIDEO_PAYLOAD_HDR_LEN,
+                actual: buf.len(),
+            });
+        }
+        let frame_seq = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+        let timestamp_host_us = u64::from_le_bytes(buf[8..16].try_into().unwrap());
+        let chunk_idx = u16::from_le_bytes(buf[16..18].try_into().unwrap());
+        let source_chunks = u16::from_le_bytes(buf[18..20].try_into().unwrap());
+        let parity_chunks = u16::from_le_bytes(buf[20..22].try_into().unwrap());
+        let video_flags = buf[22];
+        let _reserved = buf[23];
+        let payload_bytes = u16::from_le_bytes(buf[24..26].try_into().unwrap());
+
+        let expected_payload_end = VIDEO_PAYLOAD_HDR_LEN + payload_bytes as usize;
+        if buf.len() < expected_payload_end {
+            return Err(ProtocolError::PayloadLengthMismatch {
+                header: payload_bytes as u32,
+                actual: buf.len() - VIDEO_PAYLOAD_HDR_LEN,
+            });
+        }
+        let chunk_payload = buf[VIDEO_PAYLOAD_HDR_LEN..expected_payload_end].to_vec();
+        Ok(Self {
+            frame_seq,
+            timestamp_host_us,
+            chunk_idx,
+            source_chunks,
+            parity_chunks,
+            video_flags,
+            payload_bytes,
+            chunk_payload,
+        })
+    }
+}
+
+#[cfg(test)]
+mod video_tests {
+    use super::*;
+
+    #[test]
+    fn video_packet_round_trip() {
+        let pkt = VideoPacket {
+            frame_seq: 42,
+            timestamp_host_us: 1_234_567,
+            chunk_idx: 3,
+            source_chunks: 8,
+            parity_chunks: 2,
+            video_flags: video_flags::IS_KEYFRAME,
+            payload_bytes: 5,
+            chunk_payload: vec![0x01, 0x02, 0x03, 0x04, 0x05],
+        };
+        let buf = pkt.encode();
+        assert_eq!(buf.len(), VIDEO_PAYLOAD_HDR_LEN + 5);
+        let back = VideoPacket::decode(&buf).unwrap();
+        assert_eq!(back, pkt);
+        assert!(back.is_keyframe());
+        assert!(!back.is_parity());
+    }
+
+    #[test]
+    fn video_packet_parity_flag() {
+        let pkt = VideoPacket {
+            frame_seq: 1,
+            timestamp_host_us: 0,
+            chunk_idx: 9,
+            source_chunks: 8,
+            parity_chunks: 2,
+            video_flags: video_flags::IS_PARITY,
+            payload_bytes: 0,
+            chunk_payload: vec![],
+        };
+        let buf = pkt.encode();
+        let back = VideoPacket::decode(&buf).unwrap();
+        assert!(back.is_parity());
+        assert!(!back.is_keyframe());
+    }
+
+    #[test]
+    fn video_packet_rejects_short() {
+        let buf = [0u8; 4];
+        assert!(VideoPacket::decode(&buf).is_err());
+    }
+
+    #[test]
+    fn video_packet_rejects_length_mismatch() {
+        // Header says payload_bytes = 99 but only 3 bytes of payload present.
+        let mut buf = vec![0u8; VIDEO_PAYLOAD_HDR_LEN];
+        buf[24..26].copy_from_slice(&99u16.to_le_bytes());
+        buf.extend_from_slice(&[0xAA, 0xBB, 0xCC]);
+        assert!(matches!(
+            VideoPacket::decode(&buf).unwrap_err(),
+            ProtocolError::PayloadLengthMismatch {
+                header: 99,
+                actual: 3
+            }
+        ));
     }
 }
