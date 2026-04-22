@@ -5,7 +5,12 @@ use crate::error::TransportError;
 /// Default FEC parameters for Phase 0. See spec §5.7.
 pub const DEFAULT_K: usize = 8;
 pub const DEFAULT_M: usize = 2;
-pub const MAX_SHARDS: usize = 32 + 16; // defensive cap; 1 frame max 32 source + 16 parity
+/// Defensive cap: k+m must not exceed this. Raised in line with
+/// packetize::MAX_SOURCE_CHUNKS to accommodate 4K60 high-bitrate frames.
+/// Reed-Solomon GF(8) supports up to 255 shards total, so 192 is well
+/// within the math limit while giving us headroom for future dynamic
+/// FEC sizing (Plan 4).
+pub const MAX_SHARDS: usize = 128 + 32;
 
 /// Wraps a ReedSolomon codec with per-frame shard encoding/decoding.
 ///
