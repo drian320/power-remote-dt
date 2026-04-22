@@ -12,6 +12,6 @@ pub use error::ProtocolError;
 pub use frame::{Codec, EncodedFrame};
 pub use input::{InputEvent, MouseButton};
 pub use wire::{
-    video_flags, PacketHeader, PacketType, VideoPacket, DEFAULT_CHUNK_PAYLOAD_LEN, HEADER_LEN,
-    MAGIC, PROTOCOL_VERSION, VIDEO_PAYLOAD_HDR_LEN,
+    video_flags, InputPacket, PacketHeader, PacketType, VideoPacket, DEFAULT_CHUNK_PAYLOAD_LEN,
+    HEADER_LEN, INPUT_PAYLOAD_HDR_LEN, MAGIC, PROTOCOL_VERSION, VIDEO_PAYLOAD_HDR_LEN,
 };

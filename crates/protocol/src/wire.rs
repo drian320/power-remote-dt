@@ -1,4 +1,5 @@
 use crate::error::ProtocolError;
+use crate::input::{InputEvent, MouseButton};
 
 /// Magic byte identifying our protocol.
 pub const MAGIC: u8 = 0x52; // 'R'
@@ -343,6 +344,185 @@ mod video_tests {
                 header: 99,
                 actual: 3
             }
+        ));
+    }
+}
+
+/// InputPacket fixed-prefix length (before event-specific body).
+pub const INPUT_PAYLOAD_HDR_LEN: usize = 17;
+
+/// Wire representation of a single input event.
+///
+/// Layout (little-endian, after 16B common header):
+/// ```text
+/// offset | size | field
+/// 0      | 8    | input_seq
+/// 8      | 8    | timestamp_viewer_us
+/// 16     | 1    | event_kind
+/// 17     | N    | event_body  (kind-specific)
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputPacket {
+    pub input_seq: u64,
+    pub timestamp_viewer_us: u64,
+    pub event: InputEvent,
+}
+
+impl InputPacket {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(INPUT_PAYLOAD_HDR_LEN + 9);
+        out.extend_from_slice(&self.input_seq.to_le_bytes());
+        out.extend_from_slice(&self.timestamp_viewer_us.to_le_bytes());
+        out.push(self.event.kind_u8());
+        match self.event {
+            InputEvent::MouseMove { x, y, absolute } => {
+                out.extend_from_slice(&x.to_le_bytes());
+                out.extend_from_slice(&y.to_le_bytes());
+                out.push(absolute as u8);
+            }
+            InputEvent::MouseButton { button, pressed } => {
+                out.push(button as u8);
+                out.push(pressed as u8);
+            }
+            InputEvent::MouseWheel { dx, dy } => {
+                out.extend_from_slice(&dx.to_le_bytes());
+                out.extend_from_slice(&dy.to_le_bytes());
+            }
+            InputEvent::Key { scancode, pressed } => {
+                out.extend_from_slice(&scancode.to_le_bytes());
+                out.push(pressed as u8);
+            }
+        }
+        out
+    }
+
+    pub fn decode(buf: &[u8]) -> Result<Self, ProtocolError> {
+        if buf.len() < INPUT_PAYLOAD_HDR_LEN {
+            return Err(ProtocolError::PacketTooShort {
+                expected: INPUT_PAYLOAD_HDR_LEN,
+                actual: buf.len(),
+            });
+        }
+        let input_seq = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+        let timestamp_viewer_us = u64::from_le_bytes(buf[8..16].try_into().unwrap());
+        let event_kind = buf[16];
+        let body = &buf[17..];
+        let event = match event_kind {
+            0 => {
+                if body.len() < 9 {
+                    return Err(ProtocolError::PacketTooShort {
+                        expected: INPUT_PAYLOAD_HDR_LEN + 9,
+                        actual: buf.len(),
+                    });
+                }
+                InputEvent::MouseMove {
+                    x: i32::from_le_bytes(body[0..4].try_into().unwrap()),
+                    y: i32::from_le_bytes(body[4..8].try_into().unwrap()),
+                    absolute: body[8] != 0,
+                }
+            }
+            1 => {
+                if body.len() < 2 {
+                    return Err(ProtocolError::PacketTooShort {
+                        expected: INPUT_PAYLOAD_HDR_LEN + 2,
+                        actual: buf.len(),
+                    });
+                }
+                let button = MouseButton::from_u8(body[0])
+                    .ok_or(ProtocolError::UnknownEventKind(body[0]))?;
+                InputEvent::MouseButton {
+                    button,
+                    pressed: body[1] != 0,
+                }
+            }
+            2 => {
+                if body.len() < 8 {
+                    return Err(ProtocolError::PacketTooShort {
+                        expected: INPUT_PAYLOAD_HDR_LEN + 8,
+                        actual: buf.len(),
+                    });
+                }
+                InputEvent::MouseWheel {
+                    dx: i32::from_le_bytes(body[0..4].try_into().unwrap()),
+                    dy: i32::from_le_bytes(body[4..8].try_into().unwrap()),
+                }
+            }
+            3 => {
+                if body.len() < 5 {
+                    return Err(ProtocolError::PacketTooShort {
+                        expected: INPUT_PAYLOAD_HDR_LEN + 5,
+                        actual: buf.len(),
+                    });
+                }
+                InputEvent::Key {
+                    scancode: u32::from_le_bytes(body[0..4].try_into().unwrap()),
+                    pressed: body[4] != 0,
+                }
+            }
+            other => return Err(ProtocolError::UnknownEventKind(other)),
+        };
+        Ok(Self {
+            input_seq,
+            timestamp_viewer_us,
+            event,
+        })
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+
+    #[test]
+    fn input_packet_all_kinds_round_trip() {
+        let cases = [
+            InputEvent::MouseMove {
+                x: 100,
+                y: -50,
+                absolute: true,
+            },
+            InputEvent::MouseMove {
+                x: -1,
+                y: 1,
+                absolute: false,
+            },
+            InputEvent::MouseButton {
+                button: MouseButton::Left,
+                pressed: true,
+            },
+            InputEvent::MouseButton {
+                button: MouseButton::X2,
+                pressed: false,
+            },
+            InputEvent::MouseWheel { dx: 0, dy: 120 },
+            InputEvent::Key {
+                scancode: 0x1E,
+                pressed: true,
+            },
+            InputEvent::Key {
+                scancode: 0xE0_5D,
+                pressed: false,
+            },
+        ];
+        for (i, ev) in cases.iter().enumerate() {
+            let p = InputPacket {
+                input_seq: i as u64,
+                timestamp_viewer_us: 100 + i as u64,
+                event: *ev,
+            };
+            let buf = p.encode();
+            let back = InputPacket::decode(&buf).unwrap();
+            assert_eq!(back, p, "round trip failed for {:?}", ev);
+        }
+    }
+
+    #[test]
+    fn input_packet_rejects_unknown_kind() {
+        let mut buf = vec![0u8; INPUT_PAYLOAD_HDR_LEN + 4];
+        buf[16] = 0x42;
+        assert!(matches!(
+            InputPacket::decode(&buf).unwrap_err(),
+            ProtocolError::UnknownEventKind(0x42),
         ));
     }
 }
