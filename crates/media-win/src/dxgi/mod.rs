@@ -4,5 +4,5 @@
 pub mod duplication;
 pub mod output;
 
-pub use duplication::DesktopDuplication;
+pub use duplication::{AcquiredFrame, DesktopDuplication};
 pub use output::{enumerate_outputs_for_adapter, OutputInfo};
