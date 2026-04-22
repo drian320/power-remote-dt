@@ -1,0 +1,313 @@
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+use bytes::Bytes;
+use prdt_protocol::{frame::Codec, EncodedFrame, VideoPacket};
+
+use crate::error::TransportError;
+use crate::fec::FecCodec;
+
+pub const DEFAULT_ASSEMBLY_TIMEOUT: Duration = Duration::from_millis(100);
+pub const STALE_SEQ_WINDOW: u64 = 8;
+
+/// Per-frame partial state.
+#[derive(Debug)]
+struct Partial {
+    first_seen: Instant,
+    source_chunks: u16,
+    parity_chunks: u16,
+    // chunk_idx → payload (full-length shard, payload_bytes for valid length of last source chunk)
+    chunks: HashMap<u16, Vec<u8>>,
+    // payload_bytes of each source chunk we've received (idx → bytes)
+    source_payload_bytes: HashMap<u16, u16>,
+    is_keyframe: bool,
+}
+
+/// Reassembles VideoPackets into EncodedFrames.
+///
+/// Internally tracks many in-flight frames. Call `try_pop_ready` to retrieve
+/// newly-completed frames. Call `purge` periodically to drop timed-out frames.
+pub struct FrameAssembler {
+    partials: HashMap<u64, Partial>,
+    /// Highest frame_seq we've ever completed or declined. Used for stale-drop.
+    high_water_seq: u64,
+    timeout: Duration,
+    width: u32,
+    height: u32,
+    codec: Codec,
+}
+
+/// Outcome of feeding one VideoPacket.
+#[derive(Debug)]
+pub enum FeedResult {
+    /// Still waiting for more chunks.
+    Pending,
+    /// This chunk was dropped (stale, or frame already completed).
+    Stale,
+    /// Frame is fully recovered (either all source chunks arrived, or FEC
+    /// reconstructed the missing ones).
+    Complete(EncodedFrame),
+}
+
+impl FrameAssembler {
+    pub fn new(width: u32, height: u32, codec: Codec) -> Self {
+        Self {
+            partials: HashMap::new(),
+            high_water_seq: 0,
+            timeout: DEFAULT_ASSEMBLY_TIMEOUT,
+            width,
+            height,
+            codec,
+        }
+    }
+
+    pub fn set_timeout(&mut self, d: Duration) {
+        self.timeout = d;
+    }
+
+    /// Feed one VideoPacket. `fec` is used for reconstruction if enough
+    /// chunks have arrived but some are missing.
+    pub fn feed(&mut self, pkt: VideoPacket, fec: &FecCodec) -> Result<FeedResult, TransportError> {
+        // Drop stale frames (older than high_water - window).
+        if pkt.frame_seq + STALE_SEQ_WINDOW < self.high_water_seq.saturating_add(1) {
+            return Ok(FeedResult::Stale);
+        }
+
+        let total = pkt.source_chunks as usize + pkt.parity_chunks as usize;
+        let shard_len = pkt.chunk_payload.len();
+        let is_source = !pkt.is_parity();
+        let is_kf = pkt.is_keyframe();
+        let payload_bytes = pkt.payload_bytes;
+        let chunk_idx = pkt.chunk_idx;
+        let frame_seq = pkt.frame_seq;
+        let ts = pkt.timestamp_host_us;
+        let source_chunks = pkt.source_chunks;
+        let parity_chunks = pkt.parity_chunks;
+
+        let entry = self.partials.entry(frame_seq).or_insert_with(|| Partial {
+            first_seen: Instant::now(),
+            source_chunks,
+            parity_chunks,
+            chunks: HashMap::new(),
+            source_payload_bytes: HashMap::new(),
+            is_keyframe: is_kf,
+        });
+
+        // Paranoia: if a later packet disagrees on source/parity counts, trust the first.
+        if entry.chunks.contains_key(&chunk_idx) {
+            return Ok(FeedResult::Pending);
+        }
+        entry.chunks.insert(chunk_idx, pkt.chunk_payload);
+        if is_source {
+            entry.source_payload_bytes.insert(chunk_idx, payload_bytes);
+        }
+        if is_kf {
+            entry.is_keyframe = true;
+        }
+
+        let have = entry.chunks.len();
+        let k = entry.source_chunks as usize;
+
+        if have >= k {
+            // Attempt reconstruction (possibly trivial if all source present).
+            let seq = frame_seq;
+            let frame_is_kf = entry.is_keyframe;
+            let maybe_frame = self.try_complete(seq, total, shard_len, ts, frame_is_kf, fec);
+            match maybe_frame {
+                Ok(Some(frame)) => {
+                    self.high_water_seq = self.high_water_seq.max(seq);
+                    self.partials.remove(&seq);
+                    return Ok(FeedResult::Complete(frame));
+                }
+                Ok(None) => return Ok(FeedResult::Pending),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(FeedResult::Pending)
+    }
+
+    fn try_complete(
+        &mut self,
+        seq: u64,
+        total: usize,
+        shard_len: usize,
+        ts: u64,
+        is_keyframe: bool,
+        fec: &FecCodec,
+    ) -> Result<Option<EncodedFrame>, TransportError> {
+        let entry = match self.partials.get(&seq) {
+            Some(e) => e,
+            None => return Ok(None),
+        };
+        let k = entry.source_chunks as usize;
+        if entry.chunks.len() < k {
+            return Ok(None);
+        }
+
+        // Build k+m shard vector in index order with None for missing slots.
+        let mut shards: Vec<Option<Vec<u8>>> = (0..total)
+            .map(|i| entry.chunks.get(&(i as u16)).cloned())
+            .collect();
+
+        // If any source chunk missing, reconstruct.
+        let missing_source = (0..k).any(|i| shards[i].is_none());
+        let source: Vec<Vec<u8>> = if missing_source {
+            fec.reconstruct(shards.clone()).map_err(|e| match e {
+                TransportError::FecFailed { have, need, .. } => TransportError::FecFailed {
+                    frame_seq: seq,
+                    have,
+                    need,
+                },
+                other => other,
+            })?
+        } else {
+            // All source present; take them directly.
+            shards.drain(..k).map(|s| s.unwrap()).collect()
+        };
+
+        // Stitch source shards back into a single EncodedFrame, honouring
+        // payload_bytes for the (possibly) partial last chunk.
+        let total_bytes = Self::compute_total_bytes(k, shard_len, entry);
+        let mut buf = Vec::with_capacity(total_bytes);
+        for (i, shard) in source.iter().enumerate().take(k) {
+            let valid = entry
+                .source_payload_bytes
+                .get(&(i as u16))
+                .copied()
+                .unwrap_or(shard_len as u16) as usize;
+            buf.extend_from_slice(&shard[..valid]);
+        }
+
+        let _ = entry.parity_chunks; // silence unused-field lint if ever triggered
+
+        Ok(Some(EncodedFrame {
+            seq,
+            timestamp_host_us: ts,
+            is_keyframe,
+            nal_units: Bytes::from(buf),
+            width: self.width,
+            height: self.height,
+            codec: self.codec,
+        }))
+    }
+
+    fn compute_total_bytes(k: usize, shard_len: usize, entry: &Partial) -> usize {
+        let mut total = 0;
+        for i in 0..k {
+            let valid = entry
+                .source_payload_bytes
+                .get(&(i as u16))
+                .copied()
+                .unwrap_or(shard_len as u16) as usize;
+            total += valid;
+        }
+        total
+    }
+
+    /// Drop frames older than `self.timeout`. Returns Vec of frame_seqs
+    /// that were purged; caller can use this to trigger IDR requests.
+    pub fn purge(&mut self) -> Vec<u64> {
+        let now = Instant::now();
+        let stale: Vec<u64> = self
+            .partials
+            .iter()
+            .filter(|(_, p)| now.duration_since(p.first_seen) > self.timeout)
+            .map(|(seq, _)| *seq)
+            .collect();
+        for seq in &stale {
+            self.partials.remove(seq);
+            self.high_water_seq = self.high_water_seq.max(*seq);
+        }
+        stale
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::packetize::packetize;
+    use bytes::Bytes;
+
+    fn make_frame(seq: u64, bytes: &[u8]) -> EncodedFrame {
+        EncodedFrame {
+            seq,
+            timestamp_host_us: seq * 1000,
+            is_keyframe: true,
+            nal_units: Bytes::copy_from_slice(bytes),
+            width: 1920,
+            height: 1080,
+            codec: Codec::H265,
+        }
+    }
+
+    #[test]
+    fn assembler_trivial_all_chunks() {
+        let fec = FecCodec::new(4, 2).unwrap();
+        let frame = make_frame(1, &[0xAA; 250]);
+        let pkts = packetize(&frame, &fec, 100).unwrap();
+        let mut asm = FrameAssembler::new(1920, 1080, Codec::H265);
+
+        // Feed source chunks only; skip parity.
+        let mut last = FeedResult::Pending;
+        for p in pkts.iter().take(4).cloned() {
+            last = asm.feed(p, &fec).unwrap();
+        }
+        match last {
+            FeedResult::Complete(f) => {
+                assert_eq!(f.seq, 1);
+                assert_eq!(&f.nal_units[..], &[0xAA; 250][..]);
+                assert!(f.is_keyframe);
+            }
+            other => panic!("expected Complete, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn assembler_reconstructs_missing_source() {
+        let fec = FecCodec::new(4, 2).unwrap();
+        let frame = make_frame(1, &[0xCD; 200]);
+        let mut pkts = packetize(&frame, &fec, 100).unwrap();
+        // Drop source chunk idx 1.
+        pkts.remove(1);
+        let mut asm = FrameAssembler::new(1920, 1080, Codec::H265);
+
+        let mut final_result: Option<EncodedFrame> = None;
+        for p in pkts {
+            if let FeedResult::Complete(f) = asm.feed(p, &fec).unwrap() {
+                final_result = Some(f);
+                break;
+            }
+        }
+        let f = final_result.expect("should complete via FEC");
+        assert_eq!(&f.nal_units[..], &[0xCD; 200][..]);
+    }
+
+    #[test]
+    fn assembler_drops_stale() {
+        let fec = FecCodec::new(4, 2).unwrap();
+        let f1 = make_frame(100, &[0; 10]);
+        let pkts_f1 = packetize(&f1, &fec, 100).unwrap();
+        let mut asm = FrameAssembler::new(1920, 1080, Codec::H265);
+        for p in pkts_f1.into_iter().take(4) {
+            asm.feed(p, &fec).unwrap();
+        }
+        // Now try a stale seq = 50; high_water_seq is now 100.
+        let stale_frame = make_frame(50, &[0; 10]);
+        let stale_pkts = packetize(&stale_frame, &fec, 100).unwrap();
+        let r = asm.feed(stale_pkts[0].clone(), &fec).unwrap();
+        assert!(matches!(r, FeedResult::Stale));
+    }
+
+    #[test]
+    fn assembler_purges_timed_out() {
+        let fec = FecCodec::new(4, 2).unwrap();
+        let frame = make_frame(1, &[0; 10]);
+        let pkts = packetize(&frame, &fec, 100).unwrap();
+        let mut asm = FrameAssembler::new(1920, 1080, Codec::H265);
+        asm.set_timeout(Duration::from_millis(1));
+        asm.feed(pkts[0].clone(), &fec).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        let purged = asm.purge();
+        assert_eq!(purged, vec![1]);
+    }
+}
