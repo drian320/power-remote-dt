@@ -14,6 +14,7 @@ serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 reed-solomon-erasure.workspace = true
+async-trait = "0.1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "sync", "time", "test-util"] }
