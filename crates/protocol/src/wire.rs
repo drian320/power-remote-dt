@@ -1,3 +1,4 @@
+use crate::control::ControlMessage;
 use crate::error::ProtocolError;
 use crate::input::{InputEvent, MouseButton};
 
@@ -523,6 +524,93 @@ mod input_tests {
         assert!(matches!(
             InputPacket::decode(&buf).unwrap_err(),
             ProtocolError::UnknownEventKind(0x42),
+        ));
+    }
+}
+
+/// Serialize a ControlMessage as: [1B kind][bincode body].
+pub fn encode_control(msg: &ControlMessage) -> Result<Vec<u8>, ProtocolError> {
+    let kind = msg.kind_u8();
+    let mut out = Vec::with_capacity(32);
+    out.push(kind);
+    bincode::serialize_into(&mut out, msg)?;
+    Ok(out)
+}
+
+/// Deserialize a ControlMessage from the same layout.
+pub fn decode_control(buf: &[u8]) -> Result<ControlMessage, ProtocolError> {
+    if buf.is_empty() {
+        return Err(ProtocolError::PacketTooShort {
+            expected: 1,
+            actual: 0,
+        });
+    }
+    let kind = buf[0];
+    // We don't trust `kind` blindly; bincode will decode the whole tagged enum.
+    // We keep the leading byte as a fast-path dispatch hint for future optimization.
+    if kind > 7 {
+        return Err(ProtocolError::UnknownControlKind(kind));
+    }
+    let msg: ControlMessage = bincode::deserialize(&buf[1..])?;
+    Ok(msg)
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+    use crate::frame::Codec;
+
+    #[test]
+    fn control_hello_round_trip() {
+        let msg = ControlMessage::Hello {
+            protocol_version: 1,
+            req_width: 3840,
+            req_height: 2160,
+            req_fps: 60,
+            codec: Codec::H265,
+        };
+        let buf = encode_control(&msg).unwrap();
+        assert_eq!(buf[0], msg.kind_u8());
+        let back = decode_control(&buf).unwrap();
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn control_all_kinds_round_trip() {
+        let cases = [
+            ControlMessage::Bye,
+            ControlMessage::RequestIdr,
+            ControlMessage::Ping {
+                ping_seq: 1,
+                viewer_ts_us: 2,
+            },
+            ControlMessage::Pong {
+                ping_seq: 1,
+                viewer_ts_us: 2,
+                host_ts_us: 3,
+            },
+            ControlMessage::SetBitrate {
+                target_bps: 50_000_000,
+            },
+            ControlMessage::Stats {
+                loss_rate_ppm: 500,
+                fps_millis: 59_940,
+                bitrate_bps: 50_000_000,
+            },
+        ];
+        for msg in cases {
+            let buf = encode_control(&msg).unwrap();
+            let back = decode_control(&buf).unwrap();
+            assert_eq!(back, msg);
+        }
+    }
+
+    #[test]
+    fn control_rejects_unknown_kind() {
+        let buf = vec![0xFF];
+        assert!(matches!(
+            decode_control(&buf).unwrap_err(),
+            ProtocolError::UnknownControlKind(0xFF),
         ));
     }
 }
