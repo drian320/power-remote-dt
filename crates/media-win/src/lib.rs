@@ -9,6 +9,7 @@ pub mod dxgi;
 pub mod error;
 pub mod mf;
 pub mod nvenc;
+pub mod pipeline;
 pub mod platform;
 pub mod synthetic;
 
@@ -18,4 +19,5 @@ pub use dxgi::{enumerate_outputs_for_adapter, AcquiredFrame, DesktopDuplication,
 pub use error::{MediaError, Result};
 pub use mf::H265Decoder;
 pub use nvenc::{EncodedH265Frame, NvEncLibrary, NvencEncoder, NvencEncoderConfig};
+pub use pipeline::{DxgiNvencProducer, MfD3d11Consumer};
 pub use platform::MmcssScope;
