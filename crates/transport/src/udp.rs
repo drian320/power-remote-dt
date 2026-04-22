@@ -43,6 +43,7 @@ pub struct CustomUdpTransport {
     peer: AsyncMutex<Option<SocketAddr>>, // set after first packet received or configure_peer()
     fec: FecCodec,
     input_seq: AsyncMutex<u64>,
+    assembler: AsyncMutex<crate::assembler::FrameAssembler>,
 }
 
 impl CustomUdpTransport {
@@ -55,6 +56,11 @@ impl CustomUdpTransport {
             peer: AsyncMutex::new(None),
             fec,
             input_seq: AsyncMutex::new(0),
+            assembler: AsyncMutex::new(crate::assembler::FrameAssembler::new(
+                1920,
+                1080,
+                prdt_protocol::frame::Codec::H265,
+            )),
         })
     }
 
@@ -135,11 +141,74 @@ impl Transport for CustomUdpTransport {
     }
 
     async fn recv(&self) -> Result<ReceivedMessage, TransportError> {
-        // Recv path is wired up in the next task (Task 19).
-        Err(TransportError::Io(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "recv not yet implemented (see Task 19)",
-        )))
+        let mut buf = vec![0u8; 2048];
+        loop {
+            let (n, from) = self.socket.recv_from(&mut buf).await?;
+            // Record peer on first packet if not yet set.
+            {
+                let mut p = self.peer.lock().await;
+                if p.is_none() {
+                    *p = Some(from);
+                }
+            }
+
+            let hdr = match prdt_protocol::wire::PacketHeader::decode(&buf[..n]) {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::warn!(?e, "dropping malformed packet");
+                    continue;
+                }
+            };
+            if hdr.session_id != self.cfg.session_id && self.cfg.session_id != 0 {
+                tracing::warn!(
+                    "session mismatch: got {}, expected {}",
+                    hdr.session_id,
+                    self.cfg.session_id
+                );
+                continue;
+            }
+            let body_end = HEADER_LEN + hdr.payload_len as usize;
+            if body_end > n {
+                tracing::warn!(
+                    "truncated packet: hdr.payload_len={} but only {} bytes received",
+                    hdr.payload_len,
+                    n - HEADER_LEN,
+                );
+                continue;
+            }
+            let body = &buf[HEADER_LEN..body_end];
+
+            match hdr.packet_type {
+                PacketType::Video => {
+                    let vp = match prdt_protocol::VideoPacket::decode(body) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::warn!(?e, "bad VideoPacket");
+                            continue;
+                        }
+                    };
+                    let mut asm = self.assembler.lock().await;
+                    match asm.feed(vp, &self.fec) {
+                        Ok(crate::FeedResult::Complete(frame)) => {
+                            return Ok(ReceivedMessage::Video(frame));
+                        }
+                        Ok(crate::FeedResult::Pending) | Ok(crate::FeedResult::Stale) => continue,
+                        Err(e) => {
+                            tracing::warn!(?e, "assembler error");
+                            continue;
+                        }
+                    }
+                }
+                PacketType::Input => {
+                    let ip = prdt_protocol::InputPacket::decode(body)?;
+                    return Ok(ReceivedMessage::Input(ip.event));
+                }
+                PacketType::Control => {
+                    let msg = prdt_protocol::decode_control(body)?;
+                    return Ok(ReceivedMessage::Control(msg));
+                }
+            }
+        }
     }
 }
 
