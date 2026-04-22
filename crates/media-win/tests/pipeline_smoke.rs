@@ -67,16 +67,23 @@ async fn producer_to_consumer_end_to_end() {
     eprintln!("submitted {frames_submitted} frames, first_idr_seen={idr_seen}");
     assert!(idr_seen, "first frame should be IDR");
 
-    let latest = consumer.take_latest_frame();
+    let subres = consumer.last_subresource_index();
+    let latest = consumer.take_latest_texture();
     match latest {
-        Some(bytes) => {
-            eprintln!("consumer decoded output: {} bytes", bytes.len());
-            // NV12 for W x H = W*H*1.5, possibly with alignment padding.
-            assert!(
-                bytes.len() >= (width * height) as usize,
-                "decoded buffer smaller than Y plane: {} < {}",
-                bytes.len(),
-                width * height
+        Some(tex) => {
+            eprintln!(
+                "consumer decoded output: NV12 texture {}x{} (MFT subresource idx {})",
+                tex.width(),
+                tex.height(),
+                subres
+            );
+            // Our wrapper reports the decoder's configured (not aligned) dims.
+            assert_eq!(tex.width(), width);
+            assert_eq!(tex.height(), height);
+            assert_eq!(
+                tex.format(),
+                prdt_media_win::TextureFormat::Nv12,
+                "decoded texture must be NV12"
             );
         }
         None => {

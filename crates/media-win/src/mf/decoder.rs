@@ -15,17 +15,19 @@
 //! The decoder holds an `IMFTransform` plus the `D3d11Device` it was bound
 //! to (to keep the underlying device alive for as long as the MFT is). Per
 //! Plan 2c Task 4, the `process_input` / `process_output` methods below
-//! implement the encode→decode frame pump. Output is delivered as CPU-side
-//! NV12 bytes for Phase 0; zero-copy `IMFDXGIBuffer` extraction is deferred
-//! to Phase 3.
+//! implement the encode→decode frame pump. `process_output` returns a
+//! CPU-side NV12 `Vec<u8>` (kept for diagnostics and back-compat), while
+//! `process_output_texture` (Plan 3 Task 2) delivers the decoded frame as a
+//! zero-copy `ID3D11Texture2D` via `IMFDXGIBuffer::GetResource`.
 
 use std::sync::OnceLock;
 
 use windows::core::Interface;
+use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Media::MediaFoundation::{
-    IMFActivate, IMFDXGIDeviceManager, IMFTransform, MFCreateDXGIDeviceManager, MFCreateMediaType,
-    MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFStartup, MFTEnumEx,
-    MFVideoFormat_HEVC, MFVideoFormat_NV12, MFSTARTUP_FULL, MFT_CATEGORY_VIDEO_DECODER,
+    IMFActivate, IMFDXGIBuffer, IMFDXGIDeviceManager, IMFTransform, MFCreateDXGIDeviceManager,
+    MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFStartup,
+    MFTEnumEx, MFVideoFormat_HEVC, MFVideoFormat_NV12, MFSTARTUP_FULL, MFT_CATEGORY_VIDEO_DECODER,
     MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_LOCALMFT,
     MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
     MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
@@ -34,7 +36,7 @@ use windows::Win32::Media::MediaFoundation::{
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 
-use crate::d3d11::D3d11Device;
+use crate::d3d11::{D3d11Device, D3d11Texture, TextureFormat};
 use crate::error::{MediaError, Result};
 
 /// One-shot MF + COM initialization. Stores the stringified error so the
@@ -69,6 +71,11 @@ pub struct H265Decoder {
     width: u32,
     height: u32,
     needs_idr: bool,
+    /// Last subresource index reported by `IMFDXGIBuffer::GetSubresourceIndex`
+    /// on a successful `process_output_texture` call. Phase 0 treats any
+    /// non-zero value as a known-limitation warning (see method docs). Useful
+    /// for smoke-test diagnostics.
+    last_subresource_index: u32,
     /// Kept alive so the MFT's reference to the D3D11 device (via the DXGI
     /// device manager) remains valid for the lifetime of this decoder.
     _dev: D3d11Device,
@@ -201,6 +208,7 @@ impl H265Decoder {
                 width,
                 height,
                 needs_idr: true,
+                last_subresource_index: 0,
                 _dev: dev.clone(),
             })
         }
@@ -216,6 +224,13 @@ impl H265Decoder {
 
     pub fn height(&self) -> u32 {
         self.height
+    }
+
+    /// Subresource index returned by `IMFDXGIBuffer::GetSubresourceIndex` on
+    /// the most recent successful `process_output_texture` call. Defaults to
+    /// 0 before any texture has been extracted.
+    pub fn last_subresource_index(&self) -> u32 {
+        self.last_subresource_index
     }
 
     /// Feed one encoded frame (H.265 NAL units) into the decoder.
@@ -327,6 +342,111 @@ impl H265Decoder {
             std::mem::ManuallyDrop::drop(&mut output_buffer.pEvents);
 
             Ok(Some(bytes))
+        }
+    }
+
+    /// Pull the next decoded frame as a zero-copy GPU texture.
+    ///
+    /// Returns `Ok(None)` if the decoder needs more input. On success the
+    /// returned `D3d11Texture` wraps the `ID3D11Texture2D` held by the MFT's
+    /// output buffer: the COM refcount is incremented by
+    /// `IMFDXGIBuffer::GetResource`, so the underlying texture stays alive
+    /// until the wrapper is dropped.
+    ///
+    /// The returned `width` / `height` come from the decoder's configured
+    /// dimensions (not the raw texture dims, which may be larger due to MFT
+    /// alignment). The format is always NV12.
+    ///
+    /// # Known limitation
+    ///
+    /// MFTs may pool output samples across subresources of a single texture
+    /// array. For Phase 0 we do not inspect `IMFDXGIBuffer::GetSubresourceIndex`
+    /// and treat the returned texture as subresource 0. If the MFT returns a
+    /// non-zero subresource, downstream consumers may read the wrong slice.
+    /// The NVIDIA HW H.265 MFT historically hands out per-frame textures
+    /// (subresource 0), so this works in practice; Plan 3 viewer code can
+    /// inspect the subresource index when needed.
+    pub fn process_output_texture(&mut self) -> Result<Option<D3d11Texture>> {
+        unsafe {
+            let mut output_buffer = MFT_OUTPUT_DATA_BUFFER::default();
+            let mut status: u32 = 0;
+            let mut stream_change_retried = false;
+            loop {
+                match self.mft.ProcessOutput(
+                    0,
+                    std::slice::from_mut(&mut output_buffer),
+                    &mut status,
+                ) {
+                    Ok(()) => break,
+                    Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => {
+                        return Ok(None);
+                    }
+                    Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
+                        if stream_change_retried {
+                            return Err(MediaError::Other(
+                                "MF_E_TRANSFORM_STREAM_CHANGE after renegotiation".into(),
+                            ));
+                        }
+                        self.renegotiate_output_type()?;
+                        stream_change_retried = true;
+                        continue;
+                    }
+                    Err(e) => return Err(MediaError::Other(format!("ProcessOutput: {e}"))),
+                }
+            }
+
+            // Extract the texture via IMFDXGIBuffer without going through a
+            // contiguous CPU copy. Use GetBufferByIndex(0) (do NOT call
+            // ConvertToContiguousBuffer — that would force a CPU-side copy).
+            let mut new_subresource_index = self.last_subresource_index;
+            let extract_result: Result<D3d11Texture> = (|| {
+                let sample = output_buffer
+                    .pSample
+                    .as_ref()
+                    .ok_or_else(|| MediaError::Other("null output sample".into()))?;
+                let buffer = sample
+                    .GetBufferByIndex(0)
+                    .map_err(|e| MediaError::Other(format!("GetBufferByIndex: {e}")))?;
+                let dxgi_buf: IMFDXGIBuffer = buffer
+                    .cast()
+                    .map_err(|e| MediaError::Other(format!("IMFDXGIBuffer cast: {e}")))?;
+
+                // Record the subresource index for diagnostics. MFTs that
+                // pool outputs into a texture array will hand out non-zero
+                // indices; our wrapper currently ignores this.
+                if let Ok(idx) = dxgi_buf.GetSubresourceIndex() {
+                    new_subresource_index = idx;
+                }
+
+                // IMFDXGIBuffer::GetResource is a raw-FFI style method in the
+                // `windows` crate: (riid, ppvobject) -> Result<()>. Feed it
+                // the ID3D11Texture2D IID and receive an Option<T>.
+                let mut out: Option<ID3D11Texture2D> = None;
+                dxgi_buf
+                    .GetResource(
+                        &ID3D11Texture2D::IID,
+                        &mut out as *mut Option<ID3D11Texture2D> as *mut *mut core::ffi::c_void,
+                    )
+                    .map_err(|e| MediaError::Other(format!("GetResource: {e}")))?;
+                let tex =
+                    out.ok_or_else(|| MediaError::Other("GetResource returned null".into()))?;
+
+                Ok(D3d11Texture::from_raw(
+                    tex,
+                    self.width,
+                    self.height,
+                    TextureFormat::Nv12,
+                ))
+            })();
+            self.last_subresource_index = new_subresource_index;
+
+            // Drop ManuallyDrop fields so the sample + events release their
+            // COM refcounts. The ID3D11Texture2D refcount we took above via
+            // GetResource is independent, so the texture outlives the sample.
+            std::mem::ManuallyDrop::drop(&mut output_buffer.pSample);
+            std::mem::ManuallyDrop::drop(&mut output_buffer.pEvents);
+
+            extract_result.map(Some)
         }
     }
 
