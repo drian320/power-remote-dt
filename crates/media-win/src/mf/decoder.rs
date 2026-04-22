@@ -13,28 +13,33 @@
 //!   samples.
 //!
 //! The decoder holds an `IMFTransform` plus the `D3d11Device` it was bound
-//! to (to keep the underlying device alive for as long as the MFT is). The
-//! `process_input` / `process_output` frame pump is added in Plan 2c Task 4.
+//! to (to keep the underlying device alive for as long as the MFT is). Per
+//! Plan 2c Task 4, the `process_input` / `process_output` methods below
+//! implement the encode→decode frame pump. Output is delivered as CPU-side
+//! NV12 bytes for Phase 0; zero-copy `IMFDXGIBuffer` extraction is deferred
+//! to Phase 3.
 
 use std::sync::OnceLock;
 
 use windows::core::Interface;
 use windows::Win32::Media::MediaFoundation::{
     IMFActivate, IMFDXGIDeviceManager, IMFTransform, MFCreateDXGIDeviceManager, MFCreateMediaType,
-    MFMediaType_Video, MFStartup, MFTEnumEx, MFVideoFormat_HEVC, MFVideoFormat_NV12,
-    MFSTARTUP_FULL, MFT_CATEGORY_VIDEO_DECODER, MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE,
-    MFT_ENUM_FLAG_LOCALMFT, MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT,
-    MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
-    MFT_MESSAGE_SET_D3D_MANAGER, MFT_REGISTER_TYPE_INFO, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE,
-    MF_MT_SUBTYPE, MF_VERSION,
+    MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFStartup, MFTEnumEx,
+    MFVideoFormat_HEVC, MFVideoFormat_NV12, MFSTARTUP_FULL, MFT_CATEGORY_VIDEO_DECODER,
+    MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_LOCALMFT,
+    MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
+    MFT_REGISTER_TYPE_INFO, MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT,
+    MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_VERSION,
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 
 use crate::d3d11::D3d11Device;
 use crate::error::{MediaError, Result};
 
-/// One-shot MF + COM initialization. Stores the stringified error (if any)
-/// so the inner `OnceLock` payload does not need to be `Clone`.
+/// One-shot MF + COM initialization. Stores the stringified error so the
+/// `Result` stored inside `OnceLock` remains `Clone`-free (we just format it
+/// on each call).
 static MF_INIT_ERROR: OnceLock<Option<String>> = OnceLock::new();
 
 fn ensure_mf_initialized() -> Result<()> {
@@ -55,12 +60,11 @@ fn ensure_mf_initialized() -> Result<()> {
 
 /// Windows Media Foundation H.265 hardware decoder.
 ///
-/// Construction enumerates the available H.265 decoder MFTs (preferring
-/// hardware-flagged ones), picks the first one, attaches our D3D11 device,
-/// and configures input (HEVC) / output (NV12) media types. The frame pump
-/// (`process_input` / `process_output`) is wired up in Plan 2c Task 4.
+/// Construction enumerates the available HW H.265 decoder MFTs, picks the
+/// first one, attaches our D3D11 device, and configures input (HEVC) /
+/// output (NV12) media types. The frame pump lives in `process_input` /
+/// `process_output` (Task 4).
 pub struct H265Decoder {
-    #[allow(dead_code)] // Task 3: scaffolded, used by Task 4.
     mft: IMFTransform,
     width: u32,
     height: u32,
@@ -213,6 +217,105 @@ impl H265Decoder {
     pub fn height(&self) -> u32 {
         self.height
     }
+
+    /// Feed one encoded frame (H.265 NAL units) into the decoder.
+    ///
+    /// `timestamp` is expressed in 100 ns (`hns`) units, matching the Media
+    /// Foundation convention. Callers that track microseconds should
+    /// multiply by 10 before calling.
+    pub fn process_input(&mut self, nal_bytes: &[u8], timestamp: i64) -> Result<()> {
+        unsafe {
+            // Allocate an MF media buffer and copy the NAL bytes in.
+            let buffer = MFCreateMemoryBuffer(nal_bytes.len() as u32)
+                .map_err(|e| MediaError::Other(format!("MFCreateMemoryBuffer: {e}")))?;
+
+            let mut data_ptr: *mut u8 = std::ptr::null_mut();
+            let mut max_len = 0u32;
+            let mut cur_len = 0u32;
+            buffer
+                .Lock(&mut data_ptr, Some(&mut max_len), Some(&mut cur_len))
+                .map_err(|e| MediaError::Other(format!("Lock buffer: {e}")))?;
+            std::ptr::copy_nonoverlapping(nal_bytes.as_ptr(), data_ptr, nal_bytes.len());
+            buffer
+                .Unlock()
+                .map_err(|e| MediaError::Other(format!("Unlock buffer: {e}")))?;
+            buffer
+                .SetCurrentLength(nal_bytes.len() as u32)
+                .map_err(|e| MediaError::Other(format!("SetCurrentLength: {e}")))?;
+
+            // Wrap the buffer in a sample and push to the MFT.
+            let sample =
+                MFCreateSample().map_err(|e| MediaError::Other(format!("MFCreateSample: {e}")))?;
+            sample
+                .AddBuffer(&buffer)
+                .map_err(|e| MediaError::Other(format!("AddBuffer: {e}")))?;
+            sample
+                .SetSampleTime(timestamp)
+                .map_err(|e| MediaError::Other(format!("SetSampleTime: {e}")))?;
+
+            match self.mft.ProcessInput(0, &sample, 0) {
+                Ok(()) => {}
+                Err(e) if e.code() == MF_E_NOTACCEPTING => {
+                    return Err(MediaError::Other("MFT NOTACCEPTING".into()));
+                }
+                Err(e) => return Err(MediaError::Other(format!("ProcessInput: {e}"))),
+            }
+
+            self.needs_idr = false;
+            Ok(())
+        }
+    }
+
+    /// Pull the next decoded frame. Returns `Ok(None)` if the decoder needs
+    /// more input. Returns raw NV12 bytes for Phase 0 (zero-copy D3D11
+    /// texture extraction is deferred to Phase 3).
+    pub fn process_output(&mut self) -> Result<Option<Vec<u8>>> {
+        unsafe {
+            let mut output_buffer = MFT_OUTPUT_DATA_BUFFER::default();
+            let mut status: u32 = 0;
+            match self
+                .mft
+                .ProcessOutput(0, std::slice::from_mut(&mut output_buffer), &mut status)
+            {
+                Ok(()) => {}
+                Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => {
+                    return Ok(None);
+                }
+                Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
+                    // Output type change — re-negotiation is Plan 3+ work.
+                    self.needs_idr = true;
+                    return Err(MediaError::Other("MF_E_TRANSFORM_STREAM_CHANGE".into()));
+                }
+                Err(e) => return Err(MediaError::Other(format!("ProcessOutput: {e}"))),
+            }
+
+            // Extract the sample through ManuallyDrop.
+            let sample_opt: &Option<_> = &output_buffer.pSample;
+            let sample = sample_opt
+                .as_ref()
+                .ok_or_else(|| MediaError::Other("null output sample".into()))?;
+            let buffer = sample
+                .ConvertToContiguousBuffer()
+                .map_err(|e| MediaError::Other(format!("ConvertToContiguousBuffer: {e}")))?;
+            let mut data_ptr: *mut u8 = std::ptr::null_mut();
+            let mut max_len = 0u32;
+            let mut cur_len = 0u32;
+            buffer
+                .Lock(&mut data_ptr, Some(&mut max_len), Some(&mut cur_len))
+                .map_err(|e| MediaError::Other(format!("Lock out buffer: {e}")))?;
+            let bytes = std::slice::from_raw_parts(data_ptr, cur_len as usize).to_vec();
+            buffer
+                .Unlock()
+                .map_err(|e| MediaError::Other(format!("Unlock out buffer: {e}")))?;
+
+            // Manually drop the ManuallyDrop fields so COM refcounts are
+            // released (otherwise the sample + events leak).
+            std::mem::ManuallyDrop::drop(&mut output_buffer.pSample);
+            std::mem::ManuallyDrop::drop(&mut output_buffer.pEvents);
+
+            Ok(Some(bytes))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -234,9 +337,8 @@ mod tests {
                 assert!(dec.needs_idr());
             }
             Err(e) => {
-                // On VMs / server SKUs / systems without HEVC Video
-                // Extensions there is no HW H.265 decoder MFT; treat as
-                // non-fatal for CI portability.
+                // On VMs / server SKUs there is no HW H.265 decoder MFT;
+                // treat as non-fatal for CI portability.
                 eprintln!("H.265 MFT not available (non-fatal): {e}");
             }
         }
