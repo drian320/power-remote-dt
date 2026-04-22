@@ -14,7 +14,6 @@ members = [
 edition = "2021"
 rust-version = "1.78"
 license = "Apache-2.0 OR MIT"
-repository = "https://github.com/your-org/power-remote-dt"
 
 [workspace.dependencies]
 # Async / IO
@@ -43,7 +42,9 @@ proptest = "1.5"
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+debug = "line-tables-only"
+strip = "none"
 
 [profile.dev]
 opt-level = 1       # テストが 4K60 相当のバッファ処理で時間かかりすぎないように
-panic = "abort"
+# panic is left default (unwind) so proptest shrinking and #[should_panic] work
