@@ -10,6 +10,7 @@ name = "prdt-host"
 path = "src/main.rs"
 
 [dependencies]
+prdt-crypto = { path = "../crypto" }
 prdt-protocol = { path = "../protocol" }
 prdt-transport = { path = "../transport" }
 tokio = { workspace = true, features = ["signal"] }

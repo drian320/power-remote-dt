@@ -1,11 +1,13 @@
 #![cfg(windows)]
 
+use std::fs;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use prdt_crypto::KeyPair;
 use prdt_input_win::SendInputInjector;
 use prdt_media_win::{
     dxgi::enumerate_outputs_for_adapter, pick_default_adapter, D3d11Device, DxgiNvencProducer,
@@ -34,6 +36,12 @@ struct Args {
     /// Target bitrate in Mbps (e.g., 30 for 30 Mbps).
     #[arg(long, default_value_t = 30u32)]
     bitrate_mbps: u32,
+
+    /// Path to host's long-term private key file (32 bytes). Generated on
+    /// first run if the file doesn't exist; print the public key to stdout
+    /// so the viewer can pin it via `--host-pubkey`.
+    #[arg(long, default_value = "host-key.bin")]
+    key_file: std::path::PathBuf,
 }
 
 #[tokio::main]
@@ -45,6 +53,32 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+
+    // Load or generate the host keypair.
+    let keypair = if args.key_file.exists() {
+        let priv_bytes = fs::read(&args.key_file)
+            .context(format!("read key file {}", args.key_file.display()))?;
+        if priv_bytes.len() != 32 {
+            anyhow::bail!(
+                "key file must be exactly 32 bytes, got {}",
+                priv_bytes.len()
+            );
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&priv_bytes);
+        KeyPair::from_private(arr)
+    } else {
+        tracing::info!(path = %args.key_file.display(), "generating new host key");
+        let kp = KeyPair::generate();
+        fs::write(&args.key_file, kp.private.0)
+            .context(format!("write key file {}", args.key_file.display()))?;
+        kp
+    };
+    println!("Host public key: {}", keypair.public.to_base64());
+    println!(
+        "(Pass --host-pubkey {} to the viewer)",
+        keypair.public.to_base64()
+    );
 
     let adapter = pick_default_adapter().context("no GPU adapter")?;
     let dev = D3d11Device::create(&adapter).context("D3D11 device")?;
@@ -80,7 +114,12 @@ async fn main() -> Result<()> {
             .await
             .context("UDP bind")?,
     );
-    info!(local = ?transport.local_addr()?, "listening");
+    info!(local = ?transport.local_addr()?, "listening; waiting for Noise handshake");
+    transport
+        .handshake_as_server(&keypair)
+        .await
+        .context("Noise server handshake")?;
+    info!("Noise handshake complete — encrypted channel established");
 
     // Wait for Hello, send HelloAck.
     let session_id: u64 = 0xDEADBEEF; // stable ID for Phase 0; randomize in Plan 4
