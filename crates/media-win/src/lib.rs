@@ -3,6 +3,8 @@
 
 #![cfg(windows)]
 
+pub mod adapter;
 pub mod error;
 
+pub use adapter::{enumerate_adapters, pick_adapter_by_index, pick_default_adapter, AdapterInfo};
 pub use error::{MediaError, Result};
