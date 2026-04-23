@@ -106,8 +106,29 @@ async fn host_loop(
         tokio::select! {
             incoming = socket.recv() => {
                 match incoming {
-                    Some(Ok(Message::Text(_))) => {
-                        // Candidate / Done handling lands in Tasks 7-8.
+                    Some(Ok(Message::Text(t))) => {
+                        match serde_json::from_str::<ClientMessage>(&t) {
+                            Ok(ClientMessage::Candidate { session_id, candidate }) => {
+                                if candidate.typ != prdt_signaling_proto::CandidateType::Host {
+                                    send_error(&mut socket, ErrorCode::UnsupportedCandidateType, "only host candidates supported in W1").await;
+                                    continue;
+                                }
+                                if let Some(sess) = state.sessions.get(&session_id) {
+                                    let _ = sess.viewer_tx.send(ServerMessage::PeerCandidate {
+                                        session_id: session_id.clone(),
+                                        candidate,
+                                    }).await;
+                                }
+                            }
+                            Ok(ClientMessage::Done { session_id, .. }) => {
+                                state.sessions.remove(&session_id);
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                send_error(&mut socket, ErrorCode::ProtocolError, &format!("{e}")).await;
+                                break;
+                            }
+                        }
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(_)) => {} // ignore binary / ping etc
@@ -134,8 +155,29 @@ async fn viewer_loop(
         tokio::select! {
             incoming = socket.recv() => {
                 match incoming {
-                    Some(Ok(Message::Text(_))) => {
-                        // Candidate / Done handling lands in Tasks 7-8.
+                    Some(Ok(Message::Text(t))) => {
+                        match serde_json::from_str::<ClientMessage>(&t) {
+                            Ok(ClientMessage::Candidate { session_id: sid, candidate }) => {
+                                if candidate.typ != prdt_signaling_proto::CandidateType::Host {
+                                    send_error(&mut socket, ErrorCode::UnsupportedCandidateType, "only host candidates supported in W1").await;
+                                    continue;
+                                }
+                                if let Some(sess) = state.sessions.get(&sid) {
+                                    let _ = sess.host_tx.send(ServerMessage::PeerCandidate {
+                                        session_id: sid.clone(),
+                                        candidate,
+                                    }).await;
+                                }
+                            }
+                            Ok(ClientMessage::Done { .. }) => {
+                                state.sessions.remove(&session_id);
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                send_error(&mut socket, ErrorCode::ProtocolError, &format!("{e}")).await;
+                                break;
+                            }
+                        }
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(_)) => {} // ignore binary / ping etc
