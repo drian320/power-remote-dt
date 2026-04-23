@@ -11,12 +11,14 @@
 use prdt_protocol::{ConsumerError, EncodedFrame, VideoConsumer};
 
 #[cfg(prdt_nvdec_bindings)]
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[cfg(prdt_nvdec_bindings)]
 use super::cuda::CudaContext;
 #[cfg(prdt_nvdec_bindings)]
 use super::decoder::{CuvidDecoder, DecodedFrame};
+#[cfg(prdt_nvdec_bindings)]
+use crate::d3d11::TextureFormat;
 use crate::d3d11::{D3d11Device, D3d11Texture};
 use crate::error::MediaError;
 
@@ -29,6 +31,11 @@ pub struct NvdecD3d11Consumer {
     _ctx: Arc<CudaContext>,
     #[cfg(prdt_nvdec_bindings)]
     decoder: CuvidDecoder,
+    /// Cached NV12 D3D11 texture we reuse across frames. Lazily created
+    /// on the first `take_latest_texture` call once the decoder's
+    /// actual output size is known.
+    #[cfg(prdt_nvdec_bindings)]
+    nv12_cache: Mutex<Option<D3d11Texture>>,
     _dev: D3d11Device,
     _width: u32,
     _height: u32,
@@ -39,16 +46,16 @@ impl NvdecD3d11Consumer {
         #[cfg(prdt_nvdec_bindings)]
         {
             let ctx = Arc::new(CudaContext::create_primary()?);
-            let decoder = CuvidDecoder::new_hevc(Arc::clone(&ctx), width, height)?;
+            let decoder = CuvidDecoder::new_hevc(Arc::clone(&ctx), dev.clone(), width, height)?;
             tracing::info!(
                 width,
                 height,
-                "NVDEC: CUDA context + HEVC parser/decoder ready (CPU output path; \
-                 Plan 2d step 2c will add CUDA-D3D11 zero-copy)",
+                "NVDEC: CUDA context + HEVC parser/decoder ready",
             );
             Ok(Self {
                 _ctx: ctx,
                 decoder,
+                nv12_cache: Mutex::new(None),
                 _dev: dev.clone(),
                 _width: width,
                 _height: height,
@@ -66,9 +73,9 @@ impl NvdecD3d11Consumer {
         }
     }
 
-    /// Plan 2d step 2b exposes the decoded NV12 bytes on the CPU side.
-    /// Step 2c will swap this for a GPU-resident `D3d11Texture` via
-    /// CUDA-D3D11 interop; for now `take_latest_texture` returns None.
+    /// Pop the latest decoded NV12 frame as raw CPU bytes. Tests use
+    /// this to verify pixel-level correctness; the production viewer
+    /// uses `take_latest_texture` instead.
     #[cfg(prdt_nvdec_bindings)]
     pub fn take_latest_nv12(&self) -> Option<DecodedFrame> {
         self.decoder.take_latest_frame()
@@ -76,10 +83,95 @@ impl NvdecD3d11Consumer {
 
     /// Drain the latest decoded GPU texture, if any. Mirrors
     /// `MfD3d11Consumer::take_latest_texture` so viewer code can be
-    /// decoder-agnostic behind a trait-object. Step 2c makes this
-    /// return the real texture.
+    /// decoder-agnostic. Uploads the latest CPU NV12 bytes into a
+    /// cached NV12 D3D11 texture via UpdateSubresource and returns a
+    /// clone. Must be called on the thread that owns the D3D11
+    /// immediate context (i.e., the viewer's event-loop thread).
     pub fn take_latest_texture(&self) -> Option<D3d11Texture> {
-        None
+        #[cfg(prdt_nvdec_bindings)]
+        {
+            let frame = self.decoder.take_latest_frame()?;
+            match self.upload_nv12_to_cache(&frame) {
+                Ok(tex) => Some(tex),
+                Err(e) => {
+                    tracing::warn!(%e, "NVDEC: D3D11 NV12 upload failed");
+                    None
+                }
+            }
+        }
+        #[cfg(not(prdt_nvdec_bindings))]
+        {
+            None
+        }
+    }
+
+    #[cfg(prdt_nvdec_bindings)]
+    fn upload_nv12_to_cache(&self, frame: &DecodedFrame) -> Result<D3d11Texture, MediaError> {
+        use windows::Win32::Graphics::Direct3D11::D3D11_BOX;
+
+        let mut slot = self.nv12_cache.lock().unwrap();
+        let cache_needs_rebuild = match slot.as_ref() {
+            Some(t) => t.width() != frame.width || t.height() != frame.height,
+            None => true,
+        };
+        if cache_needs_rebuild {
+            *slot = Some(D3d11Texture::new_default(
+                &self._dev,
+                frame.width,
+                frame.height,
+                TextureFormat::Nv12,
+            )?);
+        }
+        let tex = slot.as_ref().unwrap().clone();
+
+        // Upload Y (subresource 0, width x height) and UV (subresource 1,
+        // width x height/2) from the packed CPU NV12 buffer. For NV12
+        // textures D3D11 accepts two UpdateSubresource calls against
+        // subresource 0 and 1 with the appropriate row pitches.
+        let w = frame.width as usize;
+        let h = frame.height as usize;
+        let y_plane_ptr = frame.nv12.as_ptr();
+        let uv_plane_ptr = unsafe { y_plane_ptr.add(w * h) };
+        let y_box = D3D11_BOX {
+            left: 0,
+            top: 0,
+            front: 0,
+            right: frame.width,
+            bottom: frame.height,
+            back: 1,
+        };
+        let uv_box = D3D11_BOX {
+            left: 0,
+            top: 0,
+            front: 0,
+            right: frame.width,
+            bottom: frame.height / 2,
+            back: 1,
+        };
+        self._dev.with_context(|ctx| {
+            use windows::core::Interface;
+            let res: windows::Win32::Graphics::Direct3D11::ID3D11Resource =
+                tex.raw().cast().expect("NV12 tex is ID3D11Resource");
+            unsafe {
+                ctx.UpdateSubresource(
+                    &res,
+                    0,
+                    Some(&y_box),
+                    y_plane_ptr as *const _,
+                    frame.width,
+                    0,
+                );
+                ctx.UpdateSubresource(
+                    &res,
+                    1,
+                    Some(&uv_box),
+                    uv_plane_ptr as *const _,
+                    frame.width,
+                    0,
+                );
+            }
+        });
+        Ok(tex)
     }
 }
 
@@ -202,25 +294,23 @@ mod tests {
         let mut consumer = NvdecD3d11Consumer::new(&dev, w, h).expect("NvdecD3d11Consumer");
 
         // NVENC needs a few frames to flush the pipeline; push 5.
-        let mut combined = Vec::<u8>::new();
         for i in 0..5 {
             let tex = make_counter_texture(&dev, w, h, i).expect("counter tex");
             let ts = i as u64 * 16_666;
             let force_idr = i == 0;
             let frame = enc.encode(&tex, force_idr, ts).expect("encode");
-            combined.extend_from_slice(&frame.nal_bytes);
-            let ts_i64 = ts as i64;
-            let res = consumer.decoder.submit(&frame.nal_bytes, ts_i64);
-            if let Err(e) = res {
-                panic!("submit frame {i} failed: {e}");
-            }
+            consumer
+                .decoder
+                .submit(&frame.nal_bytes, ts as i64)
+                .unwrap_or_else(|e| panic!("submit frame {i} failed: {e}"));
         }
 
-        let got = consumer.take_latest_nv12();
-        let got = got.expect("NVDEC should have produced at least one frame");
-        assert_eq!(got.width, w);
-        assert_eq!(got.height, h);
-        // NV12 = width*height (Y) + width*height/2 (UV interleaved).
-        assert_eq!(got.nv12.len() as u32, w * h * 3 / 2);
+        // take_latest_texture returns a fully populated D3D11 NV12
+        // texture — the path the viewer actually exercises.
+        let gpu = consumer
+            .take_latest_texture()
+            .expect("NVDEC should have produced at least one NV12 texture");
+        assert_eq!(gpu.width(), w);
+        assert_eq!(gpu.height(), h);
     }
 }

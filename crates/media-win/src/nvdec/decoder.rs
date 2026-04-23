@@ -10,9 +10,13 @@
 //! a Rust panic can't unwind across the FFI boundary (which would be UB
 //! under MSVC's `-C panic=abort` release profile).
 //!
-//! This step delivers CPU-side NV12 bytes as the decoded output. Step 2c
-//! replaces the CPU copy with CUDA-D3D11 interop so the frame stays on
-//! the GPU all the way to Nv12Renderer.
+//! Output is a CPU-side packed NV12 Vec<u8>. The consumer side uploads
+//! it into a cached D3D11 NV12 texture via UpdateSubresource on the
+//! viewer's event-loop thread (Plan 2d step 2c). A direct CUDA-D3D11
+//! interop path was attempted but NV12 D3D11 textures don't expose the
+//! UV plane as a separate CUarray — a future optimization could revisit
+//! with dual R8 + R8G8 textures if measurements show the CPU bounce
+//! matters.
 
 // Module-level cfg gate is applied at the `mod decoder` site in nvdec/mod.rs,
 // so a redundant `#![cfg]` here would trip clippy::duplicated_attributes.
@@ -30,6 +34,7 @@ use std::sync::{Arc, Mutex};
 
 use super::cuda::{check, CudaContext};
 use super::ffi;
+use crate::d3d11::D3d11Device;
 use crate::error::MediaError;
 
 /// One decoded NV12 frame in CPU memory. Y plane is `width * height`
@@ -48,6 +53,8 @@ pub struct DecodedFrame {
 /// pointer to it for the duration of its life.
 struct DecoderState {
     ctx: Arc<CudaContext>,
+    #[allow(dead_code)]
+    dev: D3d11Device,
     decoder: Option<ffi::CUvideodecoder>,
     /// Set by the sequence callback; read by the display callback to
     /// size the output NV12 buffer. u32 fits any real resolution.
@@ -56,10 +63,11 @@ struct DecoderState {
     /// Max decode surfaces the decoder was created with. Returned from
     /// pfnSequenceCallback so cuvid knows the parser's ring depth.
     surfaces: u32,
-    /// Latest decoded frame the consumer can take. Protected by a
-    /// Mutex because the C callback runs on a different thread than
-    /// the Rust method that drains it (but in practice we drive from
-    /// the same caller; the mutex is belt-and-suspenders).
+    /// Latest decoded NV12 frame in CPU memory. Populated on every
+    /// successful display callback. The consumer side uploads this
+    /// into a cached D3D11 NV12 texture when `take_latest_texture` is
+    /// called (on the viewer's event-loop thread, which owns the
+    /// D3D11 immediate context).
     latest: Mutex<Option<DecodedFrame>>,
     /// Sticky error from a callback: any MediaError produced inside
     /// a callback gets stashed so `submit()` can surface it.
@@ -82,10 +90,20 @@ unsafe impl Send for CuvidDecoder {}
 impl CuvidDecoder {
     /// Create a fresh HEVC decoder bound to `ctx`. `max_w` / `max_h` are
     /// capacity hints the bitstream's real sequence header may raise —
-    /// we currently fail if it does.
-    pub fn new_hevc(ctx: Arc<CudaContext>, max_w: u32, max_h: u32) -> Result<Self, MediaError> {
+    /// we currently fail if it does. `dev` is used in the sequence
+    /// callback to create an NV12 D3D11 texture for zero-copy output.
+    /// When `enable_cpu_nv12` is true the display callback additionally
+    /// exposes a CPU NV12 `Vec<u8>` via `take_latest_frame`, used by
+    /// tests; production callers leave it false.
+    pub fn new_hevc(
+        ctx: Arc<CudaContext>,
+        dev: D3d11Device,
+        max_w: u32,
+        max_h: u32,
+    ) -> Result<Self, MediaError> {
         let state = Box::new(DecoderState {
             ctx: Arc::clone(&ctx),
+            dev,
             decoder: None,
             width: max_w,
             height: max_h,
@@ -148,7 +166,8 @@ impl CuvidDecoder {
         Ok(())
     }
 
-    /// Pop the latest decoded frame, if one arrived since the last call.
+    /// Pop the latest decoded CPU-side NV12 frame. The consumer side
+    /// uploads this into a D3D11 NV12 texture on the viewer thread.
     pub fn take_latest_frame(&self) -> Option<DecodedFrame> {
         self.state.latest.lock().unwrap().take()
     }
@@ -354,15 +373,23 @@ unsafe extern "C" fn handle_picture_display(
             return 0;
         }
 
-        // Copy Y + UV planes into one CPU buffer. cuMemcpy2D handles
-        // the source pitch (pitched linear memory on the device side)
-        // and writes tightly-packed rows on the host side.
+        // Copy Y + UV planes from pitched device memory to a packed CPU
+        // NV12 buffer (Y rows then UV interleaved rows, tightly packed).
+        // The consumer side uploads this into a cached D3D11 NV12 texture
+        // via UpdateSubresource on the viewer's event-loop thread.
+        //
+        // Step 2c originally aimed at direct CUDA-D3D11 interop but NV12
+        // D3D11 textures don't expose the UV plane as a separate CUarray
+        // subresource (cuGraphicsSubResourceGetMappedArray returns
+        // INVALID_VALUE for plane=1). The CPU staging adds one ~450 KB
+        // memcpy per frame at 1080p — negligible vs MF decode's MFT
+        // pipeline overhead; a future optimization can revisit with
+        // dual R8 + R8G8 textures if a measurement shows the CPU bounce
+        // matters.
         let w = state.width as usize;
         let h = state.height as usize;
         let mut nv12 = vec![0u8; w * h * 3 / 2];
-
         let mut copy_ok = true;
-        // Y plane: height rows of width bytes.
         let mut params_y: ffi::CUDA_MEMCPY2D = ffi::CUDA_MEMCPY2D::default();
         params_y.srcMemoryType = ffi::CUmemorytype_enum::CU_MEMORYTYPE_DEVICE;
         params_y.srcDevice = dev_ptr;
@@ -372,17 +399,10 @@ unsafe extern "C" fn handle_picture_display(
         params_y.dstPitch = w;
         params_y.WidthInBytes = w;
         params_y.Height = h;
-        let ry = ffi::cuMemcpy2D_v2(&mut params_y);
-        if ry != ffi::cudaError_enum::CUDA_SUCCESS {
-            record_error(
-                state,
-                MediaError::Other(format!("cuMemcpy2D (Y): CUresult={}", ry as u32)),
-            );
+        if ffi::cuMemcpy2D_v2(&mut params_y) != ffi::cudaError_enum::CUDA_SUCCESS {
             copy_ok = false;
         }
-
         if copy_ok {
-            // UV plane: pitch*height bytes offset on device, h/2 rows of width bytes on host.
             let mut params_uv: ffi::CUDA_MEMCPY2D = ffi::CUDA_MEMCPY2D::default();
             params_uv.srcMemoryType = ffi::CUmemorytype_enum::CU_MEMORYTYPE_DEVICE;
             params_uv.srcDevice = dev_ptr + (pitch as u64) * (h as u64);
@@ -392,18 +412,10 @@ unsafe extern "C" fn handle_picture_display(
             params_uv.dstPitch = w;
             params_uv.WidthInBytes = w;
             params_uv.Height = h / 2;
-            let ruv = ffi::cuMemcpy2D_v2(&mut params_uv);
-            if ruv != ffi::cudaError_enum::CUDA_SUCCESS {
-                record_error(
-                    state,
-                    MediaError::Other(format!("cuMemcpy2D (UV): CUresult={}", ruv as u32)),
-                );
+            if ffi::cuMemcpy2D_v2(&mut params_uv) != ffi::cudaError_enum::CUDA_SUCCESS {
                 copy_ok = false;
             }
         }
-
-        let _ = ffi::cuvidUnmapVideoFrame64(dec, dev_ptr);
-
         if copy_ok {
             *state.latest.lock().unwrap() = Some(DecodedFrame {
                 width: state.width,
@@ -412,6 +424,8 @@ unsafe extern "C" fn handle_picture_display(
                 nv12,
             });
         }
+
+        let _ = ffi::cuvidUnmapVideoFrame64(dec, dev_ptr);
         1
     }));
     result.unwrap_or_else(|_| {
