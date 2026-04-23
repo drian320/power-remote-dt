@@ -37,11 +37,22 @@ sign-off:
 - ~~**M2 in-process end-to-end bench**~~ — **Done in plan4-m2 +
   plan4-m2-full-pipeline.** `prdt-latency-bench --mode in-process`
   measures transport-only (p95 ≈ 40 µs at 1080p60). `--mode
-  full-pipeline-win` measures the synthetic-BGRA → NVENC → transport →
-  MF-decode full loop with per-stage breakdown. Spot checks on this dev
-  machine: 1080p60 e2e p95 ≈ 19 ms (encode 18 ms dominates), 4K30 e2e
-  p95 ≈ 70 ms (encode 69 ms); transport component always < 20 µs.
-  Meets spec §7.5 B5 target "M1 p95 < 22ms" at 1080p.
+  full-pipeline-win --consumer {mf,nvdec}` measures the full
+  synthetic-BGRA → NVENC → transport → decode loop with per-stage
+  breakdown. Spot checks on this dev machine (RTX 3070 Ti):
+
+  | 1080p60 | encode p50 | decode p50 | e2e p50 | e2e p95 |
+  |---------|------------|------------|---------|---------|
+  | MF      | 14.5 ms    | **0.20 ms**| 14.7 ms | 17.5 ms |
+  | NVDEC   | 14.6 ms    | 1.80 ms    | 16.4 ms | 18.2 ms |
+
+  MF is currently faster because it has an internal zero-copy
+  IMFDXGIBuffer path; our NVDEC (Plan 2d step 2c) does a CPU bounce
+  (cuMemcpy2D DtoH + UpdateSubresource) that adds ~1.6 ms. Next
+  optimization: dual R8 + R8G8 CUDA-D3D11 interop textures for true
+  zero-copy (tracked in project memory).
+
+  Meets spec §7.5 B5 target "M1 p95 < 22ms" at 1080p either way.
 - **M3a camera glass-to-glass measurement**: not attempted. Requires a
   240 fps smartphone camera and manual counting.
 - **B1–B8 benchmark scenarios** (spec §7.5): not run. Would require M2/M3

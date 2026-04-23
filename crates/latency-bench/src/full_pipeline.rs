@@ -11,13 +11,56 @@ use std::time::{Duration, Instant};
 
 use prdt_media_win::synthetic::make_counter_texture;
 use prdt_media_win::{
-    pick_default_adapter, D3d11Device, MfD3d11Consumer, NvencEncoder, NvencEncoderConfig,
+    pick_default_adapter, D3d11Device, D3d11Texture, MfD3d11Consumer, NvdecD3d11Consumer,
+    NvencEncoder, NvencEncoderConfig,
 };
 use prdt_protocol::{now_monotonic_us, ConsumerError, EncodedFrame, VideoConsumer};
 use prdt_transport::{InProcTransport, LoopbackOptions, ReceivedMessage, Transport};
 use tracing::{info, warn};
 
 use crate::percentiles;
+
+/// Which decoder backend the bench exercises for the "decode" stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsumerBackend {
+    /// Media Foundation H.265 MFT via HEVC Video Extensions.
+    Mf,
+    /// Plan 2d direct nvcuvid.dll path.
+    Nvdec,
+}
+
+impl std::str::FromStr for ConsumerBackend {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> anyhow::Result<Self> {
+        match s {
+            "mf" => Ok(Self::Mf),
+            "nvdec" => Ok(Self::Nvdec),
+            other => anyhow::bail!("unknown consumer backend {other:?} (options: mf, nvdec)"),
+        }
+    }
+}
+
+/// Enum wrapper so the bench body can drive either consumer through a
+/// single match-based dispatch instead of duplicating the decode loop.
+enum BenchConsumer {
+    Mf(MfD3d11Consumer),
+    Nvdec(NvdecD3d11Consumer),
+}
+
+impl BenchConsumer {
+    async fn submit(&mut self, frame: EncodedFrame) -> Result<(), ConsumerError> {
+        match self {
+            Self::Mf(c) => c.submit(frame).await,
+            Self::Nvdec(c) => c.submit(frame).await,
+        }
+    }
+    fn take_latest_texture(&mut self) -> Option<D3d11Texture> {
+        match self {
+            Self::Mf(c) => c.take_latest_texture(),
+            Self::Nvdec(c) => c.take_latest_texture(),
+        }
+    }
+}
 
 pub struct FullPipelineConfig {
     pub width: u32,
@@ -28,6 +71,7 @@ pub struct FullPipelineConfig {
     pub drop_ppm: u32,
     pub latency_ms: u64,
     pub csv: Option<std::path::PathBuf>,
+    pub consumer: ConsumerBackend,
 }
 
 struct StageTimes {
@@ -65,9 +109,17 @@ pub async fn run(cfg: FullPipelineConfig) -> anyhow::Result<()> {
         "NVENC encoder ready",
     );
 
-    let mut consumer = MfD3d11Consumer::new(&dev, cfg.width, cfg.height)
-        .map_err(|e| anyhow::anyhow!("MfD3d11Consumer::new: {e}"))?;
-    info!("MF decoder ready");
+    let mut consumer = match cfg.consumer {
+        ConsumerBackend::Mf => BenchConsumer::Mf(
+            MfD3d11Consumer::new(&dev, cfg.width, cfg.height)
+                .map_err(|e| anyhow::anyhow!("MfD3d11Consumer::new: {e}"))?,
+        ),
+        ConsumerBackend::Nvdec => BenchConsumer::Nvdec(
+            NvdecD3d11Consumer::new(&dev, cfg.width, cfg.height)
+                .map_err(|e| anyhow::anyhow!("NvdecD3d11Consumer::new: {e}"))?,
+        ),
+    };
+    info!(backend = ?cfg.consumer, "decoder ready");
 
     let (host_side, viewer_side) = InProcTransport::pair(LoopbackOptions {
         drop_ppm: cfg.drop_ppm,

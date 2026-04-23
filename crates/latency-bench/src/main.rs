@@ -58,6 +58,12 @@ struct Args {
     /// received frame.
     #[arg(long)]
     csv: Option<std::path::PathBuf>,
+
+    /// Decoder backend for `--mode full-pipeline-win`. `mf` uses Media
+    /// Foundation (default, Plan 2c); `nvdec` uses the Plan 2d direct
+    /// nvcuvid path. Ignored in `--mode in-process`.
+    #[arg(long, default_value = "mf", value_parser = ["mf", "nvdec"])]
+    consumer: String,
 }
 
 fn parse_res(s: &str) -> anyhow::Result<(u32, u32)> {
@@ -103,6 +109,7 @@ async fn main() -> anyhow::Result<()> {
 
     #[cfg(windows)]
     if args.mode == "full-pipeline-win" {
+        let consumer: full_pipeline::ConsumerBackend = args.consumer.parse()?;
         return full_pipeline::run(full_pipeline::FullPipelineConfig {
             width: w,
             height: h,
@@ -112,6 +119,7 @@ async fn main() -> anyhow::Result<()> {
             drop_ppm: args.drop_ppm,
             latency_ms: args.latency_ms,
             csv: args.csv.clone(),
+            consumer,
         })
         .await;
     }
