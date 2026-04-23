@@ -46,11 +46,13 @@ sign-off:
 
 ## Known limitations (carry to Phase 1+ as appropriate)
 
-1. **Single-monitor capture only** — `--monitor N` picks one DXGI Output
-   but the SendInput mouse path assumes it's the primary (0..65535 range
-   without `MOUSEEVENTF_VIRTUALDESK`). Multi-monitor requires the host to
-   report its output rect in HelloAck and the viewer to scale to the
-   virtual desktop.
+1. ~~**Single-monitor capture only**~~ — **Fixed in phase3c-multimonitor.**
+   HelloAck now carries `host_monitor_rect` + `host_virtual_desktop_rect`
+   (virtual-desktop coords); the viewer maps window-local cursor positions
+   into the host's virtual desktop, and the injector uses
+   `MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK`. The host still
+   captures a single monitor at a time — simultaneous multi-monitor
+   streaming remains deferred.
 
 2. **Static FEC k** — `fec_k=64` is a static default. Frames exceeding
    64 × 1200 = 76.8 KB produce `FrameTooLarge` and are dropped. Spec §5.3

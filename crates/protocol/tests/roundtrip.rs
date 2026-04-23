@@ -5,7 +5,7 @@ use prdt_protocol::{
     decode_control, encode_control,
     input::MouseButton,
     wire::{self, video_flags, InputPacket, PacketHeader, PacketType, VideoPacket, HEADER_LEN},
-    InputEvent, ProtocolError,
+    InputEvent, MonitorRect, ProtocolError,
 };
 
 fn build_video_datagram(session_id: u64, pkt: &VideoPacket) -> Vec<u8> {
@@ -84,6 +84,8 @@ fn full_control_datagram_round_trip() {
         neg_height: 2160,
         neg_fps: 60,
         neg_bitrate_bps: 50_000_000,
+        host_monitor_rect: MonitorRect::new(0, 0, 3840, 2160),
+        host_virtual_desktop_rect: MonitorRect::new(0, 0, 5760, 2160),
     };
     let body = encode_control(&msg).unwrap();
     let hdr = PacketHeader {

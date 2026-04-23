@@ -14,7 +14,7 @@ use prdt_input_win::{
 use prdt_media_win::{
     pick_default_adapter, D3d11Device, D3d11Texture, MfD3d11Consumer, Nv12Renderer, SwapChain,
 };
-use prdt_protocol::{frame::Codec, ControlMessage, InputEvent, VideoConsumer};
+use prdt_protocol::{frame::Codec, ControlMessage, InputEvent, MonitorRect, VideoConsumer};
 use prdt_transport::{
     viewer_handshake, CustomUdpTransport, HelloRequest, ReceivedMessage, Transport,
     UdpTransportConfig, DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_HELLO_RETRIES, DEFAULT_HELLO_TIMEOUT,
@@ -76,6 +76,12 @@ struct ViewerShared {
     /// decoder's reported texture size).
     stream_width: Mutex<u32>,
     stream_height: Mutex<u32>,
+    /// Host's captured-monitor rect in virtual-desktop coords (from HelloAck).
+    /// Used by `emit_mouse_move` to map window-local coords → virtual-desktop
+    /// coords before normalizing to 0..65535 for MOUSEEVENTF_VIRTUALDESK.
+    host_monitor_rect: Mutex<MonitorRect>,
+    /// Bounding rect of the host's entire virtual desktop.
+    host_virtual_desktop_rect: Mutex<MonitorRect>,
     /// Input events captured by winit, drained by the tokio send loop.
     input_tx: mpsc::UnboundedSender<InputEvent>,
     /// Paths of files dropped onto the window, drained by the file-transfer
@@ -253,12 +259,12 @@ impl ApplicationHandler for ViewerApp {
 
 impl ViewerApp {
     fn emit_mouse_move(&self, position: PhysicalPosition<f64>, swap: &SwapChain) {
-        let window_w = swap.width() as f64;
-        let window_h = swap.height() as f64;
-        let norm_x = position.x / window_w.max(1.0);
-        let norm_y = position.y / window_h.max(1.0);
-        let abs_x = (norm_x * 65535.0).clamp(0.0, 65535.0) as i32;
-        let abs_y = (norm_y * 65535.0).clamp(0.0, 65535.0) as i32;
+        let window_w = (swap.width() as f64).max(1.0);
+        let window_h = (swap.height() as f64).max(1.0);
+        let monitor = *self.shared.host_monitor_rect.lock().unwrap();
+        let vd = *self.shared.host_virtual_desktop_rect.lock().unwrap();
+        let (abs_x, abs_y) =
+            map_cursor_to_virtual_desktop(position.x, position.y, window_w, window_h, monitor, vd);
         let _ = self.shared.input_tx.send(InputEvent::MouseMove {
             x: abs_x,
             y: abs_y,
@@ -311,6 +317,41 @@ impl ViewerApp {
             warn!(?e, "Present failed");
         }
     }
+}
+
+/// Map a window-local cursor position into the `(0..=65535, 0..=65535)` range
+/// expected by `SendInput` with `MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK`.
+///
+/// The viewer window covers exactly the host's captured monitor, so
+/// normalized window coords map linearly onto that monitor's rect in the
+/// host's virtual desktop; we then scale to the virtual-desktop bounds.
+///
+/// Degenerate inputs (zero-sized rects) fall back to the legacy "whole-window
+/// = 0..65535" mapping so the injector doesn't receive NaNs.
+fn map_cursor_to_virtual_desktop(
+    win_x: f64,
+    win_y: f64,
+    window_w: f64,
+    window_h: f64,
+    monitor: MonitorRect,
+    vd: MonitorRect,
+) -> (i32, i32) {
+    let vd_w = vd.width() as f64;
+    let vd_h = vd.height() as f64;
+    if vd_w <= 0.0 || vd_h <= 0.0 {
+        let x = ((win_x / window_w) * 65535.0).clamp(0.0, 65535.0) as i32;
+        let y = ((win_y / window_h) * 65535.0).clamp(0.0, 65535.0) as i32;
+        return (x, y);
+    }
+    let mon_w = monitor.width() as f64;
+    let mon_h = monitor.height() as f64;
+    let norm_x = (win_x / window_w).clamp(0.0, 1.0);
+    let norm_y = (win_y / window_h).clamp(0.0, 1.0);
+    let vd_px_x = monitor.left as f64 + norm_x * mon_w;
+    let vd_px_y = monitor.top as f64 + norm_y * mon_h;
+    let abs_x = (((vd_px_x - vd.left as f64) / vd_w) * 65535.0).clamp(0.0, 65535.0) as i32;
+    let abs_y = (((vd_px_y - vd.top as f64) / vd_h) * 65535.0).clamp(0.0, 65535.0) as i32;
+    (abs_x, abs_y)
 }
 
 fn extract_hwnd(window: &Window) -> Result<HWND> {
@@ -381,6 +422,11 @@ fn main() -> Result<()> {
         latest_texture: Arc::new(Mutex::new(None)),
         stream_width: Mutex::new(req_w),
         stream_height: Mutex::new(req_h),
+        // Pre-handshake defaults: assume captured monitor == primary ==
+        // full virtual desktop starting at origin. `emit_mouse_move` uses
+        // these until HelloAck updates them with the host's real geometry.
+        host_monitor_rect: Mutex::new(MonitorRect::new(0, 0, req_w as i32, req_h as i32)),
+        host_virtual_desktop_rect: Mutex::new(MonitorRect::new(0, 0, req_w as i32, req_h as i32)),
         input_tx,
         file_drop_tx,
     });
@@ -496,10 +542,14 @@ fn spawn_worker_tasks(
             session_id = format!("{:#x}", ack.session_id),
             neg = format!("{}x{}@{}", ack.neg_width, ack.neg_height, ack.neg_fps),
             bitrate_bps = ack.neg_bitrate_bps,
+            monitor = ?ack.host_monitor_rect,
+            virtual_desktop = ?ack.host_virtual_desktop_rect,
             "handshake complete"
         );
         *shared.stream_width.lock().unwrap() = ack.neg_width;
         *shared.stream_height.lock().unwrap() = ack.neg_height;
+        *shared.host_monitor_rect.lock().unwrap() = ack.host_monitor_rect;
+        *shared.host_virtual_desktop_rect.lock().unwrap() = ack.host_virtual_desktop_rect;
 
         // Build consumer.
         let consumer = match MfD3d11Consumer::new(&dev, ack.neg_width, ack.neg_height) {
@@ -792,4 +842,65 @@ async fn send_file_as_transfer(
         })
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_on_primary_monitor_in_single_monitor_setup() {
+        // One 1920x1080 monitor at origin == full virtual desktop.
+        let mon = MonitorRect::new(0, 0, 1920, 1080);
+        let vd = MonitorRect::new(0, 0, 1920, 1080);
+        let (x, y) = map_cursor_to_virtual_desktop(0.0, 0.0, 1920.0, 1080.0, mon, vd);
+        assert_eq!((x, y), (0, 0));
+        let (x, y) = map_cursor_to_virtual_desktop(1920.0, 1080.0, 1920.0, 1080.0, mon, vd);
+        assert_eq!((x, y), (65535, 65535));
+        let (x, y) = map_cursor_to_virtual_desktop(960.0, 540.0, 1920.0, 1080.0, mon, vd);
+        // Center of window → ~0x7FFF on both axes.
+        assert!((x - 32767).abs() <= 2);
+        assert!((y - 32767).abs() <= 2);
+    }
+
+    #[test]
+    fn cursor_on_secondary_monitor_maps_into_virtual_desktop() {
+        // Two 1920x1080 monitors side-by-side. Host captures the right one.
+        let mon = MonitorRect::new(1920, 0, 3840, 1080);
+        let vd = MonitorRect::new(0, 0, 3840, 1080);
+        // Top-left of viewer window → top-left of captured (right) monitor
+        // → x == 1920 in VD → ~half of 65535.
+        let (x, y) = map_cursor_to_virtual_desktop(0.0, 0.0, 1920.0, 1080.0, mon, vd);
+        assert!((x - 32767).abs() <= 2);
+        assert_eq!(y, 0);
+        // Bottom-right of viewer window → bottom-right of VD.
+        let (x, y) = map_cursor_to_virtual_desktop(1920.0, 1080.0, 1920.0, 1080.0, mon, vd);
+        assert_eq!((x, y), (65535, 65535));
+    }
+
+    #[test]
+    fn cursor_on_monitor_left_of_primary_handles_negative_coords() {
+        // Windows places secondary monitors at negative virtual-desktop coords
+        // when they're positioned left of/above the primary.
+        let mon = MonitorRect::new(-1920, 0, 0, 1080);
+        let vd = MonitorRect::new(-1920, 0, 1920, 1080);
+        // Top-left of viewer window → (-1920, 0) in VD, which is VD origin
+        // after normalization.
+        let (x, y) = map_cursor_to_virtual_desktop(0.0, 0.0, 1920.0, 1080.0, mon, vd);
+        assert_eq!((x, y), (0, 0));
+        // Bottom-right of viewer window → (0, 1080) in VD, which is half-x,
+        // full-y of the two-wide virtual desktop.
+        let (x, y) = map_cursor_to_virtual_desktop(1920.0, 1080.0, 1920.0, 1080.0, mon, vd);
+        assert!((x - 32767).abs() <= 2);
+        assert_eq!(y, 65535);
+    }
+
+    #[test]
+    fn degenerate_virtual_desktop_rect_falls_back_to_window_mapping() {
+        let mon = MonitorRect::new(0, 0, 0, 0);
+        let vd = MonitorRect::new(0, 0, 0, 0);
+        let (x, y) = map_cursor_to_virtual_desktop(960.0, 540.0, 1920.0, 1080.0, mon, vd);
+        assert!((x - 32767).abs() <= 2);
+        assert!((y - 32767).abs() <= 2);
+    }
 }

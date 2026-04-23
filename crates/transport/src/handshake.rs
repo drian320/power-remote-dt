@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use prdt_protocol::{control::ControlMessage, frame::Codec};
+use prdt_protocol::{control::ControlMessage, frame::Codec, MonitorRect};
 
 use crate::error::TransportError;
 use crate::transport_trait::{ReceivedMessage, Transport};
@@ -24,6 +24,8 @@ pub struct SessionAck {
     pub neg_height: u32,
     pub neg_fps: u32,
     pub neg_bitrate_bps: u32,
+    pub host_monitor_rect: MonitorRect,
+    pub host_virtual_desktop_rect: MonitorRect,
 }
 
 /// Send Hello, await HelloAck. Retries on timeout, returns session info on success.
@@ -53,6 +55,8 @@ pub async fn viewer_handshake<T: Transport>(
                         neg_height,
                         neg_fps,
                         neg_bitrate_bps,
+                        host_monitor_rect,
+                        host_virtual_desktop_rect,
                     }) => {
                         return Ok::<SessionAck, TransportError>(SessionAck {
                             session_id,
@@ -61,6 +65,8 @@ pub async fn viewer_handshake<T: Transport>(
                             neg_height,
                             neg_fps,
                             neg_bitrate_bps,
+                            host_monitor_rect,
+                            host_virtual_desktop_rect,
                         });
                     }
                     // ignore other messages during handshake
@@ -77,11 +83,14 @@ pub async fn viewer_handshake<T: Transport>(
 }
 
 /// Host-side: await Hello, respond with HelloAck.
+#[allow(clippy::too_many_arguments)]
 pub async fn host_handshake<T: Transport>(
     transport: &T,
     session_id: u64,
     host_monotonic_base_us: u64,
     negotiated_bitrate_bps: u32,
+    host_monitor_rect: MonitorRect,
+    host_virtual_desktop_rect: MonitorRect,
     wait_timeout: Duration,
 ) -> Result<HelloRequest, TransportError> {
     let fut = async {
@@ -106,6 +115,8 @@ pub async fn host_handshake<T: Transport>(
                         neg_height: req_height,
                         neg_fps: req_fps,
                         neg_bitrate_bps: negotiated_bitrate_bps,
+                        host_monitor_rect,
+                        host_virtual_desktop_rect,
                     };
                     transport.send_control(ack).await?;
                     return Ok(HelloRequest {
@@ -150,7 +161,16 @@ mod tests {
             .await
         });
         let host_task = tokio::spawn(async move {
-            host_handshake(&host, 0x1234, 42, 10_000_000, Duration::from_millis(500)).await
+            host_handshake(
+                &host,
+                0x1234,
+                42,
+                10_000_000,
+                MonitorRect::new(0, 0, 1920, 1080),
+                MonitorRect::new(0, 0, 3840, 1080),
+                Duration::from_millis(500),
+            )
+            .await
         });
 
         let (v, h) = tokio::join!(viewer_task, host_task);
@@ -158,6 +178,8 @@ mod tests {
         let req = h.unwrap().unwrap();
         assert_eq!(ack.session_id, 0x1234);
         assert_eq!(ack.neg_width, 1920);
+        assert_eq!(ack.host_monitor_rect.width(), 1920);
+        assert_eq!(ack.host_virtual_desktop_rect.width(), 3840);
         assert_eq!(req.req_fps, 60);
     }
 

@@ -10,12 +10,13 @@ use clap::Parser;
 use prdt_audio::{LoopbackCapture, OpusEncoder};
 use prdt_crypto::KeyPair;
 use prdt_input_win::{
-    read_clipboard_text, write_clipboard_text, SendInputInjector, MAX_CLIPBOARD_BYTES,
+    read_clipboard_text, virtual_desktop_rect, write_clipboard_text, SendInputInjector,
+    MAX_CLIPBOARD_BYTES,
 };
 use prdt_media_win::{
     dxgi::enumerate_outputs_for_adapter, pick_default_adapter, D3d11Device, DxgiNvencProducer,
 };
-use prdt_protocol::{wire::AudioPacket, ControlMessage, VideoProducer};
+use prdt_protocol::{wire::AudioPacket, ControlMessage, MonitorRect, VideoProducer};
 use prdt_transport::{
     host_handshake, now_monotonic_us, CustomUdpTransport, ReceivedMessage, Transport,
     UdpTransportConfig,
@@ -158,11 +159,25 @@ async fn main() -> Result<()> {
     // Wait for Hello, send HelloAck.
     let session_id: u64 = 0xDEADBEEF; // stable ID for Phase 0; randomize in Plan 4
     let bitrate_bps = args.bitrate_mbps.saturating_mul(1_000_000);
+    let monitor_rect = MonitorRect::new(
+        output.desktop_rect.left,
+        output.desktop_rect.top,
+        output.desktop_rect.right,
+        output.desktop_rect.bottom,
+    );
+    let vd_rect = virtual_desktop_rect();
+    info!(
+        monitor = ?monitor_rect,
+        virtual_desktop = ?vd_rect,
+        "advertising desktop geometry to viewer",
+    );
     let req = host_handshake(
         &*transport,
         session_id,
         now_monotonic_us(),
         bitrate_bps,
+        monitor_rect,
+        vd_rect,
         Duration::from_secs(60),
     )
     .await
@@ -350,7 +365,12 @@ async fn main() -> Result<()> {
                         continue;
                     };
                     if chunk_seq != t.next_chunk_seq {
-                        warn!(transfer_id, expected = t.next_chunk_seq, got = chunk_seq, "out-of-order chunk");
+                        warn!(
+                            transfer_id,
+                            expected = t.next_chunk_seq,
+                            got = chunk_seq,
+                            "out-of-order chunk"
+                        );
                         transfers.remove(&transfer_id);
                         continue;
                     }

@@ -8,7 +8,7 @@ pub mod input;
 pub mod video_pipeline;
 pub mod wire;
 
-pub use control::ControlMessage;
+pub use control::{ControlMessage, MonitorRect};
 pub use error::ProtocolError;
 pub use frame::{Codec, EncodedFrame};
 pub use input::{InputEvent, MouseButton};

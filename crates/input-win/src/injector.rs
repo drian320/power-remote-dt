@@ -25,13 +25,12 @@ impl SendInputInjector {
                 InputEvent::MouseMove { x, y, absolute } => {
                     let mut flags = MOUSEEVENTF_MOVE;
                     if absolute {
-                        // Map 0..65535 to the PRIMARY monitor only. Dropping
-                        // MOUSEEVENTF_VIRTUALDESK because viewer currently
-                        // captures one monitor at a time and normalizes in
-                        // that monitor's local coord space. Plan 4+ with
-                        // multi-monitor capture should re-add VIRTUALDESK
-                        // and update viewer-side normalization to match.
-                        flags |= MOUSEEVENTF_ABSOLUTE;
+                        // Viewer now pre-maps cursor coords into the host's
+                        // virtual desktop (0..65535 = SM_XVIRTUALSCREEN..
+                        // SM_XVIRTUALSCREEN+SM_CXVIRTUALSCREEN), so we tell
+                        // SendInput to interpret them against the whole
+                        // virtual desktop rather than just the primary.
+                        flags |= MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
                     }
                     let input = INPUT {
                         r#type: INPUT_MOUSE,

@@ -1,6 +1,35 @@
 use crate::frame::Codec;
 use serde::{Deserialize, Serialize};
 
+/// Rectangle in Windows virtual-desktop coordinate space (inclusive-left,
+/// inclusive-top, exclusive-right, exclusive-bottom — matches Win32 RECT).
+/// Used by HelloAck so the viewer can map local window coordinates into the
+/// host's virtual desktop for MOUSEEVENTF_VIRTUALDESK injection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MonitorRect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+impl MonitorRect {
+    pub const fn new(left: i32, top: i32, right: i32, bottom: i32) -> Self {
+        Self {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+    pub fn width(&self) -> i32 {
+        self.right - self.left
+    }
+    pub fn height(&self) -> i32 {
+        self.bottom - self.top
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ControlMessage {
     /// Viewer → Host.
@@ -19,6 +48,11 @@ pub enum ControlMessage {
         neg_height: u32,
         neg_fps: u32,
         neg_bitrate_bps: u32,
+        /// Rect of the monitor the host is capturing, in the host's
+        /// virtual-desktop coord space.
+        host_monitor_rect: MonitorRect,
+        /// Bounding rect of the host's entire virtual desktop (all monitors).
+        host_virtual_desktop_rect: MonitorRect,
     },
     /// Bidirectional.
     Bye,
