@@ -29,8 +29,11 @@ pub struct CudaContext {
 }
 
 // CUcontext handles are safely moveable between threads provided only one
-// thread has the context current at a time; we enforce that via push/pop.
+// thread has the context current at a time; push/pop enforces that, so
+// sharing the handle via &CudaContext from multiple threads is fine —
+// each thread still has to push before it can do work with it.
 unsafe impl Send for CudaContext {}
+unsafe impl Sync for CudaContext {}
 
 static CU_INIT: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
 

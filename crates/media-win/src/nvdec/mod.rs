@@ -17,6 +17,8 @@
 pub mod consumer;
 #[cfg(prdt_nvdec_bindings)]
 pub mod cuda;
+#[cfg(prdt_nvdec_bindings)]
+pub mod decoder;
 pub mod ffi;
 
 pub use consumer::NvdecD3d11Consumer;
