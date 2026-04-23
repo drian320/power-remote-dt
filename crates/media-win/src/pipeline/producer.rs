@@ -11,6 +11,8 @@ use crate::error::MediaError;
 use crate::nvenc::{NvencEncoder, NvencEncoderConfig};
 
 pub struct DxgiNvencProducer {
+    dev: D3d11Device,
+    output: OutputInfo,
     dup: DesktopDuplication,
     encoder: NvencEncoder,
     seq: u64,
@@ -41,6 +43,8 @@ impl DxgiNvencProducer {
         };
         let encoder = NvencEncoder::new(dev, &cfg)?;
         Ok(Self {
+            dev: dev.clone(),
+            output: output.clone(),
             dup,
             encoder,
             seq: 0,
@@ -65,14 +69,63 @@ impl DxgiNvencProducer {
 // don't touch it concurrently (we don't: &mut self on next_frame).
 unsafe impl Send for DxgiNvencProducer {}
 
+/// Classify an error from `DesktopDuplication::acquire_next_frame` as a
+/// "duplication lost" condition that we should try to recover from by
+/// re-creating the duplication. These HRESULTs show up when Windows takes
+/// the duplication context away from us (UAC secure-desktop prompt, screen
+/// lock, Ctrl+Alt+Del, fullscreen exclusive app, resolution change, etc.).
+fn is_access_lost(e: &MediaError) -> bool {
+    match e {
+        MediaError::Dxgi { hresult, .. } => {
+            // DXGI error HRESULTs we treat as recoverable.
+            const DXGI_ERROR_ACCESS_LOST: u32 = 0x887A_0026;
+            const DXGI_ERROR_ACCESS_DENIED: u32 = 0x887A_0027;
+            // After access-lost, subsequent calls on the stale duplication
+            // often come back as INVALID_CALL; treat that as recoverable too.
+            const DXGI_ERROR_INVALID_CALL: u32 = 0x887A_0001;
+            *hresult == DXGI_ERROR_ACCESS_LOST
+                || *hresult == DXGI_ERROR_ACCESS_DENIED
+                || *hresult == DXGI_ERROR_INVALID_CALL
+        }
+        _ => false,
+    }
+}
+
 #[async_trait::async_trait]
 impl VideoProducer for DxgiNvencProducer {
     async fn next_frame(&mut self) -> Result<EncodedFrame, ProducerError> {
         loop {
-            let acquired = self
-                .dup
-                .acquire_next_frame(Duration::from_millis(16))
-                .map_err(|e| ProducerError::Capture(e.to_string()))?;
+            let acquired = match self.dup.acquire_next_frame(Duration::from_millis(16)) {
+                Ok(a) => a,
+                Err(e) => {
+                    if is_access_lost(&e) {
+                        tracing::warn!(error = %e, "DXGI access lost; re-acquiring duplication");
+                        match DesktopDuplication::new(&self.dev, &self.output) {
+                            Ok(new_dup) => {
+                                self.dup = new_dup;
+                                // Viewer state is invalid after the gap; force the
+                                // next encoded frame to be an IDR.
+                                self.idr_pending = true;
+                                tokio::time::sleep(Duration::from_millis(50)).await;
+                                continue;
+                            }
+                            Err(re_err) => {
+                                // The OS is still holding the duplication away
+                                // from us (e.g. UAC prompt still up). Back off
+                                // and try again on the next loop iteration.
+                                tracing::warn!(
+                                    error = %re_err,
+                                    "re-acquiring DXGI duplication failed; backing off"
+                                );
+                                tokio::time::sleep(Duration::from_millis(250)).await;
+                                continue;
+                            }
+                        }
+                    } else {
+                        return Err(ProducerError::Capture(e.to_string()));
+                    }
+                }
+            };
             let texture = match acquired {
                 AcquiredFrame::Frame { texture, .. } => texture,
                 AcquiredFrame::Timeout => continue,

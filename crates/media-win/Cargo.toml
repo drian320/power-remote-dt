@@ -11,6 +11,7 @@ async-trait = "0.1"
 thiserror = { workspace = true }
 tracing = { workspace = true }
 bytes = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
 libloading = "0.8"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
