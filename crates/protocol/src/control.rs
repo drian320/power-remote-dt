@@ -44,6 +44,10 @@ pub enum ControlMessage {
     NoiseE1 { payload: Vec<u8> },
     /// Noise handshake stage 2 (responder → initiator).
     NoiseE2 { payload: Vec<u8> },
+    /// Bidirectional clipboard text update. Sender's clipboard just changed;
+    /// receiver should update its local clipboard to match (subject to size
+    /// and loop-back protection).
+    ClipboardText { text: String },
 }
 
 impl ControlMessage {
@@ -60,6 +64,7 @@ impl ControlMessage {
             Self::Stats { .. } => 7,
             Self::NoiseE1 { .. } => 10,
             Self::NoiseE2 { .. } => 11,
+            Self::ClipboardText { .. } => 12,
         }
     }
 }
@@ -97,6 +102,14 @@ mod tests {
             }
             .kind_u8(),
             11,
+        );
+    }
+
+    #[test]
+    fn clipboard_kind() {
+        assert_eq!(
+            ControlMessage::ClipboardText { text: "abc".into() }.kind_u8(),
+            12,
         );
     }
 

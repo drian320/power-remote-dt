@@ -559,7 +559,7 @@ pub fn decode_control(buf: &[u8]) -> Result<ControlMessage, ProtocolError> {
     let kind = buf[0];
     // We don't trust `kind` blindly; bincode will decode the whole tagged enum.
     // We keep the leading byte as a fast-path dispatch hint for future optimization.
-    if kind > 11 {
+    if kind > 12 {
         return Err(ProtocolError::UnknownControlKind(kind));
     }
     let msg: ControlMessage = bincode::deserialize(&buf[1..])?;
@@ -623,6 +623,16 @@ mod control_tests {
             decode_control(&buf).unwrap_err(),
             ProtocolError::UnknownControlKind(0xFF),
         ));
+    }
+
+    #[test]
+    fn clipboard_round_trip() {
+        let msg = ControlMessage::ClipboardText {
+            text: "hello 🌸".to_string(),
+        };
+        let buf = encode_control(&msg).unwrap();
+        let back = decode_control(&buf).unwrap();
+        assert_eq!(back, msg);
     }
 
     #[test]
