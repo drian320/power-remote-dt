@@ -102,9 +102,45 @@ pub async fn rendezvous_as_host(
     Ok(RendezvousOutcome { session_id, peer_addr: peer, peer_pubkey_b64: None })
 }
 
+#[instrument(skip(cfg), fields(host_id = %cfg.host_id))]
 pub async fn rendezvous_as_viewer(
-    _cfg: RendezvousConfig,
-    _local_udp_addr: std::net::SocketAddr,
+    cfg: RendezvousConfig,
+    local_udp_addr: SocketAddr,
 ) -> Result<RendezvousOutcome, SignalingError> {
-    unimplemented!("Task 12")
+    let mut ws = ws_connect(&cfg.url).await?;
+
+    send_msg(&mut ws, &ClientMessage::Connect { host_id: cfg.host_id.clone() }).await?;
+
+    let (session_id, peer_pubkey_b64) = match recv_msg(&mut ws, "session_start", cfg.timeout).await? {
+        ServerMessage::SessionStart { session_id, role: Role::Viewer, peer_pubkey_b64 } => (session_id, peer_pubkey_b64),
+        ServerMessage::Error { code, message } => return Err(SignalingError::Server { code, message }),
+        other => return Err(SignalingError::Protocol(format!("expected SessionStart, got {other:?}"))),
+    };
+    info!(%session_id, "session_start");
+
+    send_msg(&mut ws, &ClientMessage::Candidate {
+        session_id: session_id.clone(),
+        candidate: candidate_for(local_udp_addr),
+    }).await?;
+
+    let peer = match recv_msg(&mut ws, "peer_candidate", PEER_CANDIDATE_TIMEOUT).await? {
+        ServerMessage::PeerCandidate { candidate, .. } => {
+            if candidate.typ != CandidateType::Host {
+                return Err(SignalingError::BadCandidate(format!("unsupported typ {:?}", candidate.typ)));
+            }
+            let s = format!("{}:{}", candidate.ip, candidate.port);
+            s.parse::<SocketAddr>()
+                .map_err(|e| SignalingError::BadCandidate(format!("{e}: {s}")))?
+        }
+        ServerMessage::Error { code, message } => return Err(SignalingError::Server { code, message }),
+        other => return Err(SignalingError::Protocol(format!("expected PeerCandidate, got {other:?}"))),
+    };
+
+    send_msg(&mut ws, &ClientMessage::Done {
+        session_id: session_id.clone(),
+        outcome: DoneOutcome::Connected,
+    }).await?;
+
+    let _ = ws.close(None).await;
+    Ok(RendezvousOutcome { session_id, peer_addr: peer, peer_pubkey_b64 })
 }
