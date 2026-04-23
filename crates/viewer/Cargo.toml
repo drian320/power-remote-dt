@@ -10,6 +10,7 @@ name = "prdt-viewer"
 path = "src/main.rs"
 
 [dependencies]
+prdt-audio = { path = "../audio" }
 prdt-crypto = { path = "../crypto" }
 prdt-protocol = { path = "../protocol" }
 prdt-transport = { path = "../transport" }

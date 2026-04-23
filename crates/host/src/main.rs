@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use prdt_audio::{LoopbackCapture, OpusEncoder};
 use prdt_crypto::KeyPair;
 use prdt_input_win::{
     read_clipboard_text, write_clipboard_text, SendInputInjector, MAX_CLIPBOARD_BYTES,
@@ -14,7 +15,7 @@ use prdt_input_win::{
 use prdt_media_win::{
     dxgi::enumerate_outputs_for_adapter, pick_default_adapter, D3d11Device, DxgiNvencProducer,
 };
-use prdt_protocol::{ControlMessage, VideoProducer};
+use prdt_protocol::{wire::AudioPacket, ControlMessage, VideoProducer};
 use prdt_transport::{
     host_handshake, now_monotonic_us, CustomUdpTransport, ReceivedMessage, Transport,
     UdpTransportConfig,
@@ -171,6 +172,68 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Spawn audio capture + encode + send loop. If the default output device
+    // isn't 48kHz stereo (or loopback fails for any other reason) we log and
+    // skip audio — video/input continue normally.
+    //
+    // `LoopbackCapture` wraps a `cpal::Stream` which is `!Send` on Windows
+    // (WASAPI streams are bound to the creating thread via COM), so it lives
+    // on a dedicated OS thread. The thread hands PCM frames over to the
+    // async encode/send task via a tokio mpsc.
+    let (pcm_async_tx, mut pcm_async_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
+    std::thread::Builder::new()
+        .name("prdt-host-audio-capture".into())
+        .spawn(move || match LoopbackCapture::start() {
+            Ok((cap, mut pcm_rx)) => {
+                // Keep the capture stream alive for the thread's lifetime.
+                let _cap = cap;
+                // Bridge the std-thread-owned blocking receiver to the async
+                // side. The cpal callback sends into a tokio UnboundedReceiver
+                // via `unbounded_send`, which doesn't require a runtime, so we
+                // can block_recv and forward.
+                while let Some(frame) = pcm_rx.blocking_recv() {
+                    if pcm_async_tx.send(frame).is_err() {
+                        break; // async side gone
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(?e, "audio capture failed; skipping audio");
+            }
+        })
+        .expect("spawn audio capture thread");
+
+    let audio_transport = Arc::clone(&transport);
+    let audio_task = tokio::spawn(async move {
+        let mut encoder = match OpusEncoder::new() {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(?e, "opus encoder init");
+                return;
+            }
+        };
+        let epoch = std::time::Instant::now();
+        let mut seq = 0u64;
+        while let Some(frame) = pcm_async_rx.recv().await {
+            let opus_bytes = match encoder.encode(&frame) {
+                Ok(b) => b,
+                Err(e) => {
+                    warn!(?e, "opus encode");
+                    continue;
+                }
+            };
+            seq += 1;
+            let pkt = AudioPacket {
+                seq,
+                timestamp_us: epoch.elapsed().as_micros() as u64,
+                opus_bytes,
+            };
+            if let Err(e) = audio_transport.send_audio(pkt).await {
+                warn!(?e, "send_audio");
+            }
+        }
+    });
+
     // Shared "last clipboard text we received from peer" — used by the
     // clipboard watcher to avoid echoing remote updates back to the peer.
     let last_remote_clipboard: Arc<tokio::sync::Mutex<Option<String>>> =
@@ -247,6 +310,7 @@ async fn main() -> Result<()> {
     tokio::select! {
         _ = video => info!("video task ended"),
         _ = input => info!("input task ended"),
+        _ = audio_task => info!("audio task ended"),
         _ = clip_task => info!("clipboard task ended"),
         _ = tokio::signal::ctrl_c() => info!("ctrl-c received"),
     }

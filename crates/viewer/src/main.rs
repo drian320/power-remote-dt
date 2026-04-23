@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use prdt_audio::{AudioPlayback, OpusDecoder};
 use prdt_crypto::{KnownHosts, PubKey};
 use prdt_input_win::{
     read_clipboard_text, write_clipboard_text, RawInputCapturer, MAX_CLIPBOARD_BYTES,
@@ -503,11 +504,43 @@ fn spawn_worker_tasks(
         let last_remote_clipboard: Arc<tokio::sync::Mutex<Option<String>>> =
             Arc::new(tokio::sync::Mutex::new(None));
 
+        // Audio playback lives on a dedicated OS thread because the cpal
+        // `Stream` is `!Send` on Windows (WASAPI binds the stream to the
+        // creating thread via COM). The recv_task decodes Opus → PCM and
+        // pushes frames via a std::sync::mpsc; the playback thread owns the
+        // `AudioPlayback` and calls `enqueue` as frames arrive.
+        //
+        // If device init fails the `audio_pcm_tx` stays `None`, decoded audio
+        // is simply dropped, and video/input keep working.
+        let (audio_pcm_tx, audio_pcm_rx) = std::sync::mpsc::channel::<Vec<f32>>();
+        std::thread::Builder::new()
+            .name("prdt-viewer-audio".into())
+            .spawn(move || match AudioPlayback::start() {
+                Ok(pb) => {
+                    while let Ok(pcm) = audio_pcm_rx.recv() {
+                        pb.enqueue(&pcm);
+                    }
+                }
+                Err(e) => {
+                    warn!(?e, "audio playback init failed; audio muted");
+                    // Drain the channel forever so senders don't block on a
+                    // disconnected receiver.
+                    while audio_pcm_rx.recv().is_ok() {}
+                }
+            })
+            .expect("spawn audio thread");
+
+        let audio_decoder = Arc::new(tokio::sync::Mutex::new(
+            OpusDecoder::new().expect("opus decoder"),
+        ));
+
         // Recv loop: video → consumer; also handle control messages.
         let recv_shared = Arc::clone(&shared);
         let recv_transport = Arc::clone(&transport);
         let recv_consumer = Arc::clone(&consumer);
         let recv_last_remote = Arc::clone(&last_remote_clipboard);
+        let recv_decoder = Arc::clone(&audio_decoder);
+        let recv_audio_tx = audio_pcm_tx;
         let recv_task = tokio::spawn(async move {
             info!("recv_task started");
             let mut frame_count = 0u64;
@@ -587,6 +620,17 @@ fn spawn_worker_tasks(
                     }
                     Ok(ReceivedMessage::Input(_)) => {
                         input_count += 1;
+                    }
+                    Ok(ReceivedMessage::Audio(pkt)) => {
+                        let mut dec = recv_decoder.lock().await;
+                        match dec.decode(&pkt.opus_bytes) {
+                            Ok(pcm) => {
+                                if let Err(e) = recv_audio_tx.send(pcm) {
+                                    warn!(?e, seq = pkt.seq, "audio thread disconnected");
+                                }
+                            }
+                            Err(e) => warn!(?e, seq = pkt.seq, "opus decode"),
+                        }
                     }
                     Err(e) => {
                         err_count += 1;
