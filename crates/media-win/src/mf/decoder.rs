@@ -135,7 +135,13 @@ impl H265Decoder {
             }
 
             if count == 0 {
-                return Err(MediaError::Other("no H.265 decoder MFT available".into()));
+                return Err(MediaError::Other(
+                    "no H.265 decoder MFT available — install \"HEVC Video \
+                     Extensions\" from Microsoft Store (ProductId \
+                     9NMZLZ57R3T7) or the free OEM variant (9N4WGH0Z6VHQ); \
+                     without it the viewer cannot decode the host's stream"
+                        .into(),
+                ));
             }
 
             // Take the first result. Phase 0 accepts the minor leak of the
