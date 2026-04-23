@@ -517,7 +517,7 @@ fn main() -> Result<()> {
             })?)
         }
         (None, _, None) => None, // signaling mode will resolve below
-        (None, Some(_), None) => None, // signaling mode will resolve below
+        (None, None, Some(_)) => None, // no pubkey source; validated below
     };
 
     if args.signaling_url.is_some() {
