@@ -8,7 +8,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::Parser;
 use prdt_crypto::KeyPair;
-use prdt_input_win::SendInputInjector;
+use prdt_input_win::{
+    read_clipboard_text, write_clipboard_text, SendInputInjector, MAX_CLIPBOARD_BYTES,
+};
 use prdt_media_win::{
     dxgi::enumerate_outputs_for_adapter, pick_default_adapter, D3d11Device, DxgiNvencProducer,
 };
@@ -169,15 +171,28 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Shared "last clipboard text we received from peer" — used by the
+    // clipboard watcher to avoid echoing remote updates back to the peer.
+    let last_remote_clipboard: Arc<tokio::sync::Mutex<Option<String>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+
     // Spawn input injection loop.
     let rx_input = Arc::clone(&transport);
     let injector = SendInputInjector::new();
+    let input_last_remote = Arc::clone(&last_remote_clipboard);
     let input = tokio::spawn(async move {
         loop {
             match rx_input.recv().await {
                 Ok(ReceivedMessage::Input(ev)) => {
                     if let Err(e) = injector.inject(ev) {
                         warn!(?e, "inject error");
+                    }
+                }
+                Ok(ReceivedMessage::Control(ControlMessage::ClipboardText { text })) => {
+                    // Remember this text so the watcher loop doesn't echo it back.
+                    *input_last_remote.lock().await = Some(text.clone());
+                    if let Err(e) = write_clipboard_text(&text) {
+                        warn!(?e, "write_clipboard_text failed");
                     }
                 }
                 Ok(ReceivedMessage::Control(ControlMessage::Bye)) => {
@@ -193,9 +208,46 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Spawn clipboard watcher: poll the OS clipboard and forward changes.
+    let clip_transport = Arc::clone(&transport);
+    let clip_last_remote = Arc::clone(&last_remote_clipboard);
+    let clip_task = tokio::spawn(async move {
+        let mut last_sent: Option<String> = None;
+        loop {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let current = match read_clipboard_text() {
+                Ok(t) => t,
+                Err(_) => continue, // no text / inaccessible / transient failure
+            };
+            if current.len() > MAX_CLIPBOARD_BYTES {
+                continue;
+            }
+            // Skip if same as last we sent.
+            if last_sent.as_ref() == Some(&current) {
+                continue;
+            }
+            // Skip if this matches what we just received from the peer —
+            // don't echo remote updates back.
+            if clip_last_remote.lock().await.as_ref() == Some(&current) {
+                continue;
+            }
+            if let Err(e) = clip_transport
+                .send_control(ControlMessage::ClipboardText {
+                    text: current.clone(),
+                })
+                .await
+            {
+                warn!(?e, "send clipboard failed");
+            } else {
+                last_sent = Some(current);
+            }
+        }
+    });
+
     tokio::select! {
         _ = video => info!("video task ended"),
         _ = input => info!("input task ended"),
+        _ = clip_task => info!("clipboard task ended"),
         _ = tokio::signal::ctrl_c() => info!("ctrl-c received"),
     }
     Ok(())

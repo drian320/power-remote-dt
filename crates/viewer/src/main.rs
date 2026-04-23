@@ -7,7 +7,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::Parser;
 use prdt_crypto::{KnownHosts, PubKey};
-use prdt_input_win::RawInputCapturer;
+use prdt_input_win::{
+    read_clipboard_text, write_clipboard_text, RawInputCapturer, MAX_CLIPBOARD_BYTES,
+};
 use prdt_media_win::{
     pick_default_adapter, D3d11Device, D3d11Texture, MfD3d11Consumer, Nv12Renderer, SwapChain,
 };
@@ -496,10 +498,16 @@ fn spawn_worker_tasks(
         };
         info!("MfD3d11Consumer created; spawning worker tasks");
 
+        // Shared "last clipboard text received from host" — used by the
+        // watcher below to avoid echoing remote updates back.
+        let last_remote_clipboard: Arc<tokio::sync::Mutex<Option<String>>> =
+            Arc::new(tokio::sync::Mutex::new(None));
+
         // Recv loop: video → consumer; also handle control messages.
         let recv_shared = Arc::clone(&shared);
         let recv_transport = Arc::clone(&transport);
         let recv_consumer = Arc::clone(&consumer);
+        let recv_last_remote = Arc::clone(&last_remote_clipboard);
         let recv_task = tokio::spawn(async move {
             info!("recv_task started");
             let mut frame_count = 0u64;
@@ -566,6 +574,14 @@ fn spawn_worker_tasks(
                     Ok(ReceivedMessage::Control(ControlMessage::Pong { .. })) => {
                         control_count += 1;
                     }
+                    Ok(ReceivedMessage::Control(ControlMessage::ClipboardText { text })) => {
+                        control_count += 1;
+                        // Record so the watcher loop doesn't echo it back.
+                        *recv_last_remote.lock().await = Some(text.clone());
+                        if let Err(e) = write_clipboard_text(&text) {
+                            warn!(?e, "write_clipboard_text failed");
+                        }
+                    }
                     Ok(ReceivedMessage::Control(_)) => {
                         control_count += 1;
                     }
@@ -609,11 +625,45 @@ fn spawn_worker_tasks(
             }
         });
 
+        // Clipboard watcher: poll the OS clipboard and forward changes to the host.
+        let clip_transport = Arc::clone(&transport);
+        let clip_last_remote = Arc::clone(&last_remote_clipboard);
+        let clip_task = tokio::spawn(async move {
+            let mut last_sent: Option<String> = None;
+            loop {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let current = match read_clipboard_text() {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                if current.len() > MAX_CLIPBOARD_BYTES {
+                    continue;
+                }
+                if last_sent.as_ref() == Some(&current) {
+                    continue;
+                }
+                if clip_last_remote.lock().await.as_ref() == Some(&current) {
+                    continue;
+                }
+                if let Err(e) = clip_transport
+                    .send_control(ControlMessage::ClipboardText {
+                        text: current.clone(),
+                    })
+                    .await
+                {
+                    warn!(?e, "send clipboard failed");
+                } else {
+                    last_sent = Some(current);
+                }
+            }
+        });
+
         // If any loop exits, tear down.
         tokio::select! {
             _ = recv_task => info!("recv task ended"),
             _ = send_task => info!("send task ended"),
             _ = ping_task => info!("ping task ended"),
+            _ = clip_task => info!("clipboard task ended"),
         }
     });
 }
