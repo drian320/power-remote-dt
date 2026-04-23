@@ -114,15 +114,35 @@ fn generate_nvdec_bindings() {
     let nvcuvid = sdk_path.join("Interface").join("nvcuvid.h");
     let cuviddec = sdk_path.join("Interface").join("cuviddec.h");
     let cuda_h = cuda_path.join("include").join("cuda.h");
-    for h in [&nvcuvid, &cuviddec, &cuda_h] {
+    let cuda_d3d11 = cuda_path.join("include").join("cudaD3D11.h");
+    for h in [&nvcuvid, &cuviddec, &cuda_h, &cuda_d3d11] {
         if !h.exists() {
             panic!("missing NVDEC dependency header: {}", h.display());
         }
         println!("cargo:rerun-if-changed={}", h.display());
     }
 
+    // Bindgen needs merged bindings for nvcuvid + the CUDA-D3D11 interop
+    // functions. cudaD3D11.h references ID3D11Device / IDXGIAdapter /
+    // ID3D11Resource from the Windows SDK d3d11.h, which we don't want to
+    // pull into clang here (it's a huge dependency and we treat D3D11
+    // handles as opaque pointers at the CUDA boundary anyway). Forward-
+    // declare the few types cudaD3D11.h references so bindgen sees them
+    // as opaque structs. The Rust-side wrapper casts `*mut c_void` from
+    // the `windows` crate's COM types.
+    let umbrella = PathBuf::from(&out_dir).join("nvdec_umbrella.h");
+    std::fs::write(
+        &umbrella,
+        "typedef struct ID3D11Device ID3D11Device;\n\
+         typedef struct ID3D11Resource ID3D11Resource;\n\
+         typedef struct IDXGIAdapter IDXGIAdapter;\n\
+         #include <nvcuvid.h>\n\
+         #include <cudaD3D11.h>\n",
+    )
+    .expect("write umbrella header");
+
     let bindings = bindgen::Builder::default()
-        .header(nvcuvid.to_string_lossy())
+        .header(umbrella.to_string_lossy())
         .clang_arg(format!("-I{}", sdk_path.join("Interface").display()))
         .clang_arg(format!("-I{}", cuda_path.join("include").display()))
         // nvcuvid/cuviddec types we actually use.
@@ -168,8 +188,12 @@ fn generate_nvdec_bindings() {
     let cuda_lib = cuda_path.join("lib").join("x64");
     println!("cargo:rustc-link-search=native={}", sdk_lib.display());
     println!("cargo:rustc-link-search=native={}", cuda_lib.display());
-    // Only emit the link arguments when the nvdec consumer actually ends
-    // up in the final binary — guarded by the `nvdec` Cargo feature. We
-    // set a cfg here so the Rust side can match on it.
+    // Link the CUDA Driver API + nvcuvid import libs so the Rust FFI
+    // extern blocks resolve. These are implicit imports from the
+    // bindgen-generated bindings; if we don't emit them, the linker
+    // fails on `unresolved external symbol cuInit` etc.
+    println!("cargo:rustc-link-lib=cuda");
+    println!("cargo:rustc-link-lib=nvcuvid");
+    // Tell Rust code the CUDA-capable code paths are compiled in.
     println!("cargo:rustc-cfg=prdt_nvdec_bindings");
 }

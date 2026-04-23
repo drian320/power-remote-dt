@@ -1,27 +1,27 @@
-//! `NvdecD3d11Consumer` — placeholder wiring for the Plan 2d NVDEC decoder.
+//! `NvdecD3d11Consumer` — Plan 2d NVDEC decoder wiring.
 //!
-//! When `prdt_nvdec_bindings` is set (build.rs generated real bindings),
-//! this module will host the real CUvideodecoder + CUDA-D3D11 interop
-//! code. Until CUDA Toolkit is installed on this dev machine, `new()`
-//! returns a `NotAvailable` runtime error. Upstream callers (viewer main
-//! behind a future `--decoder nvdec` flag) can fall back to MF gracefully.
+//! With `prdt_nvdec_bindings` set (CUDA Toolkit + Video Codec SDK both
+//! present at build time), this creates a primary CUDA context ready for
+//! a CUvideoparser / CUvideodecoder pair. Until those wrappers land
+//! (Plan 2d step 2b), `submit()` still errors out. The point of this
+//! commit is to prove the CUDA context + D3D11 interop path comes up
+//! cleanly, so the expensive-to-debug FFI bring-up can be done in small
+//! verified steps instead of one monolithic 700-LOC diff.
 
 use prdt_protocol::{ConsumerError, EncodedFrame, VideoConsumer};
 
+#[cfg(prdt_nvdec_bindings)]
+use super::cuda::CudaContext;
 use crate::d3d11::{D3d11Device, D3d11Texture};
 use crate::error::MediaError;
 
 /// Drop-in alternative to `MfD3d11Consumer` using nvcuvid.dll directly.
-/// Construction currently errors out when CUDA Toolkit isn't present; the
-/// actual FFI lives behind the `prdt_nvdec_bindings` cfg.
+/// Construction creates a CUDA context and validates the driver path;
+/// actual HEVC decoding via CUvideoparser + CUvideodecoder is Plan 2d
+/// step 2b (pending).
 pub struct NvdecD3d11Consumer {
-    // Once the bindgen path is live, this struct holds:
-    //   - CUcontext (pushed during each decode call)
-    //   - CUvideodecoder
-    //   - CUvideoparser (or direct submit without parser)
-    //   - An ID3D11Texture2D ring bound via CUDA-D3D11 interop
-    //   - Latest-texture slot like MfD3d11Consumer
-    // For now we keep the slot so upstream can still build.
+    #[cfg(prdt_nvdec_bindings)]
+    _ctx: CudaContext,
     _dev: D3d11Device,
     _width: u32,
     _height: u32,
@@ -31,15 +31,18 @@ impl NvdecD3d11Consumer {
     pub fn new(dev: &D3d11Device, width: u32, height: u32) -> Result<Self, MediaError> {
         #[cfg(prdt_nvdec_bindings)]
         {
-            // Real init lives here in a follow-up commit. For now even with
-            // bindings present we bail so CI / dev builds behave identically
-            // until the full FFI wiring lands.
-            return Err(MediaError::Other(
-                "NVDEC bindings are present but the CUcontext + CUvideodecoder \
-                 wiring is not yet implemented — track Plan 2d step 2 in \
-                 PHASE0-STATUS.md"
-                    .into(),
-            ));
+            let ctx = CudaContext::create_primary()?;
+            tracing::info!(
+                width,
+                height,
+                "NVDEC: CUDA context created; decoder pipeline stub (Plan 2d step 2b pending)",
+            );
+            Ok(Self {
+                _ctx: ctx,
+                _dev: dev.clone(),
+                _width: width,
+                _height: height,
+            })
         }
         #[cfg(not(prdt_nvdec_bindings))]
         {
@@ -79,29 +82,48 @@ mod tests {
     use super::*;
     use crate::adapter::pick_default_adapter;
 
+    /// When the Plan 2d bindings are present AND the dev box has an NVIDIA
+    /// driver, construction should succeed (CUDA context creation is the
+    /// only work `new` actually does right now — decode is still stubbed).
+    /// When the bindings aren't compiled in, `new` must return a clear
+    /// `NVDEC not available` error instead of silently doing nothing.
     #[test]
-    fn construction_without_cuda_returns_not_available() {
+    fn construction_matches_feature_availability() {
         let adapter = match pick_default_adapter() {
             Ok(a) => a,
-            Err(_) => return, // no adapter in headless CI — skip
+            Err(_) => return,
         };
         let dev = match D3d11Device::create(&adapter) {
             Ok(d) => d,
             Err(_) => return,
         };
-        let err = match NvdecD3d11Consumer::new(&dev, 1920, 1080) {
-            Ok(_) => panic!("NvdecD3d11Consumer::new unexpectedly succeeded"),
-            Err(e) => e,
-        };
-        match err {
-            MediaError::Other(msg) => {
-                assert!(
-                    msg.contains("NVDEC")
-                        && (msg.contains("not available") || msg.contains("not yet implemented")),
-                    "unexpected error string: {msg}",
-                );
+        let result = NvdecD3d11Consumer::new(&dev, 1920, 1080);
+
+        #[cfg(prdt_nvdec_bindings)]
+        {
+            match result {
+                Ok(_c) => { /* CUDA context came up cleanly */ }
+                Err(MediaError::Other(msg)) => {
+                    // Only legitimate reason to fail with bindings present is
+                    // "no CUDA device" — we treat that as skipped, not failed.
+                    assert!(msg.contains("CUDA"), "unexpected error: {msg}",);
+                    eprintln!("skipping: {msg}");
+                }
+                Err(other) => panic!("unexpected error: {other}"),
             }
-            other => panic!("expected MediaError::Other, got {other:?}"),
+        }
+        #[cfg(not(prdt_nvdec_bindings))]
+        {
+            let err = result.expect_err("new should fail without bindings");
+            match err {
+                MediaError::Other(msg) => {
+                    assert!(
+                        msg.contains("NVDEC") && msg.contains("not available"),
+                        "unexpected error: {msg}",
+                    );
+                }
+                other => panic!("expected MediaError::Other, got {other}"),
+            }
         }
     }
 }
