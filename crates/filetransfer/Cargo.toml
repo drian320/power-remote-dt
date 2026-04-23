@@ -1,0 +1,18 @@
+[package]
+name = "prdt-filetransfer"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+prdt-protocol = { path = "../protocol" }
+prdt-transport = { path = "../transport" }
+async-trait = "0.1"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "sync", "time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time"] }
+tempfile = "3.13"

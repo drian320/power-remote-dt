@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 prdt-audio = { path = "../audio" }
 prdt-crypto = { path = "../crypto" }
+prdt-filetransfer = { path = "../filetransfer" }
 prdt-protocol = { path = "../protocol" }
 prdt-transport = { path = "../transport" }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "sync", "time", "signal", "fs", "io-util"] }

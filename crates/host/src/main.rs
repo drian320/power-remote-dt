@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use prdt_audio::{LoopbackCapture, OpusEncoder};
 use prdt_crypto::KeyPair;
+use prdt_filetransfer::{send_file, TransferReceiver, DEFAULT_MAX_TRANSFER_BYTES};
 use prdt_input_win::{
     read_clipboard_text, virtual_desktop_rect, write_clipboard_text, SendInputInjector,
     MAX_CLIPBOARD_BYTES,
@@ -23,36 +24,10 @@ use prdt_transport::{
 };
 use tracing::{info, warn};
 
-const MAX_TRANSFER_BYTES: u64 = 64 * 1024 * 1024;
 const FILE_RECV_DIR: &str = "prdt-received";
-
-struct InProgressTransfer {
-    filename: std::path::PathBuf,
-    file: std::fs::File,
-    total_bytes: u64,
-    written_bytes: u64,
-    next_chunk_seq: u32,
-}
-
-fn unique_path(base: &std::path::Path) -> std::path::PathBuf {
-    if !base.exists() {
-        return base.to_path_buf();
-    }
-    let stem = base.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
-    let ext = base.extension().and_then(|s| s.to_str()).unwrap_or("");
-    let parent = base.parent().unwrap_or(std::path::Path::new("."));
-    for i in 1..10_000 {
-        let candidate = if ext.is_empty() {
-            parent.join(format!("{stem}-{i}"))
-        } else {
-            parent.join(format!("{stem}-{i}.{ext}"))
-        };
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-    base.to_path_buf()
-}
+const FILE_SEND_DIR: &str = "prdt-outgoing";
+const FILE_SEND_SENT_SUBDIR: &str = "sent";
+const OUTGOING_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Parser, Debug)]
 #[command(
@@ -77,6 +52,12 @@ struct Args {
     /// so the viewer can pin it via `--host-pubkey`.
     #[arg(long, default_value = "host-key.bin")]
     key_file: std::path::PathBuf,
+
+    /// Directory the host watches for outgoing files. Any file dropped into
+    /// this dir is streamed to the connected viewer and then moved to
+    /// `<outgoing_dir>/sent/` so it isn't sent twice. Created on demand.
+    #[arg(long, default_value = FILE_SEND_DIR)]
+    outgoing_dir: std::path::PathBuf,
 }
 
 #[tokio::main]
@@ -290,7 +271,7 @@ async fn main() -> Result<()> {
     let injector = SendInputInjector::new();
     let input_last_remote = Arc::clone(&last_remote_clipboard);
     let input = tokio::spawn(async move {
-        let mut transfers: std::collections::HashMap<u64, InProgressTransfer> = Default::default();
+        let mut ft_rx = TransferReceiver::new(FILE_RECV_DIR, DEFAULT_MAX_TRANSFER_BYTES);
         loop {
             match rx_input.recv().await {
                 Ok(ReceivedMessage::Input(ev)) => {
@@ -305,111 +286,12 @@ async fn main() -> Result<()> {
                         warn!(?e, "write_clipboard_text failed");
                     }
                 }
-                Ok(ReceivedMessage::Control(ControlMessage::FileTransferBegin {
-                    transfer_id,
-                    filename,
-                    total_bytes,
-                })) => {
-                    if total_bytes > MAX_TRANSFER_BYTES {
-                        warn!(%filename, total_bytes, "rejecting oversized transfer");
-                        continue;
-                    }
-                    // Sanitize filename: basename only, reject empty/".." and NULs.
-                    let base = std::path::Path::new(&filename)
-                        .file_name()
-                        .and_then(|os| os.to_str())
-                        .map(|s| s.to_string())
-                        .filter(|s| !s.is_empty() && s != ".." && !s.contains('\0'));
-                    let base = match base {
-                        Some(b) => b,
-                        None => {
-                            warn!(%filename, "rejecting unsafe filename");
-                            continue;
-                        }
-                    };
-                    if let Err(e) = std::fs::create_dir_all(FILE_RECV_DIR) {
-                        warn!(?e, "create_dir_all failed");
-                        continue;
-                    }
-                    let mut dest = std::path::PathBuf::from(FILE_RECV_DIR);
-                    dest.push(&base);
-                    // If file exists, append "-N" until unique to avoid clobbering.
-                    let dest = unique_path(&dest);
-                    let file = match std::fs::File::create(&dest) {
-                        Ok(f) => f,
-                        Err(e) => {
-                            warn!(?e, path = %dest.display(), "file create failed");
-                            continue;
-                        }
-                    };
-                    info!(transfer_id, filename = %base, %total_bytes, path = %dest.display(), "file transfer start");
-                    transfers.insert(
-                        transfer_id,
-                        InProgressTransfer {
-                            filename: dest,
-                            file,
-                            total_bytes,
-                            written_bytes: 0,
-                            next_chunk_seq: 0,
-                        },
-                    );
-                }
-                Ok(ReceivedMessage::Control(ControlMessage::FileChunk {
-                    transfer_id,
-                    chunk_seq,
-                    bytes,
-                })) => {
-                    use std::io::Write;
-                    let Some(t) = transfers.get_mut(&transfer_id) else {
-                        warn!(transfer_id, "unknown transfer_id");
-                        continue;
-                    };
-                    if chunk_seq != t.next_chunk_seq {
-                        warn!(
-                            transfer_id,
-                            expected = t.next_chunk_seq,
-                            got = chunk_seq,
-                            "out-of-order chunk"
-                        );
-                        transfers.remove(&transfer_id);
-                        continue;
-                    }
-                    if t.written_bytes + bytes.len() as u64 > t.total_bytes {
-                        warn!(transfer_id, "chunk overflows declared total_bytes");
-                        transfers.remove(&transfer_id);
-                        continue;
-                    }
-                    if let Err(e) = t.file.write_all(&bytes) {
-                        warn!(?e, transfer_id, "write chunk failed");
-                        transfers.remove(&transfer_id);
-                        continue;
-                    }
-                    t.written_bytes += bytes.len() as u64;
-                    t.next_chunk_seq += 1;
-                }
-                Ok(ReceivedMessage::Control(ControlMessage::FileTransferEnd {
-                    transfer_id,
-                    success,
-                })) => {
-                    let Some(t) = transfers.remove(&transfer_id) else {
-                        warn!(transfer_id, "unknown transfer_id for end");
-                        continue;
-                    };
-                    if success && t.written_bytes == t.total_bytes {
-                        info!(transfer_id, path = %t.filename.display(), "file transfer complete");
-                    } else {
-                        warn!(
-                            transfer_id,
-                            success,
-                            written = t.written_bytes,
-                            total = t.total_bytes,
-                            "transfer did not complete cleanly; keeping partial file"
-                        );
-                    }
-                }
                 Ok(ReceivedMessage::Control(ControlMessage::Bye)) => {
                     info!("peer sent Bye");
                     break;
+                }
+                Ok(ReceivedMessage::Control(msg)) => {
+                    let _ = ft_rx.handle(msg);
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -456,11 +338,65 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Outgoing-dir watcher: poll `args.outgoing_dir` every few seconds.
+    // Any regular file (not in the `sent/` subdir, not a dotfile) gets
+    // streamed to the viewer and then moved into `sent/` so we don't
+    // resend on the next poll. The `sent/` subdir is created on demand.
+    let ft_transport = Arc::clone(&transport);
+    let outgoing_dir = args.outgoing_dir.clone();
+    let outgoing_task = tokio::spawn(async move {
+        let sent_dir = outgoing_dir.join(FILE_SEND_SENT_SUBDIR);
+        loop {
+            tokio::time::sleep(OUTGOING_POLL_INTERVAL).await;
+            if !outgoing_dir.is_dir() {
+                continue;
+            }
+            let mut read_dir = match tokio::fs::read_dir(&outgoing_dir).await {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(?e, path = %outgoing_dir.display(), "read_dir failed");
+                    continue;
+                }
+            };
+            while let Ok(Some(entry)) = read_dir.next_entry().await {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let name = path.file_name().and_then(|s| s.to_str());
+                if name.map_or(true, |n| n.starts_with('.')) {
+                    continue;
+                }
+                info!(path = %path.display(), "sending outgoing file to viewer");
+                match send_file(&ft_transport, &path, DEFAULT_MAX_TRANSFER_BYTES).await {
+                    Ok(()) => {
+                        if let Err(e) = tokio::fs::create_dir_all(&sent_dir).await {
+                            warn!(?e, "create sent/ subdir failed");
+                            continue;
+                        }
+                        let dest = sent_dir.join(path.file_name().unwrap());
+                        let dest = prdt_filetransfer::unique_path(&dest);
+                        if let Err(e) = tokio::fs::rename(&path, &dest).await {
+                            warn!(
+                                ?e,
+                                from = %path.display(),
+                                to = %dest.display(),
+                                "move to sent/ failed; file will be resent on next poll",
+                            );
+                        }
+                    }
+                    Err(e) => warn!(?e, path = %path.display(), "send_file failed"),
+                }
+            }
+        }
+    });
+
     tokio::select! {
         _ = video => info!("video task ended"),
         _ = input => info!("input task ended"),
         _ = audio_task => info!("audio task ended"),
         _ = clip_task => info!("clipboard task ended"),
+        _ = outgoing_task => info!("outgoing file watcher ended"),
         _ = tokio::signal::ctrl_c() => info!("ctrl-c received"),
     }
     Ok(())

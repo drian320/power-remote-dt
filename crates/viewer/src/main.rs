@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use prdt_audio::{AudioPlayback, OpusDecoder};
 use prdt_crypto::{KnownHosts, PubKey};
+use prdt_filetransfer::{send_file, TransferReceiver, DEFAULT_MAX_TRANSFER_BYTES};
 use prdt_input_win::{
     read_clipboard_text, write_clipboard_text, RawInputCapturer, MAX_CLIPBOARD_BYTES,
 };
@@ -57,6 +58,11 @@ struct Args {
     /// Ignored if --host-pubkey is set.
     #[arg(long)]
     known_hosts: Option<std::path::PathBuf>,
+
+    /// Directory into which files streamed from the host land. Created on
+    /// demand; collisions get a `-N` suffix so nothing is overwritten.
+    #[arg(long, default_value = "prdt-received")]
+    recv_dir: std::path::PathBuf,
 }
 
 fn parse_resolution(s: &str) -> Result<(u32, u32)> {
@@ -451,6 +457,7 @@ fn main() -> Result<()> {
         req_w,
         req_h,
         args.fps,
+        args.recv_dir.clone(),
     );
 
     // Build the event loop + app.
@@ -485,6 +492,7 @@ fn spawn_worker_tasks(
     req_w: u32,
     req_h: u32,
     req_fps: u32,
+    recv_dir: std::path::PathBuf,
 ) {
     handle.clone().spawn(async move {
         // Bind an ephemeral UDP socket and point it at the host. The host binds
@@ -603,8 +611,10 @@ fn spawn_worker_tasks(
         let recv_last_remote = Arc::clone(&last_remote_clipboard);
         let recv_decoder = Arc::clone(&audio_decoder);
         let recv_audio_tx = audio_pcm_tx;
+        let recv_ft_dir = recv_dir.clone();
         let recv_task = tokio::spawn(async move {
             info!("recv_task started");
+            let mut ft_rx = TransferReceiver::new(recv_ft_dir, DEFAULT_MAX_TRANSFER_BYTES);
             let mut frame_count = 0u64;
             let mut tex_count = 0u64;
             let mut control_count = 0u64;
@@ -677,8 +687,9 @@ fn spawn_worker_tasks(
                             warn!(?e, "write_clipboard_text failed");
                         }
                     }
-                    Ok(ReceivedMessage::Control(_)) => {
+                    Ok(ReceivedMessage::Control(msg)) => {
                         control_count += 1;
+                        let _ = ft_rx.handle(msg);
                     }
                     Ok(ReceivedMessage::Input(_)) => {
                         input_count += 1;
@@ -735,7 +746,7 @@ fn spawn_worker_tasks(
         let ft_transport = Arc::clone(&transport);
         let ft_task = tokio::spawn(async move {
             while let Some(path) = file_drop_rx.recv().await {
-                match send_file_as_transfer(&ft_transport, &path).await {
+                match send_file(&ft_transport, &path, DEFAULT_MAX_TRANSFER_BYTES).await {
                     Ok(()) => info!(path = %path.display(), "file transfer sent"),
                     Err(e) => warn!(?e, path = %path.display(), "file transfer failed"),
                 }
@@ -784,64 +795,6 @@ fn spawn_worker_tasks(
             _ = ft_task => info!("file transfer task ended"),
         }
     });
-}
-
-/// Chunk size for FileChunk control messages. 8 KB keeps us below typical
-/// Ethernet jumbo-frame MTU even with encryption and framing overhead, so the
-/// IP-layer fragmentation burden stays small.
-const CHUNK_BYTES: usize = 8 * 1024;
-
-async fn send_file_as_transfer(
-    transport: &Arc<CustomUdpTransport>,
-    path: &std::path::Path,
-) -> anyhow::Result<()> {
-    use tokio::io::AsyncReadExt;
-    let metadata = tokio::fs::metadata(path).await?;
-    let total = metadata.len();
-    const MAX: u64 = 64 * 1024 * 1024;
-    if total > MAX {
-        anyhow::bail!("file too large: {} > {}", total, MAX);
-    }
-    let filename = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| anyhow::anyhow!("bad filename"))?
-        .to_string();
-
-    let transfer_id = prdt_transport::now_monotonic_us();
-    transport
-        .send_control(ControlMessage::FileTransferBegin {
-            transfer_id,
-            filename,
-            total_bytes: total,
-        })
-        .await?;
-
-    let mut file = tokio::fs::File::open(path).await?;
-    let mut buf = vec![0u8; CHUNK_BYTES];
-    let mut seq: u32 = 0;
-    loop {
-        let n = file.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        let bytes = buf[..n].to_vec();
-        transport
-            .send_control(ControlMessage::FileChunk {
-                transfer_id,
-                chunk_seq: seq,
-                bytes,
-            })
-            .await?;
-        seq += 1;
-    }
-    transport
-        .send_control(ControlMessage::FileTransferEnd {
-            transfer_id,
-            success: true,
-        })
-        .await?;
-    Ok(())
 }
 
 #[cfg(test)]

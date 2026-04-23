@@ -46,6 +46,14 @@ sign-off:
 
 ## Known limitations (carry to Phase 1+ as appropriate)
 
+0. ~~**File transfer unidirectional**~~ — **Fixed in
+   phase3c-bidirectional-filetransfer.** `prdt-filetransfer` crate
+   factors out send/receive. Host polls `--outgoing-dir` (default
+   `prdt-outgoing/`) every 2s and streams any files found, moving them
+   to `sent/` on success. Viewer accepts incoming files via the same
+   state machine into `--recv-dir` (default `prdt-received/`).
+   viewer→host drag-drop still works.
+
 1. ~~**Single-monitor capture only**~~ — **Fixed in phase3c-multimonitor.**
    HelloAck now carries `host_monitor_rect` + `host_virtual_desktop_rect`
    (virtual-desktop coords); the viewer maps window-local cursor positions
