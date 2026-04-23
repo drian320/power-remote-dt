@@ -119,6 +119,10 @@ struct ViewerShared {
     /// M1 latency probe. Written by the recv task (record_recv /
     /// record_decoded) and by the render thread (record_present_for_host_ts).
     latency: Arc<LatencyProbe>,
+    /// Formatted status string the winit thread shows in the window title.
+    /// The latency task refreshes it once per second; the main thread
+    /// applies it in `about_to_wait`. `None` until we have a first value.
+    status_title: Mutex<Option<String>>,
 }
 
 /// Render state (main thread only).
@@ -284,10 +288,13 @@ impl ApplicationHandler for ViewerApp {
             event_loop.exit();
             return;
         }
-        // Keep the render loop ticking. The present call gates on vsync so this
-        // cannot spin at infinite rate once a texture has arrived; before the
-        // first texture, we clear + present, still vsync-bound.
+        // Apply any pending window-title refresh from the latency task.
+        // set_title on winit 0.30 is cheap when the string hasn't changed,
+        // and the latency task only touches this slot every ~1s.
         if let Some(r) = self.render.as_ref() {
+            if let Some(title) = self.shared.status_title.lock().unwrap().take() {
+                r.window.set_title(&title);
+            }
             r.window.request_redraw();
         }
     }
@@ -385,6 +392,27 @@ impl ViewerApp {
 /// minutes would overflow — treat that as "big", not as wraparound.
 fn clamp_u32(v: u64) -> u32 {
     v.try_into().unwrap_or(u32::MAX)
+}
+
+/// Format the viewer window title from the latency probe snapshot. Shows
+/// "connecting…" until we have samples, then p50 / p95 in milliseconds
+/// plus the present-samples count so users can see the window is live.
+fn format_status_title(snap: &latency::LatencySnapshot) -> String {
+    match snap.present {
+        Some(s) => format!(
+            "prdt-viewer · lag p50 {:.1}ms · p95 {:.1}ms · {} samples",
+            s.p50_us as f64 / 1000.0,
+            s.p95_us as f64 / 1000.0,
+            s.samples,
+        ),
+        None => match snap.arrival {
+            Some(a) => format!(
+                "prdt-viewer · arriving · lag p50 {:.1}ms",
+                a.p50_us as f64 / 1000.0,
+            ),
+            None => "prdt-viewer · connecting…".to_string(),
+        },
+    }
 }
 
 /// Map a window-local cursor position into the `(0..=65535, 0..=65535)` range
@@ -498,6 +526,7 @@ fn main() -> Result<()> {
         input_tx,
         file_drop_tx,
         latency: Arc::new(LatencyProbe::new()),
+        status_title: Mutex::new(None),
     });
 
     // Build the tokio runtime on a dedicated worker thread.
@@ -890,13 +919,14 @@ fn spawn_worker_tasks(
             }
         });
 
-        // M1 latency reporter: every 1s log p50/p95/p99 locally; every 5s
-        // also send a `LatencyReport` to the host so the host's logs show
-        // what the viewer is actually experiencing (useful for distributed
-        // debugging on real LAN). snapshot() is cheap (clones two small
-        // VecDeques of u64s).
+        // M1 latency reporter: every 1s log p50/p95/p99 locally, refresh the
+        // viewer's window title with live stats, and every 5s send a
+        // `LatencyReport` to the host so the host's logs show what the
+        // viewer is actually experiencing (useful for distributed debugging
+        // on real LAN). snapshot() is cheap (clones two small VecDeques).
         let latency_probe = Arc::clone(&shared.latency);
         let latency_transport = Arc::clone(&transport);
+        let title_shared = Arc::clone(&shared);
         let latency_task = tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(1));
             ticker.tick().await; // fire first tick immediately; skip it
@@ -904,6 +934,11 @@ fn spawn_worker_tasks(
             loop {
                 ticker.tick().await;
                 let snap = latency_probe.snapshot();
+
+                // Window-title refresh: shown on every tick so users get
+                // live feedback without tailing the log.
+                let new_title = format_status_title(&snap);
+                *title_shared.status_title.lock().unwrap() = Some(new_title);
                 if let Some(present) = snap.present {
                     info!(
                         samples = present.samples,
