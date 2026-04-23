@@ -28,6 +28,9 @@ pub enum AcquiredFrame {
 
 pub struct DesktopDuplication {
     dup: IDXGIOutputDuplication,
+    /// Kept so `acquire_next_frame` can call `GetDeviceRemovedReason`
+    /// when a DEVICE_REMOVED/HUNG/RESET HRESULT bubbles up.
+    dev: D3d11Device,
     width: u32,
     height: u32,
     frame_held: bool,
@@ -62,6 +65,7 @@ impl DesktopDuplication {
 
             Ok(Self {
                 dup,
+                dev: dev.clone(),
                 width,
                 height,
                 frame_held: false,
@@ -101,7 +105,26 @@ impl DesktopDuplication {
                     hresult: DXGI_ERROR_ACCESS_LOST.0 as u32,
                 });
             }
-            Err(e) => return Err(MediaError::dxgi("AcquireNextFrame", e)),
+            Err(e) => {
+                const DXGI_ERROR_DEVICE_REMOVED: u32 = 0x887A_0005;
+                const DXGI_ERROR_DEVICE_HUNG: u32 = 0x887A_0006;
+                const DXGI_ERROR_DEVICE_RESET: u32 = 0x887A_0007;
+                let code = e.code().0 as u32;
+                if matches!(
+                    code,
+                    DXGI_ERROR_DEVICE_REMOVED | DXGI_ERROR_DEVICE_HUNG | DXGI_ERROR_DEVICE_RESET
+                ) {
+                    let reason = match unsafe { self.dev.device().GetDeviceRemovedReason() } {
+                        Err(err) => err.code().0 as u32,
+                        Ok(()) => code,
+                    };
+                    return Err(MediaError::DeviceRemoved {
+                        context: "AcquireNextFrame",
+                        reason,
+                    });
+                }
+                return Err(MediaError::dxgi("AcquireNextFrame", e));
+            }
         }
         self.frame_held = true;
 

@@ -95,6 +95,19 @@ impl VideoProducer for DxgiNvencProducer {
         loop {
             let acquired = match self.dup.acquire_next_frame(Duration::from_millis(16)) {
                 Ok(a) => a,
+                Err(e) if e.is_device_removed() => {
+                    // TDR / driver crash / hybrid-GPU swap. Every D3D11
+                    // resource owned by `self.dev` is dead; recreating the
+                    // duplication against the same dead device is useless.
+                    // Surface as a fatal error so the host's video task
+                    // tears down instead of spinning.
+                    tracing::error!(
+                        error = %e,
+                        "D3D11 device removed in producer — fatal; \
+                         restart the host process to recover",
+                    );
+                    return Err(ProducerError::Capture(format!("device removed: {e}")));
+                }
                 Err(e) => {
                     if is_access_lost(&e) {
                         tracing::warn!(error = %e, "DXGI access lost; re-acquiring duplication");
