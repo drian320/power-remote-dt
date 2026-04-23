@@ -14,6 +14,12 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
+futures-util = "0.3"
 
 [dev-dependencies]
+prdt-signaling-server = { path = "../signaling-server" }
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread", "io-util", "sync", "time"] }
+tokio-tungstenite = { workspace = true }
+serde_json = { workspace = true }
+futures-util = "0.3"
+axum = { workspace = true }
