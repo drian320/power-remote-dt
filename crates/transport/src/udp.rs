@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -54,6 +55,12 @@ pub struct CustomUdpTransport {
     /// subsequent `send_raw` calls encrypt bodies and set the ENCRYPTED
     /// header flag, while `recv` auto-decrypts packets carrying that flag.
     crypto: AsyncMutex<Option<prdt_crypto::Session>>,
+    /// Counter matching snow's internal sending nonce. Advanced under the
+    /// `crypto` mutex together with every successful `Session::encrypt()`
+    /// call, so this value equals the nonce snow used and is written into
+    /// the wire packet so the receiver can call `set_receiving_nonce`
+    /// before decrypt (necessary because UDP reorders chunks).
+    send_nonce: AtomicU64,
 }
 
 impl CustomUdpTransport {
@@ -72,6 +79,7 @@ impl CustomUdpTransport {
                 prdt_protocol::frame::Codec::H265,
             )),
             crypto: AsyncMutex::new(None),
+            send_nonce: AtomicU64::new(0),
         })
     }
 
@@ -176,24 +184,38 @@ impl CustomUdpTransport {
     }
 
     /// Send a raw datagram. If a crypto session is installed, the body is
-    /// encrypted and the ENCRYPTED header flag is set. Otherwise the body is
-    /// sent verbatim.
+    /// encrypted, prefixed with an explicit 8-byte big-endian nonce, and the
+    /// ENCRYPTED header flag is set. The explicit nonce is required because
+    /// the UDP + FEC transport can reorder chunks; snow's internal nonce
+    /// counter assumes ordered delivery and would fail decryption otherwise.
+    /// Without an active session, the body is sent verbatim.
     async fn send_raw(&self, mut hdr: PacketHeader, body: &[u8]) -> Result<(), TransportError> {
-        let maybe_ciphertext = {
+        let maybe_framed = {
             let mut guard = self.crypto.lock().await;
             if let Some(session) = guard.as_mut() {
+                // Capture the nonce BEFORE encrypt — this is the nonce snow
+                // is about to use (its internal sending counter starts at 0
+                // and advances by 1 on each successful write_message, just
+                // like our AtomicU64). Both the AtomicU64 bump and the snow
+                // encrypt happen under this same mutex so they stay in lock
+                // step.
+                let nonce = self.send_nonce.fetch_add(1, Ordering::Relaxed);
                 let ct = session.encrypt(body).map_err(|e| {
                     TransportError::Io(std::io::Error::other(format!("encrypt: {e}")))
                 })?;
+                // Prepend 8-byte big-endian nonce to the ciphertext.
+                let mut framed = Vec::with_capacity(8 + ct.len());
+                framed.extend_from_slice(&nonce.to_be_bytes());
+                framed.extend_from_slice(&ct);
                 hdr.flags |= prdt_protocol::packet_flags::ENCRYPTED;
-                hdr.payload_len = ct.len() as u32;
-                Some(ct)
+                hdr.payload_len = framed.len() as u32;
+                Some(framed)
             } else {
                 None
             }
         };
-        match maybe_ciphertext {
-            Some(ct) => self.send_raw_unencrypted(hdr, &ct).await,
+        match maybe_framed {
+            Some(framed) => self.send_raw_unencrypted(hdr, &framed).await,
             None => self.send_raw_unencrypted(hdr, body).await,
         }
     }
@@ -396,21 +418,36 @@ impl Transport for CustomUdpTransport {
 
             // Decrypt if flagged. We own the plaintext as a Vec<u8> so the
             // non-encrypted branch can borrow from `buf` without overlapping
-            // lifetimes.
+            // lifetimes. Encrypted packets carry an explicit 8-byte
+            // big-endian nonce prefix so the receiver can call
+            // `set_receiving_nonce` before `decrypt`, tolerating UDP/FEC
+            // reorder.
             let body_owned: Vec<u8>;
             let body: &[u8] = if hdr.flags & prdt_protocol::packet_flags::ENCRYPTED != 0 {
+                if raw_body.len() < 8 {
+                    tracing::warn!("encrypted packet body shorter than 8-byte nonce prefix");
+                    continue;
+                }
+                let mut nonce_bytes = [0u8; 8];
+                nonce_bytes.copy_from_slice(&raw_body[..8]);
+                let nonce = u64::from_be_bytes(nonce_bytes);
+                let ct = &raw_body[8..];
+
                 let mut guard = self.crypto.lock().await;
                 match guard.as_mut() {
-                    Some(session) => match session.decrypt(raw_body) {
-                        Ok(pt) => {
-                            body_owned = pt;
-                            &body_owned[..]
+                    Some(session) => {
+                        session.set_receiving_nonce(nonce);
+                        match session.decrypt(ct) {
+                            Ok(pt) => {
+                                body_owned = pt;
+                                &body_owned[..]
+                            }
+                            Err(e) => {
+                                tracing::warn!(?e, nonce, "decrypt failed; dropping packet");
+                                continue;
+                            }
                         }
-                        Err(e) => {
-                            tracing::warn!(?e, "decrypt failed, dropping packet");
-                            continue;
-                        }
-                    },
+                    }
                     None => {
                         tracing::warn!(
                             "received ENCRYPTED packet but no crypto session installed; dropping"
