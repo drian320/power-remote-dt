@@ -78,6 +78,9 @@ struct ViewerShared {
     stream_height: Mutex<u32>,
     /// Input events captured by winit, drained by the tokio send loop.
     input_tx: mpsc::UnboundedSender<InputEvent>,
+    /// Paths of files dropped onto the window, drained by the file-transfer
+    /// worker task which streams their bytes to the host.
+    file_drop_tx: mpsc::UnboundedSender<std::path::PathBuf>,
 }
 
 /// Render state (main thread only).
@@ -223,6 +226,10 @@ impl ApplicationHandler for ViewerApp {
                     });
                 }
             }
+            WindowEvent::DroppedFile(path) => {
+                info!(path = %path.display(), "file dropped on viewer");
+                let _ = self.shared.file_drop_tx.send(path);
+            }
             WindowEvent::RedrawRequested => {
                 self.render_frame();
             }
@@ -367,12 +374,15 @@ fn main() -> Result<()> {
 
     // Input channel: winit main thread → tokio send loop.
     let (input_tx, input_rx) = mpsc::unbounded_channel::<InputEvent>();
+    // File-drop channel: winit main thread → tokio file-transfer task.
+    let (file_drop_tx, file_drop_rx) = mpsc::unbounded_channel::<std::path::PathBuf>();
 
     let shared = Arc::new(ViewerShared {
         latest_texture: Arc::new(Mutex::new(None)),
         stream_width: Mutex::new(req_w),
         stream_height: Mutex::new(req_h),
         input_tx,
+        file_drop_tx,
     });
 
     // Build the tokio runtime on a dedicated worker thread.
@@ -389,6 +399,7 @@ fn main() -> Result<()> {
         dev.clone(),
         Arc::clone(&shared),
         input_rx,
+        file_drop_rx,
         args.host,
         pubkey,
         req_w,
@@ -422,6 +433,7 @@ fn spawn_worker_tasks(
     dev: D3d11Device,
     shared: Arc<ViewerShared>,
     mut input_rx: mpsc::UnboundedReceiver<InputEvent>,
+    mut file_drop_rx: mpsc::UnboundedReceiver<std::path::PathBuf>,
     host_addr: SocketAddr,
     pubkey: PubKey,
     req_w: u32,
@@ -669,6 +681,17 @@ fn spawn_worker_tasks(
             }
         });
 
+        // File-drop → chunked file transfer worker.
+        let ft_transport = Arc::clone(&transport);
+        let ft_task = tokio::spawn(async move {
+            while let Some(path) = file_drop_rx.recv().await {
+                match send_file_as_transfer(&ft_transport, &path).await {
+                    Ok(()) => info!(path = %path.display(), "file transfer sent"),
+                    Err(e) => warn!(?e, path = %path.display(), "file transfer failed"),
+                }
+            }
+        });
+
         // Clipboard watcher: poll the OS clipboard and forward changes to the host.
         let clip_transport = Arc::clone(&transport);
         let clip_last_remote = Arc::clone(&last_remote_clipboard);
@@ -708,6 +731,65 @@ fn spawn_worker_tasks(
             _ = send_task => info!("send task ended"),
             _ = ping_task => info!("ping task ended"),
             _ = clip_task => info!("clipboard task ended"),
+            _ = ft_task => info!("file transfer task ended"),
         }
     });
+}
+
+/// Chunk size for FileChunk control messages. 8 KB keeps us below typical
+/// Ethernet jumbo-frame MTU even with encryption and framing overhead, so the
+/// IP-layer fragmentation burden stays small.
+const CHUNK_BYTES: usize = 8 * 1024;
+
+async fn send_file_as_transfer(
+    transport: &Arc<CustomUdpTransport>,
+    path: &std::path::Path,
+) -> anyhow::Result<()> {
+    use tokio::io::AsyncReadExt;
+    let metadata = tokio::fs::metadata(path).await?;
+    let total = metadata.len();
+    const MAX: u64 = 64 * 1024 * 1024;
+    if total > MAX {
+        anyhow::bail!("file too large: {} > {}", total, MAX);
+    }
+    let filename = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow::anyhow!("bad filename"))?
+        .to_string();
+
+    let transfer_id = prdt_transport::now_monotonic_us();
+    transport
+        .send_control(ControlMessage::FileTransferBegin {
+            transfer_id,
+            filename,
+            total_bytes: total,
+        })
+        .await?;
+
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut buf = vec![0u8; CHUNK_BYTES];
+    let mut seq: u32 = 0;
+    loop {
+        let n = file.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        let bytes = buf[..n].to_vec();
+        transport
+            .send_control(ControlMessage::FileChunk {
+                transfer_id,
+                chunk_seq: seq,
+                bytes,
+            })
+            .await?;
+        seq += 1;
+    }
+    transport
+        .send_control(ControlMessage::FileTransferEnd {
+            transfer_id,
+            success: true,
+        })
+        .await?;
+    Ok(())
 }

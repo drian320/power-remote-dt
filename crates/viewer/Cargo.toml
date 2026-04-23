@@ -14,7 +14,7 @@ prdt-audio = { path = "../audio" }
 prdt-crypto = { path = "../crypto" }
 prdt-protocol = { path = "../protocol" }
 prdt-transport = { path = "../transport" }
-tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "sync", "time", "signal"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "sync", "time", "signal", "fs", "io-util"] }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

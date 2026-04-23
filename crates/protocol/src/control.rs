@@ -48,6 +48,20 @@ pub enum ControlMessage {
     /// receiver should update its local clipboard to match (subject to size
     /// and loop-back protection).
     ClipboardText { text: String },
+    /// Begin a file transfer. Viewer → Host.
+    FileTransferBegin {
+        transfer_id: u64,
+        filename: String,
+        total_bytes: u64,
+    },
+    /// One chunk of file bytes.
+    FileChunk {
+        transfer_id: u64,
+        chunk_seq: u32,
+        bytes: Vec<u8>,
+    },
+    /// Transfer finished (success or aborted). Viewer → Host.
+    FileTransferEnd { transfer_id: u64, success: bool },
 }
 
 impl ControlMessage {
@@ -65,6 +79,9 @@ impl ControlMessage {
             Self::NoiseE1 { .. } => 10,
             Self::NoiseE2 { .. } => 11,
             Self::ClipboardText { .. } => 12,
+            Self::FileTransferBegin { .. } => 13,
+            Self::FileChunk { .. } => 14,
+            Self::FileTransferEnd { .. } => 15,
         }
     }
 }

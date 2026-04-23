@@ -22,6 +22,37 @@ use prdt_transport::{
 };
 use tracing::{info, warn};
 
+const MAX_TRANSFER_BYTES: u64 = 64 * 1024 * 1024;
+const FILE_RECV_DIR: &str = "prdt-received";
+
+struct InProgressTransfer {
+    filename: std::path::PathBuf,
+    file: std::fs::File,
+    total_bytes: u64,
+    written_bytes: u64,
+    next_chunk_seq: u32,
+}
+
+fn unique_path(base: &std::path::Path) -> std::path::PathBuf {
+    if !base.exists() {
+        return base.to_path_buf();
+    }
+    let stem = base.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
+    let ext = base.extension().and_then(|s| s.to_str()).unwrap_or("");
+    let parent = base.parent().unwrap_or(std::path::Path::new("."));
+    for i in 1..10_000 {
+        let candidate = if ext.is_empty() {
+            parent.join(format!("{stem}-{i}"))
+        } else {
+            parent.join(format!("{stem}-{i}.{ext}"))
+        };
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    base.to_path_buf()
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "prdt-host",
@@ -244,6 +275,7 @@ async fn main() -> Result<()> {
     let injector = SendInputInjector::new();
     let input_last_remote = Arc::clone(&last_remote_clipboard);
     let input = tokio::spawn(async move {
+        let mut transfers: std::collections::HashMap<u64, InProgressTransfer> = Default::default();
         loop {
             match rx_input.recv().await {
                 Ok(ReceivedMessage::Input(ev)) => {
@@ -256,6 +288,103 @@ async fn main() -> Result<()> {
                     *input_last_remote.lock().await = Some(text.clone());
                     if let Err(e) = write_clipboard_text(&text) {
                         warn!(?e, "write_clipboard_text failed");
+                    }
+                }
+                Ok(ReceivedMessage::Control(ControlMessage::FileTransferBegin {
+                    transfer_id,
+                    filename,
+                    total_bytes,
+                })) => {
+                    if total_bytes > MAX_TRANSFER_BYTES {
+                        warn!(%filename, total_bytes, "rejecting oversized transfer");
+                        continue;
+                    }
+                    // Sanitize filename: basename only, reject empty/".." and NULs.
+                    let base = std::path::Path::new(&filename)
+                        .file_name()
+                        .and_then(|os| os.to_str())
+                        .map(|s| s.to_string())
+                        .filter(|s| !s.is_empty() && s != ".." && !s.contains('\0'));
+                    let base = match base {
+                        Some(b) => b,
+                        None => {
+                            warn!(%filename, "rejecting unsafe filename");
+                            continue;
+                        }
+                    };
+                    if let Err(e) = std::fs::create_dir_all(FILE_RECV_DIR) {
+                        warn!(?e, "create_dir_all failed");
+                        continue;
+                    }
+                    let mut dest = std::path::PathBuf::from(FILE_RECV_DIR);
+                    dest.push(&base);
+                    // If file exists, append "-N" until unique to avoid clobbering.
+                    let dest = unique_path(&dest);
+                    let file = match std::fs::File::create(&dest) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            warn!(?e, path = %dest.display(), "file create failed");
+                            continue;
+                        }
+                    };
+                    info!(transfer_id, filename = %base, %total_bytes, path = %dest.display(), "file transfer start");
+                    transfers.insert(
+                        transfer_id,
+                        InProgressTransfer {
+                            filename: dest,
+                            file,
+                            total_bytes,
+                            written_bytes: 0,
+                            next_chunk_seq: 0,
+                        },
+                    );
+                }
+                Ok(ReceivedMessage::Control(ControlMessage::FileChunk {
+                    transfer_id,
+                    chunk_seq,
+                    bytes,
+                })) => {
+                    use std::io::Write;
+                    let Some(t) = transfers.get_mut(&transfer_id) else {
+                        warn!(transfer_id, "unknown transfer_id");
+                        continue;
+                    };
+                    if chunk_seq != t.next_chunk_seq {
+                        warn!(transfer_id, expected = t.next_chunk_seq, got = chunk_seq, "out-of-order chunk");
+                        transfers.remove(&transfer_id);
+                        continue;
+                    }
+                    if t.written_bytes + bytes.len() as u64 > t.total_bytes {
+                        warn!(transfer_id, "chunk overflows declared total_bytes");
+                        transfers.remove(&transfer_id);
+                        continue;
+                    }
+                    if let Err(e) = t.file.write_all(&bytes) {
+                        warn!(?e, transfer_id, "write chunk failed");
+                        transfers.remove(&transfer_id);
+                        continue;
+                    }
+                    t.written_bytes += bytes.len() as u64;
+                    t.next_chunk_seq += 1;
+                }
+                Ok(ReceivedMessage::Control(ControlMessage::FileTransferEnd {
+                    transfer_id,
+                    success,
+                })) => {
+                    let Some(t) = transfers.remove(&transfer_id) else {
+                        warn!(transfer_id, "unknown transfer_id for end");
+                        continue;
+                    };
+                    if success && t.written_bytes == t.total_bytes {
+                        info!(transfer_id, path = %t.filename.display(), "file transfer complete");
+                    } else {
+                        warn!(
+                            transfer_id,
+                            success,
+                            written = t.written_bytes,
+                            total = t.total_bytes,
+                            "transfer did not complete cleanly; keeping partial file"
+                        );
                     }
                 }
                 Ok(ReceivedMessage::Control(ControlMessage::Bye)) => {

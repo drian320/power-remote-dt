@@ -655,7 +655,7 @@ pub fn decode_control(buf: &[u8]) -> Result<ControlMessage, ProtocolError> {
     let kind = buf[0];
     // We don't trust `kind` blindly; bincode will decode the whole tagged enum.
     // We keep the leading byte as a fast-path dispatch hint for future optimization.
-    if kind > 12 {
+    if kind > 15 {
         return Err(ProtocolError::UnknownControlKind(kind));
     }
     let msg: ControlMessage = bincode::deserialize(&buf[1..])?;
@@ -742,6 +742,32 @@ mod control_tests {
             },
         ];
         for msg in cases {
+            let buf = encode_control(&msg).unwrap();
+            let back = decode_control(&buf).unwrap();
+            assert_eq!(back, msg);
+        }
+    }
+
+    #[test]
+    fn filetransfer_round_trip() {
+        use crate::control::ControlMessage;
+        let msgs = [
+            ControlMessage::FileTransferBegin {
+                transfer_id: 1,
+                filename: "test.txt".into(),
+                total_bytes: 1234,
+            },
+            ControlMessage::FileChunk {
+                transfer_id: 1,
+                chunk_seq: 0,
+                bytes: vec![0xAA; 32 * 1024],
+            },
+            ControlMessage::FileTransferEnd {
+                transfer_id: 1,
+                success: true,
+            },
+        ];
+        for msg in msgs {
             let buf = encode_control(&msg).unwrap();
             let back = decode_control(&buf).unwrap();
             assert_eq!(back, msg);
