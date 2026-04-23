@@ -9,7 +9,19 @@ fn main() {
     }
 
     println!("cargo:rerun-if-env-changed=NV_CODEC_SDK_PATH");
+    println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rerun-if-changed=build.rs");
+    // Register the custom cfg we emit from generate_nvdec_bindings so the
+    // unexpected_cfgs lint doesn't complain on consumers.
+    println!("cargo::rustc-check-cfg=cfg(prdt_nvdec_bindings)");
+
+    generate_nvenc_bindings();
+    generate_nvdec_bindings();
+}
+
+fn generate_nvenc_bindings() {
+    let out_dir = env::var("OUT_DIR").unwrap();
+    let out_path = PathBuf::from(&out_dir).join("nvenc_bindings.rs");
 
     let sdk_path = match env::var("NV_CODEC_SDK_PATH") {
         Ok(p) => PathBuf::from(p),
@@ -19,8 +31,6 @@ fn main() {
                  Set to your NVIDIA Video Codec SDK root (e.g. C:\\SDK\\Video_Codec_SDK_12.2.72) \
                  and rebuild."
             );
-            let out_dir = env::var("OUT_DIR").unwrap();
-            let out_path = PathBuf::from(out_dir).join("nvenc_bindings.rs");
             std::fs::write(
                 &out_path,
                 "// NVENC SDK not available; bindings are empty.\n",
@@ -59,6 +69,107 @@ fn main() {
         .generate()
         .expect("bindgen failed");
 
-    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap()).join("nvenc_bindings.rs");
     bindings.write_to_file(&out_path).expect("write bindings");
+}
+
+/// Plan 2d: generate NVDEC (cuvid) bindings. Requires the NVIDIA Video
+/// Codec SDK (`NV_CODEC_SDK_PATH`) for cuviddec.h + nvcuvid.h AND the CUDA
+/// Toolkit (`CUDA_PATH`) for the cuda.h that cuviddec.h transitively
+/// includes. When CUDA_PATH is unset we emit empty stubs and the nvdec
+/// module compiles to a `NotAvailable` error path rather than failing
+/// the build outright — the host/viewer still build against MF decode.
+fn generate_nvdec_bindings() {
+    let out_dir = env::var("OUT_DIR").unwrap();
+    let out_path = PathBuf::from(&out_dir).join("nvdec_bindings.rs");
+
+    let sdk_path = match env::var("NV_CODEC_SDK_PATH") {
+        Ok(p) => PathBuf::from(p),
+        Err(_) => {
+            std::fs::write(
+                &out_path,
+                "// NVENC/NVDEC SDK not available; NVDEC bindings are empty.\n",
+            )
+            .unwrap();
+            return;
+        }
+    };
+    let cuda_path = match env::var("CUDA_PATH") {
+        Ok(p) => PathBuf::from(p),
+        Err(_) => {
+            println!(
+                "cargo:warning=CUDA_PATH is not set; NVDEC (Plan 2d) bindings will be empty \
+                 stubs. Install the CUDA Toolkit (2-3 GB) from https://developer.nvidia.com/\
+                 cuda-downloads and set CUDA_PATH=C:\\Program Files\\NVIDIA GPU Computing \
+                 Toolkit\\CUDA\\v13.x to enable the direct-NVDEC decode path."
+            );
+            std::fs::write(
+                &out_path,
+                "// CUDA Toolkit not available; NVDEC bindings are empty.\n",
+            )
+            .unwrap();
+            return;
+        }
+    };
+
+    let nvcuvid = sdk_path.join("Interface").join("nvcuvid.h");
+    let cuviddec = sdk_path.join("Interface").join("cuviddec.h");
+    let cuda_h = cuda_path.join("include").join("cuda.h");
+    for h in [&nvcuvid, &cuviddec, &cuda_h] {
+        if !h.exists() {
+            panic!("missing NVDEC dependency header: {}", h.display());
+        }
+        println!("cargo:rerun-if-changed={}", h.display());
+    }
+
+    let bindings = bindgen::Builder::default()
+        .header(nvcuvid.to_string_lossy())
+        .clang_arg(format!("-I{}", sdk_path.join("Interface").display()))
+        .clang_arg(format!("-I{}", cuda_path.join("include").display()))
+        // nvcuvid/cuviddec types we actually use.
+        .allowlist_type("CUVID.*")
+        .allowlist_type("CUvideo.*")
+        .allowlist_type("cudaVideo.*")
+        .allowlist_function("cuvid.*")
+        .allowlist_var("CUVID.*")
+        // CUDA Driver API subset needed by cuvid function signatures.
+        .allowlist_type("CU[a-z].*")
+        .allowlist_type("CUresult")
+        .allowlist_type("CUcontext")
+        .allowlist_type("CUdevice")
+        .allowlist_type("CUstream")
+        .allowlist_type("CUdeviceptr")
+        .allowlist_type("CUmemorytype")
+        .allowlist_function("cuInit")
+        .allowlist_function("cuDeviceGet")
+        .allowlist_function("cuDeviceGetCount")
+        .allowlist_function("cuCtx.*")
+        .allowlist_function("cuStream.*")
+        .allowlist_function("cuMemAlloc")
+        .allowlist_function("cuMemFree")
+        .allowlist_function("cuMemcpy.*")
+        .allowlist_function("cuGraphicsD3D11.*")
+        .allowlist_function("cuGraphics.*")
+        .default_enum_style(bindgen::EnumVariation::Rust {
+            non_exhaustive: false,
+        })
+        .derive_default(true)
+        .derive_debug(false)
+        .layout_tests(false)
+        .generate()
+        .expect("nvdec bindgen failed");
+
+    bindings
+        .write_to_file(&out_path)
+        .expect("write nvdec bindings");
+
+    // Tell cargo where to find the import libraries (nvcuvid.lib + cuda.lib)
+    // so the NvdecD3d11Consumer can link when the feature path is taken.
+    let sdk_lib = sdk_path.join("Lib").join("win").join("x64");
+    let cuda_lib = cuda_path.join("lib").join("x64");
+    println!("cargo:rustc-link-search=native={}", sdk_lib.display());
+    println!("cargo:rustc-link-search=native={}", cuda_lib.display());
+    // Only emit the link arguments when the nvdec consumer actually ends
+    // up in the final binary — guarded by the `nvdec` Cargo feature. We
+    // set a cfg here so the Rust side can match on it.
+    println!("cargo:rustc-cfg=prdt_nvdec_bindings");
 }
