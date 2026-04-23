@@ -49,3 +49,46 @@ pub enum ErrorCode {
 pub const PRIORITY_HOST: u32 = 100;
 pub const PRIORITY_SRFLX: u32 = 50;
 pub const PRIORITY_RELAY: u32 = 10;
+
+/// Messages sent by host or viewer to the signaling server.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum ClientMessage {
+    Register {
+        host_id: String,
+        pubkey_b64: String,
+    },
+    Connect {
+        host_id: String,
+    },
+    Candidate {
+        session_id: String,
+        candidate: Candidate,
+    },
+    Done {
+        session_id: String,
+        outcome: DoneOutcome,
+    },
+}
+
+/// Messages sent by the signaling server to host or viewer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum ServerMessage {
+    Registered {
+        host_id: String,
+    },
+    SessionStart {
+        session_id: String,
+        role: Role,
+        peer_pubkey_b64: Option<String>,
+    },
+    PeerCandidate {
+        session_id: String,
+        candidate: Candidate,
+    },
+    Error {
+        code: ErrorCode,
+        message: String,
+    },
+}
