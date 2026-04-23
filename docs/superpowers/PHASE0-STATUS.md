@@ -27,9 +27,13 @@ Formally declared NOT done but the user accepted this as a functional
 completion. These are tracked as known work if/when Phase 0 needs strict
 sign-off:
 
-- **M1 instrumentation**: per-stage latency spans via `tracing` are present
-  (`tracing::span!`) in Plan 1's packetize/assembler but the host/viewer
-  binaries do not yet emit a consolidated glass-to-glass timestamp line.
+- ~~**M1 instrumentation**~~ — **Partially done in plan4-m1.** The viewer
+  now records per-frame arrival / decode-done / present timestamps and
+  logs a 1 Hz `info` line with p50/p95/p99 for each stage. Producer and
+  transport emit timestamps on a shared process-wide monotonic clock
+  (`prdt_protocol::now_monotonic_us`), so in-process loopback (M2) and
+  cross-process same-machine runs produce directly-comparable numbers.
+  Cross-machine clock-offset correction via Ping/Pong is still deferred.
 - **M2 in-process end-to-end bench**: `latency-bench` exists as a skeleton
   from Plan 1 but exercises only the transport layer, not the full
   capture→encode→decode→render loop.

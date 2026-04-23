@@ -503,12 +503,6 @@ impl Transport for CustomUdpTransport {
     }
 }
 
-/// Monotonic clock reading in microseconds (u64). Uses Instant::now() on a
-/// per-process epoch that is set the first time this function is called.
-pub fn now_monotonic_us() -> u64 {
-    use std::sync::OnceLock;
-    use std::time::Instant;
-    static EPOCH: OnceLock<Instant> = OnceLock::new();
-    let epoch = EPOCH.get_or_init(Instant::now);
-    epoch.elapsed().as_micros() as u64
-}
+/// Re-export the shared process-wide monotonic clock from prdt_protocol so
+/// host, viewer, producer, and probes all emit timestamps on the same epoch.
+pub use prdt_protocol::now_monotonic_us;

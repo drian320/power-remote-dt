@@ -16,6 +16,9 @@ use prdt_media_win::{
     pick_default_adapter, D3d11Device, D3d11Texture, MfD3d11Consumer, Nv12Renderer, SwapChain,
 };
 use prdt_protocol::{frame::Codec, ControlMessage, InputEvent, MonitorRect, VideoConsumer};
+
+mod latency;
+use latency::LatencyProbe;
 use prdt_transport::{
     viewer_handshake, CustomUdpTransport, HelloRequest, ReceivedMessage, Transport,
     UdpTransportConfig, DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_HELLO_RETRIES, DEFAULT_HELLO_TIMEOUT,
@@ -76,8 +79,11 @@ fn parse_resolution(s: &str) -> Result<(u32, u32)> {
 
 /// Shared state between the winit main thread and the tokio worker thread.
 struct ViewerShared {
-    /// Latest decoded texture, populated by the tokio consumer loop.
-    latest_texture: Arc<Mutex<Option<D3d11Texture>>>,
+    /// Latest decoded texture alongside the host capture timestamp (in the
+    /// shared monotonic clock). The render thread pops this, presents, and
+    /// feeds `host_ts_us` into the LatencyProbe to close the glass-to-glass
+    /// measurement loop.
+    latest_texture: Arc<Mutex<Option<(D3d11Texture, u64)>>>,
     /// Stream dimensions negotiated from HelloAck (and later refined by the
     /// decoder's reported texture size).
     stream_width: Mutex<u32>,
@@ -93,6 +99,9 @@ struct ViewerShared {
     /// Paths of files dropped onto the window, drained by the file-transfer
     /// worker task which streams their bytes to the host.
     file_drop_tx: mpsc::UnboundedSender<std::path::PathBuf>,
+    /// M1 latency probe. Written by the recv task (record_recv /
+    /// record_decoded) and by the render thread (record_present_for_host_ts).
+    latency: Arc<LatencyProbe>,
 }
 
 /// Render state (main thread only).
@@ -285,8 +294,9 @@ impl ViewerApp {
 
         // Pull the latest decoded texture, if any.
         let maybe_tex = self.shared.latest_texture.lock().unwrap().take();
+        let mut presented_host_ts: Option<u64> = None;
 
-        if let Some(tex) = maybe_tex {
+        if let Some((tex, host_ts_us)) = maybe_tex {
             // Lazily build the renderer once we know the decoded frame size.
             let (iw, ih) = (tex.width(), tex.height());
             let needs_new = match render.renderer.as_ref() {
@@ -317,10 +327,16 @@ impl ViewerApp {
                     warn!(?e, "Nv12Renderer::render failed");
                 }
             }
+            presented_host_ts = Some(host_ts_us);
         }
 
-        if let Err(e) = render.swap.present(true) {
-            warn!(?e, "Present failed");
+        match render.swap.present(true) {
+            Ok(()) => {
+                if let Some(ts) = presented_host_ts {
+                    self.shared.latency.record_present_for_host_ts(ts);
+                }
+            }
+            Err(e) => warn!(?e, "Present failed"),
         }
     }
 }
@@ -435,6 +451,7 @@ fn main() -> Result<()> {
         host_virtual_desktop_rect: Mutex::new(MonitorRect::new(0, 0, req_w as i32, req_h as i32)),
         input_tx,
         file_drop_tx,
+        latency: Arc::new(LatencyProbe::new()),
     });
 
     // Build the tokio runtime on a dedicated worker thread.
@@ -660,8 +677,10 @@ fn spawn_worker_tasks(
                     Ok(ReceivedMessage::Video(frame)) => {
                         frame_count += 1;
                         let seq = frame.seq;
+                        let host_ts_us = frame.timestamp_host_us;
                         let is_kf = frame.is_keyframe;
                         let nal_len = frame.nal_units.len();
+                        recv_shared.latency.record_recv(seq, host_ts_us);
                         let mut c = recv_consumer.lock().await;
                         if let Err(e) = c.submit(frame).await {
                             warn!(?e, seq, is_kf, nal_len, "consumer.submit error");
@@ -669,7 +688,8 @@ fn spawn_worker_tasks(
                         }
                         if let Some(tex) = c.take_latest_texture() {
                             tex_count += 1;
-                            *recv_shared.latest_texture.lock().unwrap() = Some(tex);
+                            recv_shared.latency.record_decoded(seq);
+                            *recv_shared.latest_texture.lock().unwrap() = Some((tex, host_ts_us));
                         }
                     }
                     Ok(ReceivedMessage::Control(ControlMessage::Bye)) => {
@@ -786,6 +806,38 @@ fn spawn_worker_tasks(
             }
         });
 
+        // M1 latency reporter: every 1s, log p50/p95/p99 for each stage.
+        // Cheap: snapshot() clones two VecDeques worth of u64s.
+        let latency_probe = Arc::clone(&shared.latency);
+        let latency_task = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(1));
+            ticker.tick().await; // fire first tick immediately; skip it
+            loop {
+                ticker.tick().await;
+                let snap = latency_probe.snapshot();
+                if let Some(present) = snap.present {
+                    info!(
+                        samples = present.samples,
+                        arrival_p50_us = snap.arrival.map(|s| s.p50_us).unwrap_or(0),
+                        arrival_p95_us = snap.arrival.map(|s| s.p95_us).unwrap_or(0),
+                        decode_p50_us = snap.decode_done.map(|s| s.p50_us).unwrap_or(0),
+                        decode_p95_us = snap.decode_done.map(|s| s.p95_us).unwrap_or(0),
+                        present_p50_us = present.p50_us,
+                        present_p95_us = present.p95_us,
+                        present_p99_us = present.p99_us,
+                        "M1 latency (host_capture → viewer_present)",
+                    );
+                } else if let Some(arrival) = snap.arrival {
+                    info!(
+                        samples = arrival.samples,
+                        arrival_p50_us = arrival.p50_us,
+                        arrival_p95_us = arrival.p95_us,
+                        "M1 latency (arrival only; no present samples yet)",
+                    );
+                }
+            }
+        });
+
         // If any loop exits, tear down.
         tokio::select! {
             _ = recv_task => info!("recv task ended"),
@@ -793,6 +845,7 @@ fn spawn_worker_tasks(
             _ = ping_task => info!("ping task ended"),
             _ = clip_task => info!("clipboard task ended"),
             _ = ft_task => info!("file transfer task ended"),
+            _ = latency_task => info!("latency task ended"),
         }
     });
 }

@@ -1,9 +1,9 @@
 //! DxgiNvencProducer - DXGI Desktop Duplication capture to NVENC H.265 encode.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::Bytes;
-use prdt_protocol::{EncodedFrame, ProducerError, VideoProducer};
+use prdt_protocol::{now_monotonic_us, EncodedFrame, ProducerError, VideoProducer};
 
 use crate::d3d11::D3d11Device;
 use crate::dxgi::{AcquiredFrame, DesktopDuplication, OutputInfo};
@@ -16,7 +16,6 @@ pub struct DxgiNvencProducer {
     dup: DesktopDuplication,
     encoder: NvencEncoder,
     seq: u64,
-    epoch: Instant,
     idr_pending: bool,
     width: u32,
     height: u32,
@@ -48,7 +47,6 @@ impl DxgiNvencProducer {
             dup,
             encoder,
             seq: 0,
-            epoch: Instant::now(),
             idr_pending: true,
             width,
             height,
@@ -130,7 +128,7 @@ impl VideoProducer for DxgiNvencProducer {
                 AcquiredFrame::Frame { texture, .. } => texture,
                 AcquiredFrame::Timeout => continue,
             };
-            let ts_us = self.epoch.elapsed().as_micros() as u64;
+            let ts_us = now_monotonic_us();
             let force_idr = std::mem::take(&mut self.idr_pending);
             let encoded = self
                 .encoder

@@ -1,12 +1,15 @@
 //! Wire types and serialization for power-remote-dt.
 //! OS-independent. No network or OS calls here.
 
+pub mod clock;
 pub mod control;
 pub mod error;
 pub mod frame;
 pub mod input;
 pub mod video_pipeline;
 pub mod wire;
+
+pub use clock::now_monotonic_us;
 
 pub use control::{ControlMessage, MonitorRect};
 pub use error::ProtocolError;
