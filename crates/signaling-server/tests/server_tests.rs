@@ -213,3 +213,36 @@ async fn non_host_candidate_type_rejected() {
         other => panic!("unexpected: {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn session_timeout_kills_silent_session() {
+    let state = Arc::new(ServerState::new());
+    let cfg = ServerConfig { session_timeout: std::time::Duration::from_millis(300) };
+    let app = router(state.clone(), cfg);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let (mut host_ws, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
+    ws_send(&mut host_ws, ClientMessage::Register { host_id: "h1".into(), pubkey_b64: "P".into() }).await;
+    let _ = ws_recv(&mut host_ws).await;
+
+    let (mut viewer_ws, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
+    ws_send(&mut viewer_ws, ClientMessage::Connect { host_id: "h1".into() }).await;
+    let _h_start = ws_recv(&mut host_ws).await;
+    let _v_start = ws_recv(&mut viewer_ws).await;
+
+    // Don't send anything, wait past the timeout.
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
+    // Either side should now receive an Error(InternalError, "session timeout") before close.
+    let err = ws_recv(&mut host_ws).await;
+    match err {
+        ServerMessage::Error { code, message } => {
+            assert_eq!(code, prdt_signaling_proto::ErrorCode::InternalError);
+            assert!(message.contains("timeout"));
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}

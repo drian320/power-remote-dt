@@ -88,6 +88,26 @@ async fn handle_socket(mut socket: WebSocket, app: AppState) {
                 peer_pubkey_b64: Some(pubkey_b64),
             }).await;
 
+            let timeout_state = state.clone();
+            let timeout_sid = session_id.clone();
+            let timeout_host_tx = host_tx.clone();
+            let timeout_viewer_tx = viewer_tx.clone();
+            let session_timeout = app.cfg.session_timeout;
+            tokio::spawn(async move {
+                tokio::time::sleep(session_timeout).await;
+                if timeout_state.sessions.remove(&timeout_sid).is_some() {
+                    let _ = timeout_host_tx.send(ServerMessage::Error {
+                        code: ErrorCode::InternalError,
+                        message: "session timeout".into(),
+                    }).await;
+                    let _ = timeout_viewer_tx.send(ServerMessage::Error {
+                        code: ErrorCode::InternalError,
+                        message: "session timeout".into(),
+                    }).await;
+                    tracing::info!(session_id = %timeout_sid, "session_timeout");
+                }
+            });
+
             viewer_loop(socket, state, session_id, viewer_rx).await;
         }
         _ => {
