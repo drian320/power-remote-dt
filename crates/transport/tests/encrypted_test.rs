@@ -6,7 +6,9 @@ use std::time::Duration;
 use bytes::Bytes;
 use prdt_crypto::KeyPair;
 use prdt_protocol::{control::ControlMessage, frame::Codec, EncodedFrame, InputEvent, MouseButton};
-use prdt_transport::{CustomUdpTransport, ReceivedMessage, Transport, UdpTransportConfig};
+use prdt_transport::{
+    CustomUdpTransport, ReceivedMessage, Transport, UdpTransportConfig, DEFAULT_HANDSHAKE_TIMEOUT,
+};
 
 /// Spin up host + client transports on localhost, run Noise handshake,
 /// then exchange messages. Asserts all messages round-trip.
@@ -48,7 +50,11 @@ async fn encrypted_round_trip_all_message_types() {
     let host_clone = Arc::clone(&host);
     let server_task = tokio::spawn(async move { host_clone.handshake_as_server(&keypair).await });
     let viewer_clone = Arc::clone(&viewer);
-    let client_task = tokio::spawn(async move { viewer_clone.handshake_as_client(&pubkey).await });
+    let client_task = tokio::spawn(async move {
+        viewer_clone
+            .handshake_as_client(&pubkey, DEFAULT_HANDSHAKE_TIMEOUT)
+            .await
+    });
 
     let (s_res, c_res) = tokio::time::timeout(Duration::from_secs(5), async {
         (server_task.await.unwrap(), client_task.await.unwrap())
@@ -148,8 +154,11 @@ async fn encrypted_wrong_pubkey_fails() {
         tokio::spawn(async move { host_clone.handshake_as_server(&real_keypair).await });
     let viewer_clone = Arc::clone(&viewer);
     let fake_pubkey = fake_keypair.public;
-    let client_task =
-        tokio::spawn(async move { viewer_clone.handshake_as_client(&fake_pubkey).await });
+    let client_task = tokio::spawn(async move {
+        viewer_clone
+            .handshake_as_client(&fake_pubkey, DEFAULT_HANDSHAKE_TIMEOUT)
+            .await
+    });
 
     // Give handshake up to 2 seconds — server should return Err, client may
     // also fail (or hang awaiting NoiseE2 that never comes, since server

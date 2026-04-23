@@ -19,4 +19,6 @@ pub use handshake::{
 pub use loopback::{InProcTransport, LoopbackOptions};
 pub use packetize::{packetize, MAX_SOURCE_CHUNKS};
 pub use transport_trait::{ReceivedMessage, Transport};
-pub use udp::{now_monotonic_us, CustomUdpTransport, UdpTransportConfig};
+pub use udp::{
+    now_monotonic_us, CustomUdpTransport, UdpTransportConfig, DEFAULT_HANDSHAKE_TIMEOUT,
+};

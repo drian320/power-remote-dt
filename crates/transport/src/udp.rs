@@ -17,6 +17,12 @@ use crate::fec::FecCodec;
 use crate::packetize::packetize;
 use crate::transport_trait::{ReceivedMessage, Transport};
 
+/// Default timeout for `handshake_as_client`. If the server doesn't respond
+/// with NoiseE2 within this window (e.g. because the viewer was given the
+/// wrong pubkey, or the host is unreachable), the handshake returns
+/// [`TransportError::HandshakeTimeout`] instead of hanging forever.
+pub const DEFAULT_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Configuration for a CustomUdpTransport instance.
 #[derive(Debug, Clone, Copy)]
 pub struct UdpTransportConfig {
@@ -140,9 +146,16 @@ impl CustomUdpTransport {
     /// Client-side Noise handshake. Sends NoiseE1 to the configured peer and
     /// awaits the server's NoiseE2, installing the transport session on
     /// completion.
+    ///
+    /// If `timeout` elapses before NoiseE2 is received — most commonly because
+    /// the viewer was given the wrong server pubkey (so the server silently
+    /// drops our NoiseE1) or the host is unreachable — returns
+    /// [`TransportError::HandshakeTimeout`] instead of hanging forever. Use
+    /// [`DEFAULT_HANDSHAKE_TIMEOUT`] for the standard 5s budget.
     pub async fn handshake_as_client(
         &self,
         server_pubkey: &prdt_crypto::PubKey,
+        timeout: std::time::Duration,
     ) -> Result<(), TransportError> {
         use prdt_crypto::ClientHandshake;
 
@@ -154,17 +167,25 @@ impl CustomUdpTransport {
         self.send_control_unencrypted(ControlMessage::NoiseE1 { payload: e1 })
             .await?;
 
-        loop {
-            match self.recv_raw_unencrypted().await? {
-                ReceivedMessage::Control(ControlMessage::NoiseE2 { payload }) => {
-                    let session = hs.finalize(&payload).map_err(|e| {
-                        TransportError::Io(std::io::Error::other(format!("crypto: {e}")))
-                    })?;
-                    *self.crypto.lock().await = Some(session);
-                    return Ok(());
+        let result = tokio::time::timeout(timeout, async move {
+            loop {
+                match self.recv_raw_unencrypted().await? {
+                    ReceivedMessage::Control(ControlMessage::NoiseE2 { payload }) => {
+                        let session = hs.finalize(&payload).map_err(|e| {
+                            TransportError::Io(std::io::Error::other(format!("crypto: {e}")))
+                        })?;
+                        *self.crypto.lock().await = Some(session);
+                        return Ok::<(), TransportError>(());
+                    }
+                    _ => continue,
                 }
-                _ => continue,
             }
+        })
+        .await;
+
+        match result {
+            Ok(r) => r,
+            Err(_) => Err(TransportError::HandshakeTimeout),
         }
     }
 

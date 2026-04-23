@@ -14,7 +14,7 @@ use prdt_media_win::{
 use prdt_protocol::{frame::Codec, ControlMessage, InputEvent, VideoConsumer};
 use prdt_transport::{
     viewer_handshake, CustomUdpTransport, HelloRequest, ReceivedMessage, Transport,
-    UdpTransportConfig, DEFAULT_HELLO_RETRIES, DEFAULT_HELLO_TIMEOUT,
+    UdpTransportConfig, DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_HELLO_RETRIES, DEFAULT_HELLO_TIMEOUT,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tokio::sync::mpsc;
@@ -419,7 +419,12 @@ fn spawn_worker_tasks(
         info!(%host_addr, local = ?transport.local_addr().ok(), "viewer transport ready");
 
         // Noise client handshake first (establishes encrypted channel).
-        if let Err(e) = transport.handshake_as_client(&pubkey).await {
+        // Uses DEFAULT_HANDSHAKE_TIMEOUT so a wrong pubkey or unreachable host
+        // fails fast instead of hanging the viewer forever.
+        if let Err(e) = transport
+            .handshake_as_client(&pubkey, DEFAULT_HANDSHAKE_TIMEOUT)
+            .await
+        {
             warn!(?e, "Noise client handshake failed");
             return;
         }
