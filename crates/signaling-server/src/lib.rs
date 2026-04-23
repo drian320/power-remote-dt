@@ -18,13 +18,20 @@ impl Default for ServerConfig {
     }
 }
 
-pub fn router(state: SharedState, _cfg: ServerConfig) -> Router {
-    Router::new()
-        .route("/health", get(health))
-        .with_state(state)
+#[derive(Clone)]
+pub struct AppState {
+    pub state: SharedState,
+    pub cfg: ServerConfig,
 }
 
-async fn health(State(state): State<SharedState>) -> Json<serde_json::Value> {
-    let (hosts, sessions) = state.counts();
+pub fn router(state: SharedState, cfg: ServerConfig) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .route("/signal", get(ws::handle_upgrade))
+        .with_state(AppState { state, cfg })
+}
+
+async fn health(State(app): State<AppState>) -> Json<serde_json::Value> {
+    let (hosts, sessions) = app.state.counts();
     Json(json!({ "hosts": hosts, "sessions": sessions }))
 }
