@@ -11,8 +11,8 @@ use prdt_audio::{LoopbackCapture, OpusEncoder};
 use prdt_crypto::KeyPair;
 use prdt_filetransfer::{send_file, TransferReceiver, DEFAULT_MAX_TRANSFER_BYTES};
 use prdt_input_win::{
-    read_clipboard_text, virtual_desktop_rect, write_clipboard_text, SendInputInjector,
-    MAX_CLIPBOARD_BYTES,
+    clipboard_sequence_number, read_clipboard_text, virtual_desktop_rect, write_clipboard_text,
+    SendInputInjector, MAX_CLIPBOARD_BYTES,
 };
 use prdt_media_win::{
     dxgi::enumerate_outputs_for_adapter, pick_default_adapter, D3d11Device, DxgiNvencProducer,
@@ -302,13 +302,23 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Spawn clipboard watcher: poll the OS clipboard and forward changes.
+    // Spawn clipboard watcher. We poll `GetClipboardSequenceNumber` at 50ms
+    // which is cheap (no OpenClipboard handshake, no text copy), and only
+    // actually read the clipboard when the sequence counter moves. This
+    // drops copy-paste lag from the old 500ms polling interval while
+    // keeping CPU use minimal when the clipboard is idle.
     let clip_transport = Arc::clone(&transport);
     let clip_last_remote = Arc::clone(&last_remote_clipboard);
     let clip_task = tokio::spawn(async move {
         let mut last_sent: Option<String> = None;
+        let mut last_seq = clipboard_sequence_number();
         loop {
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let seq = clipboard_sequence_number();
+            if seq == last_seq {
+                continue;
+            }
+            last_seq = seq;
             let current = match read_clipboard_text() {
                 Ok(t) => t,
                 Err(_) => continue, // no text / inaccessible / transient failure
@@ -316,7 +326,6 @@ async fn main() -> Result<()> {
             if current.len() > MAX_CLIPBOARD_BYTES {
                 continue;
             }
-            // Skip if same as last we sent.
             if last_sent.as_ref() == Some(&current) {
                 continue;
             }

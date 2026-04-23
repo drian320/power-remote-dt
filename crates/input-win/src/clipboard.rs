@@ -3,7 +3,8 @@
 
 use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND};
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
+    CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber, OpenClipboard,
+    SetClipboardData,
 };
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Ole::CF_UNICODETEXT;
@@ -76,6 +77,14 @@ unsafe fn read_inner() -> Result<String, ClipboardError> {
     Ok(text)
 }
 
+/// Returns a monotonic counter that increments each time the clipboard
+/// changes, system-wide. Cheap to call (no clipboard handle needed) so the
+/// watcher loop can poll at high frequency and only `read_clipboard_text`
+/// when the counter moved.
+pub fn clipboard_sequence_number() -> u32 {
+    unsafe { GetClipboardSequenceNumber() }
+}
+
 /// Set the clipboard text. Caller must ensure the text fits within
 /// MAX_CLIPBOARD_BYTES; otherwise returns TooLarge.
 pub fn write_clipboard_text(text: &str) -> Result<(), ClipboardError> {
@@ -140,5 +149,15 @@ mod tests {
         let big = "A".repeat(MAX_CLIPBOARD_BYTES + 1);
         let r = write_clipboard_text(&big);
         assert!(matches!(r, Err(ClipboardError::TooLarge(_))));
+    }
+
+    #[test]
+    fn sequence_number_returns_some_value() {
+        // GetClipboardSequenceNumber always succeeds and returns a u32. We
+        // can't assert a specific value, but we can verify it's callable and
+        // two back-to-back calls agree (no change expected).
+        let a = clipboard_sequence_number();
+        let b = clipboard_sequence_number();
+        assert_eq!(a, b);
     }
 }

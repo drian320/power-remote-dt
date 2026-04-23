@@ -10,7 +10,8 @@ use prdt_audio::{AudioPlayback, OpusDecoder};
 use prdt_crypto::{KnownHosts, PubKey};
 use prdt_filetransfer::{send_file, TransferReceiver, DEFAULT_MAX_TRANSFER_BYTES};
 use prdt_input_win::{
-    read_clipboard_text, write_clipboard_text, RawInputCapturer, MAX_CLIPBOARD_BYTES,
+    clipboard_sequence_number, read_clipboard_text, write_clipboard_text, RawInputCapturer,
+    MAX_CLIPBOARD_BYTES,
 };
 use prdt_media_win::{
     pick_default_adapter, D3d11Device, D3d11Texture, MfD3d11Consumer, Nv12Renderer, SwapChain,
@@ -773,13 +774,22 @@ fn spawn_worker_tasks(
             }
         });
 
-        // Clipboard watcher: poll the OS clipboard and forward changes to the host.
+        // Clipboard watcher: poll GetClipboardSequenceNumber at 50ms and
+        // only actually read the clipboard when the counter moves. This
+        // keeps CPU use low when idle while dropping copy→remote-paste lag
+        // from ~500ms to ~50ms.
         let clip_transport = Arc::clone(&transport);
         let clip_last_remote = Arc::clone(&last_remote_clipboard);
         let clip_task = tokio::spawn(async move {
             let mut last_sent: Option<String> = None;
+            let mut last_seq = clipboard_sequence_number();
             loop {
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let seq = clipboard_sequence_number();
+                if seq == last_seq {
+                    continue;
+                }
+                last_seq = seq;
                 let current = match read_clipboard_text() {
                     Ok(t) => t,
                     Err(_) => continue,

@@ -9,7 +9,8 @@ pub mod injector;
 
 pub use capturer::RawInputCapturer;
 pub use clipboard::{
-    read_clipboard_text, write_clipboard_text, ClipboardError, MAX_CLIPBOARD_BYTES,
+    clipboard_sequence_number, read_clipboard_text, write_clipboard_text, ClipboardError,
+    MAX_CLIPBOARD_BYTES,
 };
 pub use desktop::virtual_desktop_rect;
 pub use injector::{InjectError, SendInputInjector};
