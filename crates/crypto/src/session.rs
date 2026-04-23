@@ -111,6 +111,15 @@ impl Session {
         out.truncate(written);
         Ok(out)
     }
+
+    /// Override the nonce used for the NEXT `decrypt()` call. Needed when
+    /// the underlying transport reorders or drops packets so the receiver
+    /// must tell snow which nonce the ciphertext was produced with.
+    ///
+    /// snow 0.9.6's `TransportState::set_receiving_nonce` returns unit.
+    pub fn set_receiving_nonce(&mut self, nonce: u64) {
+        self.state.set_receiving_nonce(nonce);
+    }
 }
 
 #[cfg(test)]
@@ -156,6 +165,39 @@ mod tests {
         let msg1 = client.initiate().unwrap();
         let res = server.respond(&msg1);
         assert!(res.is_err(), "handshake with wrong pubkey should fail");
+    }
+
+    #[test]
+    fn out_of_order_decrypt_with_set_receiving_nonce() {
+        let server_kp = KeyPair::generate();
+        let server = ServerHandshake::new(&server_kp).unwrap();
+        let mut client = ClientHandshake::new(&server_kp.public).unwrap();
+        let (msg2, mut server_session) = server.respond(&client.initiate().unwrap()).unwrap();
+        let mut client_session = client.finalize(&msg2).unwrap();
+
+        // Client encrypts 5 messages — snow assigns nonces 0..4 internally.
+        let pt0 = b"msg zero";
+        let pt1 = b"msg one";
+        let pt2 = b"msg two";
+        let pt3 = b"msg three";
+        let pt4 = b"msg four";
+        let ct0 = client_session.encrypt(pt0).unwrap();
+        let ct1 = client_session.encrypt(pt1).unwrap();
+        let ct2 = client_session.encrypt(pt2).unwrap();
+        let ct3 = client_session.encrypt(pt3).unwrap();
+        let ct4 = client_session.encrypt(pt4).unwrap();
+
+        // Server receives them OUT OF ORDER: 3, 1, 0, 4, 2
+        server_session.set_receiving_nonce(3);
+        assert_eq!(server_session.decrypt(&ct3).unwrap(), pt3);
+        server_session.set_receiving_nonce(1);
+        assert_eq!(server_session.decrypt(&ct1).unwrap(), pt1);
+        server_session.set_receiving_nonce(0);
+        assert_eq!(server_session.decrypt(&ct0).unwrap(), pt0);
+        server_session.set_receiving_nonce(4);
+        assert_eq!(server_session.decrypt(&ct4).unwrap(), pt4);
+        server_session.set_receiving_nonce(2);
+        assert_eq!(server_session.decrypt(&ct2).unwrap(), pt2);
     }
 
     #[test]
