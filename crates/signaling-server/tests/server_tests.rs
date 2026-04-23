@@ -92,3 +92,44 @@ async fn duplicate_register_rejected() {
         other => panic!("unexpected: {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn connect_triggers_session_start_on_both_sides() {
+    let (addr, _) = start_test_server().await;
+
+    // host registers
+    let (mut host_ws, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
+    ws_send(&mut host_ws, ClientMessage::Register {
+        host_id: "h1".into(),
+        pubkey_b64: "PUBKEY".into(),
+    }).await;
+    let _ = ws_recv(&mut host_ws).await;
+
+    // viewer connects
+    let (mut viewer_ws, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
+    ws_send(&mut viewer_ws, ClientMessage::Connect { host_id: "h1".into() }).await;
+
+    let host_start = ws_recv(&mut host_ws).await;
+    let viewer_start = ws_recv(&mut viewer_ws).await;
+
+    let (host_sid, viewer_sid) = match (host_start, viewer_start) {
+        (
+            ServerMessage::SessionStart { session_id: h, role: prdt_signaling_proto::Role::Host, peer_pubkey_b64: None },
+            ServerMessage::SessionStart { session_id: v, role: prdt_signaling_proto::Role::Viewer, peer_pubkey_b64: Some(pk) },
+        ) => {
+            assert_eq!(pk, "PUBKEY");
+            (h, v)
+        }
+        (h, v) => panic!("unexpected fan-out: host={h:?} viewer={v:?}"),
+    };
+    assert_eq!(host_sid, viewer_sid, "both sides must see the same session_id");
+}
+
+#[tokio::test]
+async fn connect_unknown_host_returns_error() {
+    let (addr, _) = start_test_server().await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
+    ws_send(&mut ws, ClientMessage::Connect { host_id: "ghost".into() }).await;
+    let msg = ws_recv(&mut ws).await;
+    assert!(matches!(msg, ServerMessage::Error { code, .. } if code == prdt_signaling_proto::ErrorCode::HostNotFound));
+}

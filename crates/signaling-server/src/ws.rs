@@ -59,9 +59,39 @@ async fn handle_socket(mut socket: WebSocket, app: AppState) {
             }
             host_loop(socket, state, host_id, rx).await;
         }
-        _other => {
-            // Connect / other — implemented in later tasks.
-            send_error(&mut socket, ErrorCode::ProtocolError, "not yet implemented").await;
+        ClientMessage::Connect { host_id } => {
+            let (viewer_tx, viewer_rx) = mpsc::channel::<ServerMessage>(SEND_CHAN_CAP);
+            let (host_tx, pubkey_b64) = match state.hosts.get(&host_id) {
+                Some(entry) => (entry.tx.clone(), entry.pubkey_b64.clone()),
+                None => {
+                    send_error(&mut socket, ErrorCode::HostNotFound, "no such host_id").await;
+                    return;
+                }
+            };
+            let session_id = uuid::Uuid::new_v4().to_string();
+            state.sessions.insert(session_id.clone(), crate::state::SessionEntry {
+                host_id: host_id.clone(),
+                host_tx: host_tx.clone(),
+                viewer_tx: viewer_tx.clone(),
+                created_at: Instant::now(),
+            });
+            info!(host_id = %host_id, session_id = %session_id, "connect");
+
+            let _ = host_tx.send(ServerMessage::SessionStart {
+                session_id: session_id.clone(),
+                role: prdt_signaling_proto::Role::Host,
+                peer_pubkey_b64: None,
+            }).await;
+            let _ = viewer_tx.send(ServerMessage::SessionStart {
+                session_id: session_id.clone(),
+                role: prdt_signaling_proto::Role::Viewer,
+                peer_pubkey_b64: Some(pubkey_b64),
+            }).await;
+
+            viewer_loop(socket, state, session_id, viewer_rx).await;
+        }
+        _ => {
+            send_error(&mut socket, ErrorCode::ProtocolError, "first message must be register or connect").await;
         }
     }
 }
@@ -92,6 +122,34 @@ async fn host_loop(
     }
     state.hosts.remove(&host_id);
     info!(host_id = %host_id, "host_disconnected");
+}
+
+async fn viewer_loop(
+    mut socket: WebSocket,
+    state: SharedState,
+    session_id: String,
+    mut rx: mpsc::Receiver<ServerMessage>,
+) {
+    loop {
+        tokio::select! {
+            incoming = socket.recv() => {
+                match incoming {
+                    Some(Ok(Message::Text(_))) => {
+                        // Candidate / Done handling lands in Tasks 7-8.
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(_)) => {} // ignore binary / ping etc
+                    Some(Err(e)) => { warn!(error = %e, "viewer ws error"); break }
+                }
+            }
+            outbound = rx.recv() => {
+                let Some(m) = outbound else { break };
+                if send_message(&mut socket, &m).await.is_err() { break; }
+            }
+        }
+    }
+    state.sessions.remove(&session_id);
+    info!(session_id = %session_id, "viewer_disconnected");
 }
 
 pub(crate) async fn send_message(socket: &mut WebSocket, m: &ServerMessage) -> Result<(), ()> {
