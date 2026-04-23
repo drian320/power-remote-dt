@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use prdt_protocol::ControlMessage;
-use prdt_transport::{CustomUdpTransport, Transport};
+use prdt_transport::Transport;
 use tokio::io::AsyncReadExt;
 use tracing::{info, warn};
 
@@ -35,10 +35,12 @@ pub enum SendError {
     Transport(#[from] prdt_transport::TransportError),
 }
 
-/// Send `path` as a chunked file transfer over `transport`. Uses a fresh
-/// monotonic-us `transfer_id`. Returns after `FileTransferEnd` is sent.
-pub async fn send_file(
-    transport: &CustomUdpTransport,
+/// Send `path` as a chunked file transfer over any `Transport`. Uses a
+/// fresh monotonic-us `transfer_id`. Returns after `FileTransferEnd` is
+/// sent. Generic over transport so host/viewer binaries use `CustomUdpTransport`
+/// while tests use `InProcTransport`.
+pub async fn send_file<T: Transport>(
+    transport: &T,
     path: &Path,
     max_bytes: u64,
 ) -> Result<(), SendError> {

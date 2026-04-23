@@ -797,7 +797,7 @@ fn spawn_worker_tasks(
         let ft_transport = Arc::clone(&transport);
         let ft_task = tokio::spawn(async move {
             while let Some(path) = file_drop_rx.recv().await {
-                match send_file(&ft_transport, &path, DEFAULT_MAX_TRANSFER_BYTES).await {
+                match send_file(&*ft_transport, &path, DEFAULT_MAX_TRANSFER_BYTES).await {
                     Ok(()) => info!(path = %path.display(), "file transfer sent"),
                     Err(e) => warn!(?e, path = %path.display(), "file transfer failed"),
                 }

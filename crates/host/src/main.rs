@@ -406,7 +406,7 @@ async fn main() -> Result<()> {
                     continue;
                 }
                 info!(path = %path.display(), "sending outgoing file to viewer");
-                match send_file(&ft_transport, &path, DEFAULT_MAX_TRANSFER_BYTES).await {
+                match send_file(&*ft_transport, &path, DEFAULT_MAX_TRANSFER_BYTES).await {
                     Ok(()) => {
                         if let Err(e) = tokio::fs::create_dir_all(&sent_dir).await {
                             warn!(?e, "create sent/ subdir failed");
