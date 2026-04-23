@@ -70,10 +70,17 @@ struct Args {
     recv_dir: std::path::PathBuf,
 
     /// Decoder backend. `mf` (default) uses Media Foundation's H.265 MFT
-    /// via the HEVC Video Extensions store app. `nvdec` attempts the
-    /// direct nvcuvid.dll path added in Plan 2d; when its FFI isn't yet
-    /// wired up (CUDA Toolkit not installed / NvdecD3d11Consumer not
-    /// implemented), the viewer logs a warning and falls back to mf.
+    /// via the HEVC Video Extensions store app — it has an internal
+    /// IMFDXGIBuffer zero-copy path and currently wins on this dev box
+    /// (decode p50 ≈ 0.2 ms at 1080p60).
+    ///
+    /// `nvdec` uses the Plan 2d direct nvcuvid.dll path. Until the
+    /// dual-R8 / R8G8 zero-copy optimization lands, the NVDEC path
+    /// stages through CPU (cuMemcpy2D DtoH + UpdateSubresource), which
+    /// adds ~1.6 ms p50 — so `nvdec` is currently measurably slower
+    /// than `mf` and should be used only for benchmarking or for
+    /// driver-mix diagnostics. When CUDA Toolkit isn't installed at
+    /// build time, `nvdec` falls back to `mf` with a warning.
     #[arg(long, default_value = "mf", value_parser = ["mf", "nvdec"])]
     decoder: String,
 }
