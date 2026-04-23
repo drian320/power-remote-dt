@@ -25,7 +25,7 @@ encrypted with Noise_NK (Curve25519 + ChaCha20-Poly1305 + BLAKE2s). See
 - [x] Phase 3a: E2E encryption (Noise_NK + Curve25519 + ChaCha20-Poly1305)
 - [ ] Phase 3b: Audio (Opus), clipboard sync
 - [ ] Phase 3c: File transfer, multi-monitor
-- [ ] Phase 3d: Authentication improvements (known-hosts file, key rotation)
+- [x] Phase 3d: Authentication hardening (handshake timeout, known-hosts, rekey support)
 
 ## Building
 
@@ -56,6 +56,22 @@ On the viewer machine:
 ```
 
 All traffic between host and viewer is now Noise_NK encrypted end-to-end.
+
+### Using a known-hosts file
+
+Instead of pasting `--host-pubkey` on every run, maintain a known-hosts file:
+
+```text
+# known_hosts.txt - one entry per line:
+#   <host:port> <base64-pubkey>
+192.168.1.5:9000 pBfwMy6qXBDbEyY0nwzoDyFOtJHbWtTNqZxdUjQD9C0
+127.0.0.1:9000 pBfwMy6qXBDbEyY0nwzoDyFOtJHbWtTNqZxdUjQD9C0
+```
+
+And launch:
+```powershell
+.\target\release\prdt-viewer.exe --host 127.0.0.1:9000 --known-hosts known_hosts.txt
+```
 
 See `docs/superpowers/plan3-manual-smoke.md` for the Phase 0 smoke test
 procedure and `docs/superpowers/phase3a-smoke.md` for the Phase 3a
