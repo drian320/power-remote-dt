@@ -14,8 +14,11 @@ prdt-audio = { path = "../audio" }
 prdt-crypto = { path = "../crypto" }
 prdt-filetransfer = { path = "../filetransfer" }
 prdt-protocol = { path = "../protocol" }
+prdt-signaling-client = { path = "../signaling-client" }
+prdt-signaling-proto = { path = "../signaling-proto" }
 prdt-transport = { path = "../transport" }
 tokio = { workspace = true, features = ["signal", "fs", "io-util"] }
+url = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
