@@ -105,6 +105,36 @@ impl D3d11Texture {
         Self::new_with_desc(dev, desc, fmt, None)
     }
 
+    /// Create a texture intended as a CUDA-D3D11 interop target.
+    /// `SHADER_RESOURCE` only (no RENDER_TARGET), no CPU access, no misc
+    /// flags — CUDA's `cuGraphicsD3D11RegisterResource` is pickier about
+    /// extra BindFlags than general-purpose textures and has been
+    /// observed to refuse NV12 textures that also carry
+    /// `D3D11_BIND_RENDER_TARGET`.
+    pub fn new_for_cuda_interop(
+        dev: &D3d11Device,
+        width: u32,
+        height: u32,
+        fmt: TextureFormat,
+    ) -> Result<Self> {
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: fmt.to_dxgi(),
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        Self::new_with_desc(dev, desc, fmt, None)
+    }
+
     /// Create a STAGING texture for CPU readback.
     pub fn new_staging(
         dev: &D3d11Device,

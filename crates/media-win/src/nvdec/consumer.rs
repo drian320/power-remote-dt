@@ -205,6 +205,86 @@ mod tests {
     use super::*;
     use crate::adapter::pick_default_adapter;
 
+    /// Probe: can we grab both Y and UV as separate CUarrays from an
+    /// NV12 D3D11 texture registered with CUDA when the texture is
+    /// created with SHADER_RESOURCE-only BindFlags? If yes, we can do
+    /// true zero-copy output without needing a dual R8 + R8G8 path.
+    #[cfg(prdt_nvdec_bindings)]
+    #[test]
+    fn probe_nv12_shader_resource_only_interop() {
+        use super::super::cuda::{check, CudaContext};
+        use super::super::ffi;
+        use windows::core::Interface;
+
+        let adapter = match pick_default_adapter() {
+            Ok(a) => a,
+            Err(_) => return,
+        };
+        if !adapter.is_nvidia() {
+            return;
+        }
+        let dev = match D3d11Device::create(&adapter) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let ctx = match CudaContext::create_primary() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let _g = ctx.push().expect("push");
+
+        let tex = D3d11Texture::new_for_cuda_interop(&dev, 256, 256, TextureFormat::Nv12)
+            .expect("NV12 interop tex");
+
+        let mut cuda_res: ffi::CUgraphicsResource = std::ptr::null_mut();
+        unsafe {
+            let res_ptr: *mut std::ffi::c_void = tex.raw().as_raw() as *mut _;
+            match check(
+                "cuGraphicsD3D11RegisterResource",
+                ffi::cuGraphicsD3D11RegisterResource(&mut cuda_res, res_ptr as *mut _, 0),
+            ) {
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!("SHADER_RESOURCE-only NV12 registration failed: {e}");
+                    return;
+                }
+            }
+
+            let mut local = cuda_res;
+            let map_r = ffi::cuGraphicsMapResources(1, &mut local, std::ptr::null_mut());
+            assert!(
+                map_r == ffi::cudaError_enum::CUDA_SUCCESS,
+                "cuGraphicsMapResources failed: {}",
+                map_r as u32
+            );
+
+            let mut y_array: ffi::CUarray = std::ptr::null_mut();
+            let ry = ffi::cuGraphicsSubResourceGetMappedArray(&mut y_array, cuda_res, 0, 0);
+            let mut uv_array: ffi::CUarray = std::ptr::null_mut();
+            let ruv = ffi::cuGraphicsSubResourceGetMappedArray(&mut uv_array, cuda_res, 1, 0);
+
+            let _ = ffi::cuGraphicsUnmapResources(1, &mut local, std::ptr::null_mut());
+            let _ = ffi::cuGraphicsUnregisterResource(cuda_res);
+
+            // Record outcome — this is a diagnostic probe, not a strict
+            // assertion. If both planes come back as non-null CUarrays,
+            // true zero-copy is achievable.
+            eprintln!(
+                "NV12 SHADER_RESOURCE-only interop probe: Y={} UV={}",
+                if ry == ffi::cudaError_enum::CUDA_SUCCESS && !y_array.is_null() {
+                    "OK"
+                } else {
+                    "FAIL"
+                },
+                if ruv == ffi::cudaError_enum::CUDA_SUCCESS && !uv_array.is_null() {
+                    "OK"
+                } else {
+                    "FAIL"
+                },
+            );
+        }
+    }
+
     /// When the Plan 2d bindings are present AND the dev box has an NVIDIA
     /// driver, construction should succeed (CUDA context creation is the
     /// only work `new` actually does right now — decode is still stubbed).
