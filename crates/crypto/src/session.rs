@@ -120,6 +120,19 @@ impl Session {
     pub fn set_receiving_nonce(&mut self, nonce: u64) {
         self.state.set_receiving_nonce(nonce);
     }
+
+    /// Rotate the outgoing cipher key. Should be matched by the peer calling
+    /// `rekey_incoming` on their side; typically done as a periodic background
+    /// operation (e.g. every 10 minutes or 100k messages) to limit the window
+    /// of key compromise impact.
+    pub fn rekey_outgoing(&mut self) {
+        self.state.rekey_outgoing();
+    }
+
+    /// Rotate the incoming cipher key.
+    pub fn rekey_incoming(&mut self) {
+        self.state.rekey_incoming();
+    }
 }
 
 #[cfg(test)]
@@ -198,6 +211,29 @@ mod tests {
         assert_eq!(server_session.decrypt(&ct4).unwrap(), pt4);
         server_session.set_receiving_nonce(2);
         assert_eq!(server_session.decrypt(&ct2).unwrap(), pt2);
+    }
+
+    #[test]
+    fn rekey_preserves_message_flow() {
+        let server_kp = KeyPair::generate();
+        let server = ServerHandshake::new(&server_kp).unwrap();
+        let mut client = ClientHandshake::new(&server_kp.public).unwrap();
+        let (msg2, mut server_session) = server.respond(&client.initiate().unwrap()).unwrap();
+        let mut client_session = client.finalize(&msg2).unwrap();
+
+        // Rekey both sides in lockstep.
+        client_session.rekey_outgoing();
+        server_session.rekey_incoming();
+        client_session.rekey_incoming();
+        server_session.rekey_outgoing();
+
+        // Verify bidirectional flow still works.
+        let pt = b"post-rekey";
+        let ct = client_session.encrypt(pt).unwrap();
+        assert_eq!(server_session.decrypt(&ct).unwrap(), pt);
+
+        let ct = server_session.encrypt(pt).unwrap();
+        assert_eq!(client_session.decrypt(&ct).unwrap(), pt);
     }
 
     #[test]
