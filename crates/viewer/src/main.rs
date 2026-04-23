@@ -94,7 +94,9 @@ struct ViewerApp {
 
 impl ApplicationHandler for ViewerApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        info!("ApplicationHandler::resumed called");
         if self.render.is_some() {
+            info!("render already exists, skipping");
             return;
         }
 
@@ -103,6 +105,7 @@ impl ApplicationHandler for ViewerApp {
             .with_inner_size(LogicalSize::new(self.req_w as f64, self.req_h as f64))
             .with_resizable(true);
 
+        info!("creating window");
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -111,7 +114,9 @@ impl ApplicationHandler for ViewerApp {
                 return;
             }
         };
+        info!("window created ok");
 
+        info!("extracting HWND");
         let hwnd = match extract_hwnd(&window) {
             Ok(h) => h,
             Err(e) => {
@@ -120,8 +125,10 @@ impl ApplicationHandler for ViewerApp {
                 return;
             }
         };
+        info!("HWND extracted");
 
         let size = window.inner_size();
+        info!(width = size.width, height = size.height, "creating swapchain");
         let swap =
             match SwapChain::new_for_hwnd(&self.dev, hwnd, size.width.max(1), size.height.max(1)) {
                 Ok(s) => s,
@@ -131,6 +138,7 @@ impl ApplicationHandler for ViewerApp {
                     return;
                 }
             };
+        info!("swapchain created");
 
         self.render = Some(ViewerRender {
             window: Arc::clone(&window),
@@ -139,6 +147,7 @@ impl ApplicationHandler for ViewerApp {
             renderer: None,
         });
         window.request_redraw();
+        info!("resumed done, first redraw requested");
     }
 
     fn window_event(
@@ -304,6 +313,11 @@ fn main() -> Result<()> {
         )
         .init();
 
+    // Log panics via tracing so they appear in viewer.log even with panic=abort.
+    std::panic::set_hook(Box::new(|info| {
+        tracing::error!(panic = %info, "PANIC");
+    }));
+
     let args = Args::parse();
     let (req_w, req_h) = parse_resolution(&args.resolution)?;
     let pubkey = PubKey::from_base64(&args.host_pubkey)
@@ -366,7 +380,10 @@ fn main() -> Result<()> {
         _runtime: runtime,
     };
 
-    event_loop.run_app(&mut app).context("run_app")?;
+    info!("event_loop.run_app starting");
+    let rc = event_loop.run_app(&mut app);
+    info!(?rc, "event_loop.run_app returned");
+    rc.context("run_app")?;
     Ok(())
 }
 
@@ -446,21 +463,68 @@ fn spawn_worker_tasks(
                 return;
             }
         };
+        info!("MfD3d11Consumer created; spawning worker tasks");
 
         // Recv loop: video → consumer; also handle control messages.
         let recv_shared = Arc::clone(&shared);
         let recv_transport = Arc::clone(&transport);
         let recv_consumer = Arc::clone(&consumer);
         let recv_task = tokio::spawn(async move {
+            info!("recv_task started");
+            let mut frame_count = 0u64;
+            let mut tex_count = 0u64;
+            let mut control_count = 0u64;
+            let mut input_count = 0u64;
+            let mut err_count = 0u64;
+            let mut last_log = std::time::Instant::now();
+            let mut timeouts = 0u64;
             loop {
-                match recv_transport.recv().await {
+                let recv_result = match tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    recv_transport.recv(),
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(_) => {
+                        timeouts += 1;
+                        info!(
+                            frames_received = frame_count,
+                            textures_decoded = tex_count,
+                            control_received = control_count,
+                            input_received = input_count,
+                            recv_errors = err_count,
+                            timeouts,
+                            "viewer rx stats (recv timeout 1s, no packet)"
+                        );
+                        continue;
+                    }
+                };
+                if last_log.elapsed() >= std::time::Duration::from_secs(1) {
+                    info!(
+                        frames_received = frame_count,
+                        textures_decoded = tex_count,
+                        control_received = control_count,
+                        input_received = input_count,
+                        recv_errors = err_count,
+                        timeouts,
+                        "viewer rx stats"
+                    );
+                    last_log = std::time::Instant::now();
+                }
+                match recv_result {
                     Ok(ReceivedMessage::Video(frame)) => {
+                        frame_count += 1;
+                        let seq = frame.seq;
+                        let is_kf = frame.is_keyframe;
+                        let nal_len = frame.nal_units.len();
                         let mut c = recv_consumer.lock().await;
                         if let Err(e) = c.submit(frame).await {
-                            warn!(?e, "consumer.submit error");
+                            warn!(?e, seq, is_kf, nal_len, "consumer.submit error");
                             continue;
                         }
                         if let Some(tex) = c.take_latest_texture() {
+                            tex_count += 1;
                             *recv_shared.latest_texture.lock().unwrap() = Some(tex);
                         }
                     }
@@ -469,10 +533,16 @@ fn spawn_worker_tasks(
                         break;
                     }
                     Ok(ReceivedMessage::Control(ControlMessage::Pong { .. })) => {
-                        // Latency stats will be folded in Plan 4.
+                        control_count += 1;
                     }
-                    Ok(_) => {}
+                    Ok(ReceivedMessage::Control(_)) => {
+                        control_count += 1;
+                    }
+                    Ok(ReceivedMessage::Input(_)) => {
+                        input_count += 1;
+                    }
                     Err(e) => {
+                        err_count += 1;
                         warn!(?e, "recv error; continuing");
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }

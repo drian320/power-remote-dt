@@ -142,11 +142,23 @@ async fn main() -> Result<()> {
     // Spawn video loop.
     let tx_video = Arc::clone(&transport);
     let video = tokio::spawn(async move {
+        let mut frames_sent = 0u64;
+        let mut send_errors = 0u64;
+        let mut last_log = std::time::Instant::now();
         loop {
             match producer.next_frame().await {
                 Ok(frame) => {
+                    let nal_len = frame.nal_units.len();
+                    let is_kf = frame.is_keyframe;
                     if let Err(e) = tx_video.send_video(frame).await {
-                        warn!(?e, "send_video error; continuing");
+                        send_errors += 1;
+                        warn!(?e, nal_len, is_kf, "send_video error; continuing");
+                    } else {
+                        frames_sent += 1;
+                    }
+                    if last_log.elapsed() >= std::time::Duration::from_secs(1) {
+                        info!(frames_sent, send_errors, "host tx stats");
+                        last_log = std::time::Instant::now();
                     }
                 }
                 Err(e) => {

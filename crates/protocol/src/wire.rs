@@ -270,6 +270,11 @@ impl VideoPacket {
         let _reserved = buf[23];
         let payload_bytes = u16::from_le_bytes(buf[24..26].try_into().unwrap());
 
+        // NOTE: read the FULL wire-side chunk payload, not truncated to
+        // payload_bytes. FEC reconstruct requires all shards to have the
+        // same physical length; payload_bytes is metadata used by the frame
+        // assembler to trim the valid portion when reassembling the last
+        // source chunk.
         let expected_payload_end = VIDEO_PAYLOAD_HDR_LEN + payload_bytes as usize;
         if buf.len() < expected_payload_end {
             return Err(ProtocolError::PayloadLengthMismatch {
@@ -277,7 +282,7 @@ impl VideoPacket {
                 actual: buf.len() - VIDEO_PAYLOAD_HDR_LEN,
             });
         }
-        let chunk_payload = buf[VIDEO_PAYLOAD_HDR_LEN..expected_payload_end].to_vec();
+        let chunk_payload = buf[VIDEO_PAYLOAD_HDR_LEN..].to_vec();
         Ok(Self {
             frame_seq,
             timestamp_host_us,

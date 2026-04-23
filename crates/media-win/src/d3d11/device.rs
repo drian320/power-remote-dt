@@ -84,6 +84,18 @@ impl D3d11Device {
             hresult: 0,
         })?;
 
+        // Enable D3D11 multithread protection on the immediate context so
+        // MF (worker thread) and Nv12Renderer (main thread) can both submit
+        // work via the shared device without racing into the driver. Without
+        // this, nvwgf2umx.dll hits ACCESS_VIOLATION under concurrent load.
+        unsafe {
+            use windows::Win32::Graphics::Direct3D11::ID3D11Multithread;
+            let mt: ID3D11Multithread = context
+                .cast()
+                .map_err(|e| MediaError::d3d11("ID3D11Multithread cast", e))?;
+            let _ = mt.SetMultithreadProtected(true);
+        }
+
         Ok(Self {
             inner: Arc::new(D3d11Inner {
                 device,
