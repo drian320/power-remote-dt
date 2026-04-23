@@ -19,14 +19,18 @@ use prdt_protocol::{frame::Codec, now_monotonic_us, EncodedFrame};
 use prdt_transport::{InProcTransport, LoopbackOptions, ReceivedMessage, Transport};
 use tracing::{info, warn};
 
+#[cfg(windows)]
+mod full_pipeline;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "prdt-latency-bench",
     about = "M2 in-process transport latency bench"
 )]
 struct Args {
-    /// Run mode. Only `in-process` is supported; the flag exists to leave
-    /// room for future `lan-loopback` / `cross-machine` modes.
+    /// Run mode. `in-process` exercises the transport layer only.
+    /// `full-pipeline-win` runs synthetic BGRA → NVENC → transport →
+    /// MF decode (Windows + NVIDIA only) and is the full M2 pipeline.
     #[arg(long, default_value = "in-process")]
     mode: String,
 
@@ -76,7 +80,7 @@ struct Sample {
     recv_us: u64,
 }
 
-fn percentiles(lags_us: &mut [u64]) -> (u64, u64, u64, u64, u64) {
+pub(crate) fn percentiles(lags_us: &mut [u64]) -> (u64, u64, u64, u64, u64) {
     lags_us.sort_unstable();
     let pick = |p: f64| -> u64 {
         let idx = ((lags_us.len() as f64 - 1.0) * p).round() as usize;
@@ -95,10 +99,29 @@ fn percentiles(lags_us: &mut [u64]) -> (u64, u64, u64, u64, u64) {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
-    if args.mode != "in-process" {
-        anyhow::bail!("only --mode=in-process is supported at this time");
-    }
     let (w, h) = parse_res(&args.resolution)?;
+
+    #[cfg(windows)]
+    if args.mode == "full-pipeline-win" {
+        return full_pipeline::run(full_pipeline::FullPipelineConfig {
+            width: w,
+            height: h,
+            fps: args.fps,
+            duration: args.duration.into(),
+            bitrate_bps: 50_000_000,
+            drop_ppm: args.drop_ppm,
+            latency_ms: args.latency_ms,
+            csv: args.csv.clone(),
+        })
+        .await;
+    }
+
+    if args.mode != "in-process" {
+        anyhow::bail!(
+            "--mode {:?} is not supported (options: in-process, full-pipeline-win)",
+            args.mode
+        );
+    }
     let duration: Duration = args.duration.into();
     let frame_interval = Duration::from_secs_f64(1.0 / args.fps as f64);
     let target_bitrate_bps = 50_000_000u64;

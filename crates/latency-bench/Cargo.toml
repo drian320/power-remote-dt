@@ -19,3 +19,6 @@ tracing-subscriber.workspace = true
 bytes.workspace = true
 anyhow = "1"
 humantime = "2"
+
+[target.'cfg(windows)'.dependencies]
+prdt-media-win = { path = "../media-win" }

@@ -34,14 +34,14 @@ sign-off:
   (`prdt_protocol::now_monotonic_us`), so in-process loopback (M2) and
   cross-process same-machine runs produce directly-comparable numbers.
   Cross-machine clock-offset correction via Ping/Pong is still deferred.
-- ~~**M2 in-process end-to-end bench**~~ — **Partially done in plan4-m2.**
-  `prdt-latency-bench` now emits p50/p90/p95/p99/max latency +
-  send/recv/loss counts at exit, with optional `--csv` dump. Uses the
-  shared monotonic clock so the reported lag is the true per-packet
-  transport latency (InProcTransport + FEC). Spot checks: 1080p60
-  loopback p95 ≈ 40 µs; with `--latency-ms 10` the induced delay
-  shows up correctly in the p50. Still transport-only — the full
-  NVENC-encode / MF-decode in-process loop is remaining Plan 4 work.
+- ~~**M2 in-process end-to-end bench**~~ — **Done in plan4-m2 +
+  plan4-m2-full-pipeline.** `prdt-latency-bench --mode in-process`
+  measures transport-only (p95 ≈ 40 µs at 1080p60). `--mode
+  full-pipeline-win` measures the synthetic-BGRA → NVENC → transport →
+  MF-decode full loop with per-stage breakdown. Spot checks on this dev
+  machine: 1080p60 e2e p95 ≈ 19 ms (encode 18 ms dominates), 4K30 e2e
+  p95 ≈ 70 ms (encode 69 ms); transport component always < 20 µs.
+  Meets spec §7.5 B5 target "M1 p95 < 22ms" at 1080p.
 - **M3a camera glass-to-glass measurement**: not attempted. Requires a
   240 fps smartphone camera and manual counting.
 - **B1–B8 benchmark scenarios** (spec §7.5): not run. Would require M2/M3
