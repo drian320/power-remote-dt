@@ -137,8 +137,15 @@ async fn main() -> Result<()> {
         .context("Noise server handshake")?;
     info!("Noise handshake complete — encrypted channel established");
 
-    // Wait for Hello, send HelloAck.
-    let session_id: u64 = 0xDEADBEEF; // stable ID for Phase 0; randomize in Plan 4
+    // Wait for Hello, send HelloAck. Session ID is random per host start so
+    // a reconnect from a viewer that had the old ID cached gets treated as a
+    // fresh session (no stale seq expectations from an earlier run).
+    let session_id: u64 = {
+        use rand_core::{OsRng, RngCore};
+        let mut buf = [0u8; 8];
+        OsRng.fill_bytes(&mut buf);
+        u64::from_le_bytes(buf)
+    };
     let bitrate_bps = args.bitrate_mbps.saturating_mul(1_000_000);
     let monitor_rect = MonitorRect::new(
         output.desktop_rect.left,

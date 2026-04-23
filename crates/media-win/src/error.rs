@@ -11,6 +11,14 @@ pub enum MediaError {
     #[error("DXGI: {context}: HRESULT 0x{hresult:08x}")]
     Dxgi { context: &'static str, hresult: u32 },
 
+    /// The D3D11 device was removed — TDR (timeout detection + recovery),
+    /// driver crash, hybrid-GPU switch, hot-unplug. The current device and
+    /// every resource bound to it are unusable; recovery needs a fresh
+    /// `D3D11Device` plus re-created swapchain / encoder / decoder.
+    /// `reason` is the HRESULT returned by `GetDeviceRemovedReason`.
+    #[error("D3D11 device removed ({context}): reason 0x{reason:08x}")]
+    DeviceRemoved { context: &'static str, reason: u32 },
+
     #[error("no suitable adapter found (requested: {requested})")]
     NoAdapter { requested: String },
 
@@ -53,8 +61,15 @@ impl MediaError {
             Self::D3D11 { hresult, .. } | Self::Dxgi { hresult, .. } => {
                 Some(HRESULT(*hresult as i32))
             }
+            Self::DeviceRemoved { reason, .. } => Some(HRESULT(*reason as i32)),
             _ => None,
         }
+    }
+
+    /// True if this error indicates the D3D11 device is gone and every
+    /// resource bound to it must be recreated.
+    pub fn is_device_removed(&self) -> bool {
+        matches!(self, Self::DeviceRemoved { .. })
     }
 }
 
@@ -93,5 +108,33 @@ mod tests {
             requested: "any".into(),
         };
         assert!(e.hresult().is_none());
+    }
+
+    #[test]
+    fn device_removed_flag_distinguishes_variants() {
+        let removed = MediaError::DeviceRemoved {
+            context: "Present",
+            reason: 0x887A0020, // DXGI_ERROR_INVALID_CALL as a stand-in
+        };
+        assert!(removed.is_device_removed());
+        assert_eq!(removed.hresult().unwrap().0 as u32, 0x887A0020);
+
+        let dxgi = MediaError::Dxgi {
+            context: "Present",
+            hresult: 0x887A0005,
+        };
+        assert!(!dxgi.is_device_removed());
+    }
+
+    #[test]
+    fn device_removed_display_is_readable() {
+        let e = MediaError::DeviceRemoved {
+            context: "Present",
+            reason: 0x887A0005,
+        };
+        let s = e.to_string();
+        assert!(s.contains("device removed"));
+        assert!(s.contains("Present"));
+        assert!(s.contains("887a0005"));
     }
 }

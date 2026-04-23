@@ -123,6 +123,10 @@ struct ViewerApp {
     // The tokio runtime running the UDP / decode worker thread; kept alive
     // for the duration of the event loop.
     _runtime: tokio::runtime::Runtime,
+    /// Set by `render_frame` when it hits an unrecoverable error (e.g.
+    /// D3D11 device removed). `about_to_wait` sees it and calls
+    /// `event_loop.exit()` so the next iteration tears down cleanly.
+    should_exit: bool,
 }
 
 impl ApplicationHandler for ViewerApp {
@@ -259,7 +263,11 @@ impl ApplicationHandler for ViewerApp {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.should_exit {
+            event_loop.exit();
+            return;
+        }
         // Keep the render loop ticking. The present call gates on vsync so this
         // cannot spin at infinite rate once a texture has arrived; before the
         // first texture, we clear + present, still vsync-bound.
@@ -336,6 +344,21 @@ impl ViewerApp {
                 if let Some(ts) = presented_host_ts {
                     self.shared.latency.record_present_for_host_ts(ts);
                 }
+            }
+            Err(e) if e.is_device_removed() => {
+                // TDR / driver crash / hybrid-GPU swap. Every D3D11 resource
+                // is now dead. In-place recovery would require rebuilding
+                // the device, swapchain, renderer, decoder, and all their
+                // upstream references. For Phase 0 we log with the reason
+                // HRESULT and ask winit to exit so the user can just restart
+                // (systemd-style). Plan 4 F7 will add in-place recreation.
+                tracing::error!(
+                    ?e,
+                    "D3D11 device removed — viewer cannot continue; \
+                     restart the process. Common causes: NVIDIA driver \
+                     TDR, driver crash, hybrid-GPU switch, hot-unplug.",
+                );
+                self.should_exit = true;
             }
             Err(e) => warn!(?e, "Present failed"),
         }
@@ -489,6 +512,7 @@ fn main() -> Result<()> {
         render: None,
         dev,
         _runtime: runtime,
+        should_exit: false,
     };
 
     info!("event_loop.run_app starting");

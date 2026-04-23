@@ -154,14 +154,41 @@ impl SwapChain {
     /// Present the current back-buffer. `vsync=true` gates to the next
     /// vertical blank; `vsync=false` returns immediately (tearing
     /// allowed depending on windowed vs. fullscreen state).
+    ///
+    /// Returns `MediaError::DeviceRemoved` specifically on
+    /// `DXGI_ERROR_DEVICE_REMOVED` / `DEVICE_RESET` / `DEVICE_HUNG`, with
+    /// `reason` populated from `GetDeviceRemovedReason`. Upstream callers
+    /// can branch on `is_device_removed()` to decide whether a retry in
+    /// the same device is futile (it is — the device must be recreated).
     pub fn present(&self, vsync: bool) -> Result<()> {
+        const DXGI_ERROR_DEVICE_REMOVED: u32 = 0x887A_0005;
+        const DXGI_ERROR_DEVICE_HUNG: u32 = 0x887A_0006;
+        const DXGI_ERROR_DEVICE_RESET: u32 = 0x887A_0007;
+
         unsafe {
             let sync_interval = if vsync { 1 } else { 0 };
             let hr = self.swap.Present(sync_interval, DXGI_PRESENT(0));
             if hr.is_err() {
+                let code = hr.0 as u32;
+                if matches!(
+                    code,
+                    DXGI_ERROR_DEVICE_REMOVED | DXGI_ERROR_DEVICE_HUNG | DXGI_ERROR_DEVICE_RESET
+                ) {
+                    // GetDeviceRemovedReason returns Result<()> whose Err
+                    // carries the actual removed-reason HRESULT. On the
+                    // (unlikely) Ok path, fall back to the Present HRESULT.
+                    let reason = match self.dev.device().GetDeviceRemovedReason() {
+                        Err(e) => e.code().0 as u32,
+                        Ok(()) => code,
+                    };
+                    return Err(MediaError::DeviceRemoved {
+                        context: "Present",
+                        reason,
+                    });
+                }
                 return Err(MediaError::Dxgi {
                     context: "Present",
-                    hresult: hr.0 as u32,
+                    hresult: code,
                 });
             }
         }
