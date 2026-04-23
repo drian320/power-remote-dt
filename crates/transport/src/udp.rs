@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use prdt_protocol::{
     control::ControlMessage,
     input::InputEvent,
-    wire::{InputPacket, PacketHeader, PacketType, HEADER_LEN},
+    wire::{AudioPacket, InputPacket, PacketHeader, PacketType, HEADER_LEN},
     EncodedFrame,
 };
 use tokio::net::UdpSocket;
@@ -346,6 +346,10 @@ impl CustomUdpTransport {
                 let msg = prdt_protocol::decode_control(body)?;
                 Ok(Some(ReceivedMessage::Control(msg)))
             }
+            PacketType::Audio => {
+                let pkt = AudioPacket::decode(body)?;
+                Ok(Some(ReceivedMessage::Audio(pkt)))
+            }
         }
     }
 }
@@ -392,6 +396,17 @@ impl Transport for CustomUdpTransport {
         let body = prdt_protocol::encode_control(&msg)?;
         let hdr = PacketHeader {
             packet_type: PacketType::Control,
+            flags: 0,
+            session_id: self.cfg.session_id,
+            payload_len: body.len() as u32,
+        };
+        self.send_raw(hdr, &body).await
+    }
+
+    async fn send_audio(&self, pkt: AudioPacket) -> Result<(), TransportError> {
+        let body = pkt.encode();
+        let hdr = PacketHeader {
+            packet_type: PacketType::Audio,
             flags: 0,
             session_id: self.cfg.session_id,
             payload_len: body.len() as u32,

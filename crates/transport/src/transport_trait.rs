@@ -1,5 +1,5 @@
 use crate::error::TransportError;
-use prdt_protocol::{control::ControlMessage, input::InputEvent, EncodedFrame};
+use prdt_protocol::{control::ControlMessage, input::InputEvent, wire::AudioPacket, EncodedFrame};
 
 /// A message delivered to `Transport::recv()`. Video frames are returned
 /// only after all chunks have been reassembled (or reconstructed via FEC).
@@ -8,6 +8,7 @@ pub enum ReceivedMessage {
     Video(EncodedFrame),
     Input(InputEvent),
     Control(ControlMessage),
+    Audio(AudioPacket),
 }
 
 /// Transport trait: async UDP-ish bidirectional channel.
@@ -19,5 +20,6 @@ pub trait Transport: Send {
     async fn send_video(&self, frame: EncodedFrame) -> Result<(), TransportError>;
     async fn send_input(&self, ev: InputEvent) -> Result<(), TransportError>;
     async fn send_control(&self, msg: ControlMessage) -> Result<(), TransportError>;
+    async fn send_audio(&self, pkt: AudioPacket) -> Result<(), TransportError>;
     async fn recv(&self) -> Result<ReceivedMessage, TransportError>;
 }

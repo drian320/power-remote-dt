@@ -9,6 +9,7 @@ members = [
     "crates/viewer",
     "crates/latency-bench",
     "crates/crypto",
+    "crates/audio",
 ]
 
 [workspace.package]

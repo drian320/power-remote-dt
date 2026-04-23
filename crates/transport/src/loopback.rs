@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use prdt_protocol::{control::ControlMessage, input::InputEvent, EncodedFrame};
+use prdt_protocol::{control::ControlMessage, input::InputEvent, wire::AudioPacket, EncodedFrame};
 use tokio::sync::mpsc;
 
 use crate::error::TransportError;
@@ -89,6 +89,10 @@ impl Transport for InProcTransport {
         self.send_msg(ReceivedMessage::Control(msg)).await
     }
 
+    async fn send_audio(&self, pkt: AudioPacket) -> Result<(), TransportError> {
+        self.send_msg(ReceivedMessage::Audio(pkt)).await
+    }
+
     async fn recv(&self) -> Result<ReceivedMessage, TransportError> {
         let mut rx = self.recv_rx.lock().await;
         rx.recv().await.ok_or(TransportError::PeerClosed)
@@ -141,5 +145,26 @@ mod tests {
             m2,
             ReceivedMessage::Control(ControlMessage::RequestIdr)
         ));
+    }
+
+    #[tokio::test]
+    async fn loopback_audio_roundtrip() {
+        let (a, b) = InProcTransport::pair(LoopbackOptions::default());
+        let pkt = AudioPacket {
+            seq: 1,
+            timestamp_us: 100,
+            opus_bytes: vec![0xAA; 200],
+        };
+        a.send_audio(pkt.clone()).await.unwrap();
+        let m = b.recv().await.unwrap();
+        match m {
+            ReceivedMessage::Audio(got) => {
+                assert_eq!(got.seq, 1);
+                assert_eq!(got.timestamp_us, 100);
+                assert_eq!(got.opus_bytes.len(), 200);
+                assert!(got.opus_bytes.iter().all(|&b| b == 0xAA));
+            }
+            other => panic!("unexpected {:?}", other),
+        }
     }
 }

@@ -1,0 +1,13 @@
+[package]
+name = "prdt-audio"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+audiopus = "0.3.0-rc.0"
+cpal = "0.15"

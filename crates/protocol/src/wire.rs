@@ -29,6 +29,7 @@ pub enum PacketType {
     Video = 0,
     Input = 1,
     Control = 2,
+    Audio = 3,
 }
 
 impl PacketType {
@@ -37,6 +38,7 @@ impl PacketType {
             0 => Some(Self::Video),
             1 => Some(Self::Input),
             2 => Some(Self::Control),
+            3 => Some(Self::Audio),
             _ => None,
         }
     }
@@ -131,7 +133,12 @@ mod header_tests {
 
     #[test]
     fn header_round_trip_all_types() {
-        for t in [PacketType::Video, PacketType::Input, PacketType::Control] {
+        for t in [
+            PacketType::Video,
+            PacketType::Input,
+            PacketType::Control,
+            PacketType::Audio,
+        ] {
             let h = PacketHeader {
                 packet_type: t,
                 flags: 0,
@@ -535,6 +542,95 @@ mod input_tests {
         assert!(matches!(
             InputPacket::decode(&buf).unwrap_err(),
             ProtocolError::UnknownEventKind(0x42),
+        ));
+    }
+}
+
+/// AudioPacket fixed-prefix length (before Opus body).
+pub const AUDIO_PAYLOAD_HDR_LEN: usize = 16;
+
+/// Wire representation of a single Opus audio frame.
+///
+/// Layout (little-endian, after 16B common header):
+/// ```text
+/// offset | size | field
+/// 0      | 8    | seq
+/// 8      | 8    | timestamp_us
+/// 16     | N    | opus_bytes
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioPacket {
+    pub seq: u64,
+    pub timestamp_us: u64,
+    pub opus_bytes: Vec<u8>,
+}
+
+impl AudioPacket {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(AUDIO_PAYLOAD_HDR_LEN + self.opus_bytes.len());
+        out.extend_from_slice(&self.seq.to_le_bytes());
+        out.extend_from_slice(&self.timestamp_us.to_le_bytes());
+        out.extend_from_slice(&self.opus_bytes);
+        out
+    }
+
+    pub fn decode(buf: &[u8]) -> Result<Self, ProtocolError> {
+        if buf.len() < AUDIO_PAYLOAD_HDR_LEN {
+            return Err(ProtocolError::PacketTooShort {
+                expected: AUDIO_PAYLOAD_HDR_LEN,
+                actual: buf.len(),
+            });
+        }
+        let seq = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+        let timestamp_us = u64::from_le_bytes(buf[8..16].try_into().unwrap());
+        let opus_bytes = buf[16..].to_vec();
+        Ok(Self {
+            seq,
+            timestamp_us,
+            opus_bytes,
+        })
+    }
+}
+
+#[cfg(test)]
+mod audio_tests {
+    use super::*;
+
+    #[test]
+    fn audio_packet_round_trip() {
+        let pkt = AudioPacket {
+            seq: 42,
+            timestamp_us: 9_876_543,
+            opus_bytes: vec![0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE],
+        };
+        let buf = pkt.encode();
+        assert_eq!(buf.len(), AUDIO_PAYLOAD_HDR_LEN + 6);
+        let back = AudioPacket::decode(&buf).unwrap();
+        assert_eq!(back, pkt);
+    }
+
+    #[test]
+    fn audio_packet_empty_opus_body() {
+        let pkt = AudioPacket {
+            seq: 0,
+            timestamp_us: 0,
+            opus_bytes: vec![],
+        };
+        let buf = pkt.encode();
+        assert_eq!(buf.len(), AUDIO_PAYLOAD_HDR_LEN);
+        let back = AudioPacket::decode(&buf).unwrap();
+        assert_eq!(back, pkt);
+    }
+
+    #[test]
+    fn audio_packet_rejects_short() {
+        let buf = [0u8; 8];
+        assert!(matches!(
+            AudioPacket::decode(&buf).unwrap_err(),
+            ProtocolError::PacketTooShort {
+                expected: AUDIO_PAYLOAD_HDR_LEN,
+                actual: 8,
+            }
         ));
     }
 }
