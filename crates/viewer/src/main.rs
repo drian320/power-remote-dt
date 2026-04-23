@@ -14,7 +14,8 @@ use prdt_input_win::{
     MAX_CLIPBOARD_BYTES,
 };
 use prdt_media_win::{
-    pick_default_adapter, D3d11Device, D3d11Texture, MfD3d11Consumer, Nv12Renderer, SwapChain,
+    pick_default_adapter, D3d11Device, D3d11Texture, MfD3d11Consumer, Nv12Renderer,
+    NvdecD3d11Consumer, SwapChain,
 };
 use prdt_protocol::{frame::Codec, ControlMessage, InputEvent, MonitorRect, VideoConsumer};
 
@@ -67,6 +68,14 @@ struct Args {
     /// demand; collisions get a `-N` suffix so nothing is overwritten.
     #[arg(long, default_value = "prdt-received")]
     recv_dir: std::path::PathBuf,
+
+    /// Decoder backend. `mf` (default) uses Media Foundation's H.265 MFT
+    /// via the HEVC Video Extensions store app. `nvdec` attempts the
+    /// direct nvcuvid.dll path added in Plan 2d; when its FFI isn't yet
+    /// wired up (CUDA Toolkit not installed / NvdecD3d11Consumer not
+    /// implemented), the viewer logs a warning and falls back to mf.
+    #[arg(long, default_value = "mf", value_parser = ["mf", "nvdec"])]
+    decoder: String,
 }
 
 fn parse_resolution(s: &str) -> Result<(u32, u32)> {
@@ -505,6 +514,7 @@ fn main() -> Result<()> {
         req_h,
         args.fps,
         args.recv_dir.clone(),
+        args.decoder.clone(),
     );
 
     // Build the event loop + app.
@@ -541,6 +551,7 @@ fn spawn_worker_tasks(
     req_h: u32,
     req_fps: u32,
     recv_dir: std::path::PathBuf,
+    decoder: String,
 ) {
     handle.clone().spawn(async move {
         // Bind an ephemeral UDP socket and point it at the host. The host binds
@@ -607,15 +618,41 @@ fn spawn_worker_tasks(
         *shared.host_monitor_rect.lock().unwrap() = ack.host_monitor_rect;
         *shared.host_virtual_desktop_rect.lock().unwrap() = ack.host_virtual_desktop_rect;
 
-        // Build consumer.
-        let consumer = match MfD3d11Consumer::new(&dev, ack.neg_width, ack.neg_height) {
-            Ok(c) => Arc::new(tokio::sync::Mutex::new(c)),
-            Err(e) => {
-                warn!(?e, "MfD3d11Consumer::new failed");
-                return;
+        // Build consumer. --decoder nvdec tries the Plan 2d path first;
+        // until the NVDEC FFI is wired up it always returns NotAvailable
+        // and we transparently fall back to MF with a warning.
+        let consumer = if decoder == "nvdec" {
+            match NvdecD3d11Consumer::new(&dev, ack.neg_width, ack.neg_height) {
+                Ok(_nv) => {
+                    // Once the FFI lands, we'll replace this with
+                    // Arc::new(Mutex::new(_nv)). For now bail to MF.
+                    warn!(
+                        "unreachable: NvdecD3d11Consumer::new returned Ok but \
+                         the VideoConsumer trait impl is a stub — falling back to MF",
+                    );
+                    None
+                }
+                Err(e) => {
+                    warn!(%e, "NVDEC unavailable; falling back to MF decoder");
+                    None
+                }
             }
-        };
-        info!("MfD3d11Consumer created; spawning worker tasks");
+        } else {
+            None
+        }
+        .unwrap_or_else(|| {
+            // Fallback / default path.
+            Arc::new(tokio::sync::Mutex::new(
+                match MfD3d11Consumer::new(&dev, ack.neg_width, ack.neg_height) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        warn!(?e, "MfD3d11Consumer::new failed");
+                        panic!("no decoder could be initialized");
+                    }
+                },
+            ))
+        });
+        info!(backend = %decoder, "decoder ready; spawning worker tasks");
 
         // Shared "last clipboard text received from host" — used by the
         // watcher below to avoid echoing remote updates back.
