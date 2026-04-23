@@ -166,7 +166,7 @@ mod tests {
         let probe = LatencyProbe::new();
         // Record 10 frames with increasing host_ts (so arrival lag decreases
         // as host_ts approaches "now").
-        let base = now_monotonic_us();
+        let base = now_monotonic_us().saturating_add(1_000_000);
         for i in 0..10 {
             probe.record_recv(i, base.saturating_sub((10 - i) * 1_000));
         }
@@ -190,7 +190,10 @@ mod tests {
     #[test]
     fn present_prunes_older_frame_entries() {
         let probe = LatencyProbe::new();
-        let base = now_monotonic_us();
+        // Anchor above any possible real `now_monotonic_us()` value so the
+        // subtractions below can't underflow when the process epoch is
+        // very fresh.
+        let base = now_monotonic_us().saturating_add(1_000_000);
         probe.record_recv(1, base - 5_000);
         probe.record_recv(2, base - 3_000);
         probe.record_recv(3, base - 1_000);

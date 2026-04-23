@@ -365,6 +365,12 @@ impl ViewerApp {
     }
 }
 
+/// Saturating cast u64 → u32 for telemetry fields. A latency beyond ~71
+/// minutes would overflow — treat that as "big", not as wraparound.
+fn clamp_u32(v: u64) -> u32 {
+    v.try_into().unwrap_or(u32::MAX)
+}
+
 /// Map a window-local cursor position into the `(0..=65535, 0..=65535)` range
 /// expected by `SendInput` with `MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK`.
 ///
@@ -840,12 +846,17 @@ fn spawn_worker_tasks(
             }
         });
 
-        // M1 latency reporter: every 1s, log p50/p95/p99 for each stage.
-        // Cheap: snapshot() clones two VecDeques worth of u64s.
+        // M1 latency reporter: every 1s log p50/p95/p99 locally; every 5s
+        // also send a `LatencyReport` to the host so the host's logs show
+        // what the viewer is actually experiencing (useful for distributed
+        // debugging on real LAN). snapshot() is cheap (clones two small
+        // VecDeques of u64s).
         let latency_probe = Arc::clone(&shared.latency);
+        let latency_transport = Arc::clone(&transport);
         let latency_task = tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(1));
             ticker.tick().await; // fire first tick immediately; skip it
+            let mut ticks_since_report: u32 = 0;
             loop {
                 ticker.tick().await;
                 let snap = latency_probe.snapshot();
@@ -868,6 +879,28 @@ fn spawn_worker_tasks(
                         arrival_p95_us = arrival.p95_us,
                         "M1 latency (arrival only; no present samples yet)",
                     );
+                }
+
+                ticks_since_report += 1;
+                if ticks_since_report >= 5 {
+                    ticks_since_report = 0;
+                    if let Some(present) = snap.present {
+                        let arrival = snap.arrival.unwrap_or_default();
+                        let decode = snap.decode_done.unwrap_or_default();
+                        let msg = ControlMessage::LatencyReport {
+                            samples: present.samples as u32,
+                            arrival_p50_us: clamp_u32(arrival.p50_us),
+                            arrival_p95_us: clamp_u32(arrival.p95_us),
+                            decode_p50_us: clamp_u32(decode.p50_us),
+                            decode_p95_us: clamp_u32(decode.p95_us),
+                            present_p50_us: clamp_u32(present.p50_us),
+                            present_p95_us: clamp_u32(present.p95_us),
+                            present_p99_us: clamp_u32(present.p99_us),
+                        };
+                        if let Err(e) = latency_transport.send_control(msg).await {
+                            warn!(?e, "send LatencyReport failed");
+                        }
+                    }
                 }
             }
         });

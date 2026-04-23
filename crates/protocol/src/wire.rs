@@ -655,7 +655,7 @@ pub fn decode_control(buf: &[u8]) -> Result<ControlMessage, ProtocolError> {
     let kind = buf[0];
     // We don't trust `kind` blindly; bincode will decode the whole tagged enum.
     // We keep the leading byte as a fast-path dispatch hint for future optimization.
-    if kind > 15 {
+    if kind > 16 {
         return Err(ProtocolError::UnknownControlKind(kind));
     }
     let msg: ControlMessage = bincode::deserialize(&buf[1..])?;
@@ -746,6 +746,24 @@ mod control_tests {
             let back = decode_control(&buf).unwrap();
             assert_eq!(back, msg);
         }
+    }
+
+    #[test]
+    fn latency_report_round_trip() {
+        let msg = ControlMessage::LatencyReport {
+            samples: 240,
+            arrival_p50_us: 100,
+            arrival_p95_us: 250,
+            decode_p50_us: 800,
+            decode_p95_us: 1_500,
+            present_p50_us: 17_000,
+            present_p95_us: 22_000,
+            present_p99_us: 30_500,
+        };
+        let buf = encode_control(&msg).unwrap();
+        let back = decode_control(&buf).unwrap();
+        assert_eq!(back, msg);
+        assert_eq!(msg.kind_u8(), 16);
     }
 
     #[test]

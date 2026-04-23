@@ -96,6 +96,21 @@ pub enum ControlMessage {
     },
     /// Transfer finished (success or aborted). Viewer → Host.
     FileTransferEnd { transfer_id: u64, success: bool },
+    /// Viewer → Host periodic latency report. Fields mirror the viewer's
+    /// `LatencyProbe` snapshot so the host side can log "what the viewer
+    /// actually sees" without needing to read the viewer's stderr. The
+    /// u32 widths cap individual measurements at ~71 minutes, which is
+    /// fine — if glass-to-glass goes past that, a bench isn't the problem.
+    LatencyReport {
+        samples: u32,
+        arrival_p50_us: u32,
+        arrival_p95_us: u32,
+        decode_p50_us: u32,
+        decode_p95_us: u32,
+        present_p50_us: u32,
+        present_p95_us: u32,
+        present_p99_us: u32,
+    },
 }
 
 impl ControlMessage {
@@ -116,6 +131,7 @@ impl ControlMessage {
             Self::FileTransferBegin { .. } => 13,
             Self::FileChunk { .. } => 14,
             Self::FileTransferEnd { .. } => 15,
+            Self::LatencyReport { .. } => 16,
         }
     }
 }

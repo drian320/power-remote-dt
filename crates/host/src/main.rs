@@ -297,6 +297,28 @@ async fn main() -> Result<()> {
                     info!("peer sent Bye");
                     break;
                 }
+                Ok(ReceivedMessage::Control(ControlMessage::LatencyReport {
+                    samples,
+                    arrival_p50_us,
+                    arrival_p95_us,
+                    decode_p50_us,
+                    decode_p95_us,
+                    present_p50_us,
+                    present_p95_us,
+                    present_p99_us,
+                })) => {
+                    info!(
+                        samples,
+                        arrival_p50_us,
+                        arrival_p95_us,
+                        decode_p50_us,
+                        decode_p95_us,
+                        present_p50_us,
+                        present_p95_us,
+                        present_p99_us,
+                        "viewer latency report",
+                    );
+                }
                 Ok(ReceivedMessage::Control(msg)) => {
                     let _ = ft_rx.handle(msg);
                 }
