@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use prdt_crypto::PubKey;
+use prdt_crypto::{KnownHosts, PubKey};
 use prdt_input_win::RawInputCapturer;
 use prdt_media_win::{
     pick_default_adapter, D3d11Device, D3d11Texture, MfD3d11Consumer, Nv12Renderer, SwapChain,
@@ -45,10 +45,15 @@ struct Args {
     #[arg(long, default_value_t = 60u32)]
     fps: u32,
 
-    /// Host's public key in base64 (shown on host startup). Required for
-    /// Noise handshake.
+    /// Host's public key in base64 (shown on host startup). If absent,
+    /// --known-hosts is consulted. Required for Noise handshake.
     #[arg(long)]
-    host_pubkey: String,
+    host_pubkey: Option<String>,
+
+    /// Path to a known-hosts file mapping host addresses to pubkeys.
+    /// Ignored if --host-pubkey is set.
+    #[arg(long)]
+    known_hosts: Option<std::path::PathBuf>,
 }
 
 fn parse_resolution(s: &str) -> Result<(u32, u32)> {
@@ -128,7 +133,11 @@ impl ApplicationHandler for ViewerApp {
         info!("HWND extracted");
 
         let size = window.inner_size();
-        info!(width = size.width, height = size.height, "creating swapchain");
+        info!(
+            width = size.width,
+            height = size.height,
+            "creating swapchain"
+        );
         let swap =
             match SwapChain::new_for_hwnd(&self.dev, hwnd, size.width.max(1), size.height.max(1)) {
                 Ok(s) => s,
@@ -320,8 +329,25 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
     let (req_w, req_h) = parse_resolution(&args.resolution)?;
-    let pubkey = PubKey::from_base64(&args.host_pubkey)
-        .map_err(|e| anyhow::anyhow!("invalid --host-pubkey: {e}"))?;
+    let pubkey = match (&args.host_pubkey, &args.known_hosts) {
+        (Some(b64), _) => {
+            PubKey::from_base64(b64).map_err(|e| anyhow::anyhow!("invalid --host-pubkey: {e}"))?
+        }
+        (None, Some(path)) => {
+            let kh = KnownHosts::load(path)
+                .with_context(|| format!("load --known-hosts {}", path.display()))?;
+            let host_str = args.host.to_string();
+            kh.get(&host_str).copied().with_context(|| {
+                format!(
+                    "no entry for {host_str} in known-hosts file ({} entries)",
+                    kh.len()
+                )
+            })?
+        }
+        (None, None) => {
+            anyhow::bail!("one of --host-pubkey or --known-hosts is required");
+        }
+    };
 
     // D3D11 device. Created on the main thread, cloned into the worker so the
     // decoder uses the same device (required for zero-copy texture handoff).
