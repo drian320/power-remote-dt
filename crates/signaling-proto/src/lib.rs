@@ -43,6 +43,7 @@ pub enum ErrorCode {
     UnsupportedCandidateType,
     ProtocolError,
     InternalError,
+    HostIdPubkeyMismatch,
 }
 
 /// Default priorities per spec §Wire Protocol.

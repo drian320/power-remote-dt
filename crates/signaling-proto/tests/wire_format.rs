@@ -107,3 +107,15 @@ fn unknown_variant_rejected() {
     let err = serde_json::from_str::<ClientMessage>(json).unwrap_err();
     assert!(err.to_string().contains("invented") || err.is_data());
 }
+
+#[test]
+fn parse_host_id_pubkey_mismatch() {
+    let json = r#"{"t":"error","code":"host_id_pubkey_mismatch","message":"x"}"#;
+    let msg: ServerMessage = serde_json::from_str(json).unwrap();
+    match msg {
+        ServerMessage::Error { code, .. } => {
+            assert_eq!(code, ErrorCode::HostIdPubkeyMismatch);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
