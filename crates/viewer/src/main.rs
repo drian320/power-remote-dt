@@ -104,6 +104,12 @@ struct Args {
     /// Proceed even when the signaling-learned pubkey mismatches a previously recorded one.
     #[arg(long)]
     force_tofu: bool,
+
+    /// STUN server URL (e.g. stun://stun.l.google.com:19302). Optional.
+    /// When set together with --signaling-url, the viewer learns its public
+    /// addr and sends it alongside the LAN Host candidate.
+    #[arg(long)]
+    stun_url: Option<url::Url>,
 }
 
 fn parse_resolution(s: &str) -> Result<(u32, u32)> {
@@ -588,6 +594,7 @@ fn main() -> Result<()> {
         args.signaling_url.clone(),
         args.host_id.clone(),
         args.signaling_timeout,
+        args.stun_url.clone(),
         args.known_host_ids.clone(),
         args.force_tofu,
         req_w,
@@ -630,6 +637,7 @@ fn spawn_worker_tasks(
     signaling_url: Option<url::Url>,
     host_id: Option<String>,
     signaling_timeout_s: u64,
+    stun_url: Option<url::Url>,
     known_host_ids_path: std::path::PathBuf,
     force_tofu: bool,
     req_w: u32,
@@ -672,7 +680,7 @@ fn spawn_worker_tasks(
                     url,
                     host_id: host_id.clone(),
                     timeout: std::time::Duration::from_secs(signaling_timeout_s),
-                    stun_url: None,
+                    stun_url: stun_url.clone(),
                 },
                 local_udp,
             ).await {
