@@ -13,6 +13,7 @@ path = "src/main.rs"
 prdt-audio = { path = "../audio" }
 prdt-crypto = { path = "../crypto" }
 prdt-filetransfer = { path = "../filetransfer" }
+prdt-nat-traversal = { path = "../nat-traversal" }
 prdt-protocol = { path = "../protocol" }
 prdt-transport = { path = "../transport" }
 prdt-signaling-client = { path = "../signaling-client" }

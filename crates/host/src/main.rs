@@ -77,6 +77,12 @@ struct Args {
     /// addr and sends it alongside the LAN Host candidate.
     #[arg(long)]
     stun_url: Option<url::Url>,
+
+    /// TURN server URL (turn://user:pass@host:port). Optional. When set,
+    /// transport is built via bind_with_relay (TURN relay mode) and the
+    /// signaling-client emits a Relay candidate.
+    #[arg(long)]
+    turn_url: Option<url::Url>,
 }
 
 #[tokio::main]
@@ -144,11 +150,18 @@ async fn main() -> Result<()> {
         session_id: 0, // client picks
         ..Default::default()
     };
-    let transport = Arc::new(
+    let transport = Arc::new(if let Some(url) = args.turn_url.clone() {
+        let turn_cfg = prdt_nat_traversal::TurnConfig::from_url(&url)
+            .await
+            .context("parse turn URL")?;
+        CustomUdpTransport::bind_with_relay(args.bind, cfg, turn_cfg)
+            .await
+            .context("UDP bind with TURN relay")?
+    } else {
         CustomUdpTransport::bind(args.bind, cfg)
             .await
-            .context("UDP bind")?,
-    );
+            .context("UDP bind")?
+    });
     let local_udp = transport.local_addr()?;
     info!(local = ?local_udp, "UDP bound");
 
@@ -163,7 +176,7 @@ async fn main() -> Result<()> {
                 host_id: host_id.clone(),
                 timeout: Duration::from_secs(args.signaling_timeout),
                 stun_url: args.stun_url.clone(),
-                turn_url: None,
+                turn_url: args.turn_url.clone(),
                 aggregation_window: prdt_signaling_client::RendezvousConfig::DEFAULT_AGGREGATION_WINDOW,
             },
             prdt_signaling_client::HostIdentity {
