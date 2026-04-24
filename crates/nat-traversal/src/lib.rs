@@ -8,4 +8,4 @@ pub mod turn_socket;
 
 pub use error::StunError;
 pub use stun::learn_public_addr;
-pub use turn::{TurnConfig, TurnError};
+pub use turn::{TurnClient, TurnConfig, TurnError};

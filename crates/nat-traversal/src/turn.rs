@@ -4,9 +4,44 @@
 //! Send Indication encode, Data Indication decode. Refresh and ChannelBind
 //! are out of scope (Phase 2 W5+).
 
+use bytecodec::{DecodeExt, EncodeExt};
+use rand_core::{OsRng, RngCore};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
+use stun_codec::rfc5389::attributes::{
+    ErrorCode, MessageIntegrity, Nonce, Realm, Username,
+};
+use stun_codec::rfc5766::attributes::{
+    Lifetime, RequestedTransport, XorRelayAddress,
+};
+use stun_codec::rfc5766::methods::ALLOCATE;
+use stun_codec::{
+    define_attribute_enums, Message, MessageClass, MessageDecoder, MessageEncoder, TransactionId,
+};
+use tokio::net::UdpSocket;
 use url::Url;
+
+// Composite attribute enum combining RFC 5389 auth attributes with RFC 5766
+// TURN attributes. The pre-composed `rfc5766::Attribute` does not include
+// MESSAGE-INTEGRITY/USERNAME/REALM/NONCE/ERROR-CODE, so we build our own.
+define_attribute_enums!(
+    TurnAttribute,
+    TurnAttributeDecoder,
+    TurnAttributeEncoder,
+    [
+        // RFC 5389 attrs we need for auth / error handling.
+        Username,
+        MessageIntegrity,
+        ErrorCode,
+        Realm,
+        Nonce,
+        // RFC 5766 attrs we need for Allocate.
+        Lifetime,
+        RequestedTransport,
+        XorRelayAddress
+    ]
+);
 
 #[derive(Debug, Clone)]
 pub struct TurnConfig {
@@ -63,6 +98,191 @@ pub enum TurnError {
     Protocol(String),
     #[error("bad auth: {0}")]
     Auth(String),
+}
+
+pub struct TurnClient {
+    socket: Arc<UdpSocket>,
+    config: TurnConfig,
+    realm: Option<String>,
+    nonce: Option<String>,
+    relayed_addr: Option<SocketAddr>,
+}
+
+impl TurnClient {
+    pub fn new(socket: Arc<UdpSocket>, config: TurnConfig) -> Self {
+        Self {
+            socket,
+            config,
+            realm: None,
+            nonce: None,
+            relayed_addr: None,
+        }
+    }
+
+    pub fn realm(&self) -> Option<&str> {
+        self.realm.as_deref()
+    }
+    pub fn nonce(&self) -> Option<&str> {
+        self.nonce.as_deref()
+    }
+    pub fn relayed_addr(&self) -> Option<SocketAddr> {
+        self.relayed_addr
+    }
+    pub fn config_server_addr(&self) -> SocketAddr {
+        self.config.server_addr
+    }
+
+    /// Send Allocate request, handle 401 challenge, retry with MESSAGE-INTEGRITY.
+    /// Stores relayed_addr, realm, nonce on success.
+    pub async fn allocate(&mut self, timeout: Duration) -> Result<SocketAddr, TurnError> {
+        let txn = random_transaction_id();
+        let mut req1 = Message::<TurnAttribute>::new(MessageClass::Request, ALLOCATE, txn);
+        // 17 = UDP per RFC 5766.
+        req1.add_attribute(TurnAttribute::from(RequestedTransport::new(17)));
+        let lifetime_secs: u32 = self
+            .config
+            .requested_lifetime
+            .as_secs()
+            .try_into()
+            .unwrap_or(600);
+        req1.add_attribute(TurnAttribute::from(Lifetime::from_u32(lifetime_secs)));
+        let bytes = encode(&req1)?;
+        self.socket.send_to(&bytes, self.config.server_addr).await?;
+
+        let resp_bytes = recv_with_timeout(&self.socket, timeout).await?;
+        let resp_msg = decode(&resp_bytes)?;
+        if resp_msg.class() == MessageClass::ErrorResponse {
+            let code = resp_msg
+                .get_attribute::<ErrorCode>()
+                .map(|e| e.code())
+                .unwrap_or(0);
+            if code == 401 {
+                let realm = resp_msg
+                    .get_attribute::<Realm>()
+                    .ok_or_else(|| TurnError::Protocol("401 without REALM".into()))?
+                    .text()
+                    .to_string();
+                let nonce = resp_msg
+                    .get_attribute::<Nonce>()
+                    .ok_or_else(|| TurnError::Protocol("401 without NONCE".into()))?
+                    .value()
+                    .to_string();
+                self.realm = Some(realm);
+                self.nonce = Some(nonce);
+                return self.allocate_retry_with_auth(timeout).await;
+            }
+            return Err(TurnError::Server {
+                code,
+                reason: "allocate rejected".into(),
+            });
+        }
+        if let Some(relayed) = resp_msg.get_attribute::<XorRelayAddress>() {
+            self.relayed_addr = Some(relayed.address());
+            return Ok(relayed.address());
+        }
+        Err(TurnError::Protocol(
+            "no XOR-RELAYED-ADDRESS in success".into(),
+        ))
+    }
+
+    async fn allocate_retry_with_auth(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<SocketAddr, TurnError> {
+        let realm_str = self
+            .realm
+            .clone()
+            .ok_or_else(|| TurnError::Auth("no realm".into()))?;
+        let nonce_str = self
+            .nonce
+            .clone()
+            .ok_or_else(|| TurnError::Auth("no nonce".into()))?;
+        let txn = random_transaction_id();
+        let mut req = Message::<TurnAttribute>::new(MessageClass::Request, ALLOCATE, txn);
+        req.add_attribute(TurnAttribute::from(RequestedTransport::new(17)));
+        let lifetime_secs: u32 = self
+            .config
+            .requested_lifetime
+            .as_secs()
+            .try_into()
+            .unwrap_or(600);
+        req.add_attribute(TurnAttribute::from(Lifetime::from_u32(lifetime_secs)));
+        let username = Username::new(self.config.username.clone())
+            .map_err(|e| TurnError::Auth(format!("bad username: {e:?}")))?;
+        let realm = Realm::new(realm_str.clone())
+            .map_err(|e| TurnError::Auth(format!("bad realm: {e:?}")))?;
+        let nonce = Nonce::new(nonce_str.clone())
+            .map_err(|e| TurnError::Auth(format!("bad nonce: {e:?}")))?;
+        req.add_attribute(TurnAttribute::from(username.clone()));
+        req.add_attribute(TurnAttribute::from(realm.clone()));
+        req.add_attribute(TurnAttribute::from(nonce));
+        let mi = MessageIntegrity::new_long_term_credential(
+            &req,
+            &username,
+            &realm,
+            &self.config.password,
+        )
+        .map_err(|e| TurnError::Auth(format!("MI: {e:?}")))?;
+        req.add_attribute(TurnAttribute::from(mi));
+
+        let bytes = encode(&req)?;
+        self.socket.send_to(&bytes, self.config.server_addr).await?;
+
+        let resp_bytes = recv_with_timeout(&self.socket, timeout).await?;
+        let resp_msg = decode(&resp_bytes)?;
+        if resp_msg.class() != MessageClass::SuccessResponse {
+            let code = resp_msg
+                .get_attribute::<ErrorCode>()
+                .map(|e| e.code())
+                .unwrap_or(0);
+            return Err(TurnError::Server {
+                code,
+                reason: "allocate retry failed".into(),
+            });
+        }
+        let relayed = resp_msg
+            .get_attribute::<XorRelayAddress>()
+            .ok_or_else(|| TurnError::Protocol("success without XOR-RELAYED".into()))?
+            .address();
+        self.relayed_addr = Some(relayed);
+        Ok(relayed)
+    }
+}
+
+pub(crate) fn random_transaction_id() -> TransactionId {
+    let mut id = [0u8; 12];
+    OsRng.fill_bytes(&mut id);
+    TransactionId::new(id)
+}
+
+pub(crate) fn encode(msg: &Message<TurnAttribute>) -> Result<Vec<u8>, TurnError> {
+    let mut e = MessageEncoder::<TurnAttribute>::new();
+    e.encode_into_bytes(msg.clone())
+        .map_err(|err| TurnError::Protocol(format!("encode: {err}")))
+}
+
+pub(crate) fn decode(bytes: &[u8]) -> Result<Message<TurnAttribute>, TurnError> {
+    let mut d = MessageDecoder::<TurnAttribute>::new();
+    match d.decode_from_bytes(bytes) {
+        Ok(Ok(m)) => Ok(m),
+        Ok(Err(e)) => Err(TurnError::Protocol(format!("decode body: {e:?}"))),
+        Err(e) => Err(TurnError::Protocol(format!("decode: {e}"))),
+    }
+}
+
+pub(crate) async fn recv_with_timeout(
+    socket: &UdpSocket,
+    dur: Duration,
+) -> Result<Vec<u8>, TurnError> {
+    let mut buf = vec![0u8; 1500];
+    match tokio::time::timeout(dur, socket.recv_from(&mut buf)).await {
+        Ok(Ok((n, _))) => {
+            buf.truncate(n);
+            Ok(buf)
+        }
+        Ok(Err(e)) => Err(TurnError::Io(e)),
+        Err(_) => Err(TurnError::Timeout { stage: "turn_recv" }),
+    }
 }
 
 #[cfg(test)]
