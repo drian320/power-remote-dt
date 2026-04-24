@@ -172,17 +172,22 @@ async fn main() -> Result<()> {
         )
         .await
         .context("signaling rendezvous (host)")?;
-        let peer_addr = outcome.peer_candidates.iter()
-            .find(|c| c.typ == prdt_signaling_proto::CandidateType::Host)
-            .and_then(|c| format!("{}:{}", c.ip, c.port).parse::<std::net::SocketAddr>().ok())
-            .context("no host candidate in peer_candidates")?;
+        let cand_addrs: Vec<SocketAddr> = outcome
+            .peer_candidates
+            .iter()
+            .filter_map(|c| format!("{}:{}", c.ip, c.port).parse().ok())
+            .collect();
         info!(
-            %peer_addr,
             session_id = %outcome.session_id,
             %host_id,
+            candidate_count = cand_addrs.len(),
             "signaling_rendezvous_completed"
         );
-        transport.configure_peer(peer_addr).await;
+        let peer_addr = transport
+            .probe_and_commit_peer(&cand_addrs, Duration::from_secs(10))
+            .await
+            .context("probe_and_commit_peer")?;
+        info!(%peer_addr, "probe selected winner");
     } else {
         info!("no --signaling-url; using LAN fixed-address mode");
     }
