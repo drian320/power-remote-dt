@@ -681,6 +681,7 @@ fn spawn_worker_tasks(
                     host_id: host_id.clone(),
                     timeout: std::time::Duration::from_secs(signaling_timeout_s),
                     stun_url: stun_url.clone(),
+                    aggregation_window: prdt_signaling_client::RendezvousConfig::DEFAULT_AGGREGATION_WINDOW,
                 },
                 local_udp,
             ).await {
@@ -690,7 +691,17 @@ fn spawn_worker_tasks(
                     return;
                 }
             };
-            tracing::info!(peer_addr = %outcome.peer_addr, session_id = %outcome.session_id, %host_id, "signaling_rendezvous_completed");
+            let peer_addr = match outcome.peer_candidates.iter()
+                .find(|c| c.typ == prdt_signaling_proto::CandidateType::Host)
+                .and_then(|c| format!("{}:{}", c.ip, c.port).parse::<std::net::SocketAddr>().ok())
+            {
+                Some(a) => a,
+                None => {
+                    tracing::error!("no host candidate in peer_candidates");
+                    return;
+                }
+            };
+            tracing::info!(%peer_addr, session_id = %outcome.session_id, %host_id, "signaling_rendezvous_completed");
 
             let pk_b64 = match outcome.peer_pubkey_b64.as_deref() {
                 Some(s) => s,
@@ -728,7 +739,7 @@ fn spawn_worker_tasks(
                 }
             }
 
-            (outcome.peer_addr, pk)
+            (peer_addr, pk)
         } else {
             (direct_host.expect("args validated"), direct_pubkey.expect("args validated"))
         };

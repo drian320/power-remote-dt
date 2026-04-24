@@ -58,12 +58,17 @@ async fn viewer_collects_host_and_srflx_peer_candidates() {
             host_id: "h1".into(),
             timeout: Duration::from_secs(5),
             stun_url: None,
+            aggregation_window: std::time::Duration::from_millis(100),
         },
         local_udp,
     ).await.unwrap();
 
     // peer_addr = first Host-typ candidate
-    assert_eq!(outcome.peer_addr.port(), 40200);
+    let peer_addr = outcome.peer_candidates.iter()
+        .find(|c| c.typ == prdt_signaling_proto::CandidateType::Host)
+        .and_then(|c| format!("{}:{}", c.ip, c.port).parse::<std::net::SocketAddr>().ok())
+        .expect("no host candidate in peer_candidates");
+    assert_eq!(peer_addr.port(), 40200);
     // peer_candidates should contain the Host (always) and may contain the
     // Srflx if it arrived before viewer committed. At minimum Host is present.
     let has_host = outcome.peer_candidates.iter().any(|c| c.typ == CandidateType::Host);
@@ -113,11 +118,15 @@ async fn viewer_collects_srflx_before_host() {
     let url: Url = format!("ws://{addr}/signal").parse().unwrap();
     let local_udp: SocketAddr = "127.0.0.1:40301".parse().unwrap();
     let outcome = rendezvous_as_viewer(
-        RendezvousConfig { url, host_id: "h1".into(), timeout: Duration::from_secs(5), stun_url: None },
+        RendezvousConfig { url, host_id: "h1".into(), timeout: Duration::from_secs(5), stun_url: None, aggregation_window: std::time::Duration::from_millis(100) },
         local_udp,
     ).await.unwrap();
 
-    assert_eq!(outcome.peer_addr.port(), 40300);
+    let peer_addr = outcome.peer_candidates.iter()
+        .find(|c| c.typ == prdt_signaling_proto::CandidateType::Host)
+        .and_then(|c| format!("{}:{}", c.ip, c.port).parse::<std::net::SocketAddr>().ok())
+        .expect("no host candidate in peer_candidates");
+    assert_eq!(peer_addr.port(), 40300);
     // Both should be in peer_candidates because Srflx arrived before Host
     let types: Vec<CandidateType> = outcome.peer_candidates.iter().map(|c| c.typ).collect();
     assert!(types.contains(&CandidateType::Host), "missing Host in {types:?}");

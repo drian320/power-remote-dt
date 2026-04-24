@@ -45,14 +45,18 @@ async fn w1_smoke_signaling_noise_hello_ack_completes() {
         let local = transport.local_addr().expect("host local_addr");
 
         let outcome = rendezvous_as_host(
-            RendezvousConfig { url: host_url, host_id: "w1-smoke".into(), timeout: Duration::from_secs(5), stun_url: None },
+            RendezvousConfig { url: host_url, host_id: "w1-smoke".into(), timeout: Duration::from_secs(5), stun_url: None, aggregation_window: std::time::Duration::from_millis(100) },
             HostIdentity { pubkey_b64: host_pub_b64 },
             local,
         )
         .await
         .expect("host rendezvous");
 
-        transport.configure_peer(outcome.peer_addr).await;
+        let peer_addr = outcome.peer_candidates.iter()
+            .find(|c| c.typ == prdt_signaling_proto::CandidateType::Host)
+            .and_then(|c| format!("{}:{}", c.ip, c.port).parse::<std::net::SocketAddr>().ok())
+            .expect("no host candidate in peer_candidates");
+        transport.configure_peer(peer_addr).await;
 
         transport
             .handshake_as_server(&host_kp)
@@ -86,14 +90,18 @@ async fn w1_smoke_signaling_noise_hello_ack_completes() {
         let local = transport.local_addr().expect("viewer local_addr");
 
         let outcome = rendezvous_as_viewer(
-            RendezvousConfig { url: viewer_url, host_id: "w1-smoke".into(), timeout: Duration::from_secs(5), stun_url: None },
+            RendezvousConfig { url: viewer_url, host_id: "w1-smoke".into(), timeout: Duration::from_secs(5), stun_url: None, aggregation_window: std::time::Duration::from_millis(100) },
             local,
         )
         .await
         .expect("viewer rendezvous");
         assert!(outcome.peer_pubkey_b64.is_some(), "viewer should receive host pubkey");
 
-        transport.configure_peer(outcome.peer_addr).await;
+        let peer_addr = outcome.peer_candidates.iter()
+            .find(|c| c.typ == prdt_signaling_proto::CandidateType::Host)
+            .and_then(|c| format!("{}:{}", c.ip, c.port).parse::<std::net::SocketAddr>().ok())
+            .expect("no host candidate in peer_candidates");
+        transport.configure_peer(peer_addr).await;
 
         transport
             .handshake_as_client(&host_pub_for_viewer, DEFAULT_HANDSHAKE_TIMEOUT)

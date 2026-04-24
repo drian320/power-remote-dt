@@ -12,7 +12,6 @@ use prdt_signaling_proto::PRIORITY_SRFLX;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REGISTERED_TIMEOUT: Duration = Duration::from_secs(5);
-const PEER_CANDIDATE_TIMEOUT: Duration = Duration::from_secs(5);
 
 type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -79,7 +78,7 @@ pub async fn rendezvous_as_host(
 
     send_candidates(&mut ws, &session_id, local_udp_addr, cfg.stun_url.as_ref()).await?;
 
-    let (peer, peer_candidates) = recv_peer_candidates(&mut ws, PEER_CANDIDATE_TIMEOUT).await?;
+    let peer_candidates = recv_peer_candidates(&mut ws, cfg.timeout, cfg.aggregation_window).await?;
 
     send_msg(&mut ws, &ClientMessage::Done {
         session_id: session_id.clone(),
@@ -87,7 +86,11 @@ pub async fn rendezvous_as_host(
     }).await?;
 
     let _ = ws.close(None).await;
-    Ok(RendezvousOutcome { session_id, peer_addr: peer, peer_pubkey_b64: None, peer_candidates })
+    Ok(RendezvousOutcome {
+        session_id,
+        peer_pubkey_b64: None,
+        peer_candidates,
+    })
 }
 
 #[instrument(skip(cfg), fields(host_id = %cfg.host_id))]
@@ -108,7 +111,7 @@ pub async fn rendezvous_as_viewer(
 
     send_candidates(&mut ws, &session_id, local_udp_addr, cfg.stun_url.as_ref()).await?;
 
-    let (peer, peer_candidates) = recv_peer_candidates(&mut ws, PEER_CANDIDATE_TIMEOUT).await?;
+    let peer_candidates = recv_peer_candidates(&mut ws, cfg.timeout, cfg.aggregation_window).await?;
 
     send_msg(&mut ws, &ClientMessage::Done {
         session_id: session_id.clone(),
@@ -116,49 +119,53 @@ pub async fn rendezvous_as_viewer(
     }).await?;
 
     let _ = ws.close(None).await;
-    Ok(RendezvousOutcome { session_id, peer_addr: peer, peer_pubkey_b64, peer_candidates })
-}
-
-#[allow(clippy::result_large_err)]
-fn parse_peer_addr(c: &Candidate) -> Result<SocketAddr, SignalingError> {
-    let s = format!("{}:{}", c.ip, c.port);
-    s.parse::<SocketAddr>()
-        .map_err(|e| SignalingError::BadCandidate(format!("{e}: {s}")))
+    Ok(RendezvousOutcome {
+        session_id,
+        peer_pubkey_b64,
+        peer_candidates,
+    })
 }
 
 async fn recv_peer_candidates(
     ws: &mut Ws,
     total_timeout: Duration,
-) -> Result<(SocketAddr, Vec<Candidate>), SignalingError> {
-    let deadline = tokio::time::Instant::now() + total_timeout;
+    aggregation_window: Duration,
+) -> Result<Vec<Candidate>, SignalingError> {
+    let total_deadline = tokio::time::Instant::now() + total_timeout;
     let mut collected: Vec<Candidate> = Vec::new();
+    let mut first_seen: Option<tokio::time::Instant> = None;
     loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let effective_deadline = match first_seen {
+            None => total_deadline,
+            Some(t) => total_deadline.min(t + aggregation_window),
+        };
+        let remaining = effective_deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            if let Some(host) = collected.iter().find(|c| c.typ == CandidateType::Host) {
-                return Ok((parse_peer_addr(host)?, collected));
-            }
-            return Err(SignalingError::Timeout { stage: "peer_candidate" });
+            break;
         }
-        match recv_msg(ws, "peer_candidate", remaining).await? {
-            ServerMessage::PeerCandidate { candidate, .. } => {
-                let is_host = candidate.typ == CandidateType::Host;
-                let parsed_if_host = if is_host { Some(parse_peer_addr(&candidate)?) } else { None };
-                collected.push(candidate);
-                if let Some(addr) = parsed_if_host {
-                    return Ok((addr, collected));
+        match recv_msg(ws, "peer_candidate", remaining).await {
+            Ok(ServerMessage::PeerCandidate { candidate, .. }) => {
+                if first_seen.is_none() {
+                    first_seen = Some(tokio::time::Instant::now());
                 }
+                collected.push(candidate);
             }
-            ServerMessage::Error { code, message } => {
+            Ok(ServerMessage::Error { code, message }) => {
                 return Err(SignalingError::Server { code, message });
             }
-            other => {
+            Ok(other) => {
                 return Err(SignalingError::Protocol(format!(
                     "expected PeerCandidate, got {other:?}"
-                )))
+                )));
             }
+            Err(SignalingError::Timeout { .. }) => break,
+            Err(e) => return Err(e),
         }
     }
+    if collected.is_empty() {
+        return Err(SignalingError::Timeout { stage: "peer_candidate" });
+    }
+    Ok(collected)
 }
 
 async fn send_candidates(

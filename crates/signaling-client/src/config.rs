@@ -1,5 +1,4 @@
 use prdt_signaling_proto::Candidate;
-use std::net::SocketAddr;
 use std::time::Duration;
 use url::Url;
 
@@ -8,12 +7,15 @@ pub struct RendezvousConfig {
     pub url: Url,
     pub host_id: String,
     pub timeout: Duration,
-    /// STUN server URL, e.g. `stun://stun.l.google.com:19302`. None = STUN disabled.
     pub stun_url: Option<Url>,
+    /// After the first PeerCandidate arrives, wait this long for more before
+    /// returning. Default 2s. Tests typically use 100-300ms for speed.
+    pub aggregation_window: Duration,
 }
 
 impl RendezvousConfig {
     pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+    pub const DEFAULT_AGGREGATION_WINDOW: Duration = Duration::from_secs(2);
 }
 
 #[derive(Debug, Clone)]
@@ -24,10 +26,9 @@ pub struct HostIdentity {
 #[derive(Debug, Clone)]
 pub struct RendezvousOutcome {
     pub session_id: String,
-    pub peer_addr: SocketAddr,
     pub peer_pubkey_b64: Option<String>,
-    /// All PeerCandidates received from the other side (order preserved).
-    /// W2 still picks peer_addr from the first Host-typ candidate; W3 will
-    /// use this list for selection/hole-punching.
+    /// All PeerCandidates collected during the aggregation window (order of
+    /// arrival preserved). W3's `probe_and_commit_peer` selects the actual
+    /// peer address from this list via live probing.
     pub peer_candidates: Vec<Candidate>,
 }

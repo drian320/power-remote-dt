@@ -95,6 +95,7 @@ async fn w2_smoke_stun_plus_signaling_plus_noise() {
                 host_id: "w2-smoke".into(),
                 timeout: Duration::from_secs(5),
                 stun_url: Some(host_stun_url),
+                aggregation_window: std::time::Duration::from_millis(100),
             },
             HostIdentity { pubkey_b64: host_pub_b64 },
             local,
@@ -113,7 +114,11 @@ async fn w2_smoke_stun_plus_signaling_plus_noise() {
         );
         eprintln!("w2_smoke host_side: peer Srflx observed = {has_srflx}");
 
-        transport.configure_peer(outcome.peer_addr).await;
+        let peer_addr = outcome.peer_candidates.iter()
+            .find(|c| c.typ == prdt_signaling_proto::CandidateType::Host)
+            .and_then(|c| format!("{}:{}", c.ip, c.port).parse::<std::net::SocketAddr>().ok())
+            .expect("no host candidate in peer_candidates");
+        transport.configure_peer(peer_addr).await;
         transport
             .handshake_as_server(&host_kp)
             .await
@@ -150,6 +155,7 @@ async fn w2_smoke_stun_plus_signaling_plus_noise() {
                 host_id: "w2-smoke".into(),
                 timeout: Duration::from_secs(5),
                 stun_url: Some(viewer_stun_url),
+                aggregation_window: std::time::Duration::from_millis(100),
             },
             local,
         )
@@ -168,7 +174,11 @@ async fn w2_smoke_stun_plus_signaling_plus_noise() {
         );
         eprintln!("w2_smoke viewer_side: peer Srflx observed = {has_srflx}");
 
-        transport.configure_peer(outcome.peer_addr).await;
+        let peer_addr = outcome.peer_candidates.iter()
+            .find(|c| c.typ == prdt_signaling_proto::CandidateType::Host)
+            .and_then(|c| format!("{}:{}", c.ip, c.port).parse::<std::net::SocketAddr>().ok())
+            .expect("no host candidate in peer_candidates");
+        transport.configure_peer(peer_addr).await;
         transport
             .handshake_as_client(&host_pub_copy, DEFAULT_HANDSHAKE_TIMEOUT)
             .await

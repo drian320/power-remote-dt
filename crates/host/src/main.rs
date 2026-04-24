@@ -163,6 +163,7 @@ async fn main() -> Result<()> {
                 host_id: host_id.clone(),
                 timeout: Duration::from_secs(args.signaling_timeout),
                 stun_url: args.stun_url.clone(),
+                aggregation_window: prdt_signaling_client::RendezvousConfig::DEFAULT_AGGREGATION_WINDOW,
             },
             prdt_signaling_client::HostIdentity {
                 pubkey_b64: keypair.public.to_base64(),
@@ -171,13 +172,17 @@ async fn main() -> Result<()> {
         )
         .await
         .context("signaling rendezvous (host)")?;
+        let peer_addr = outcome.peer_candidates.iter()
+            .find(|c| c.typ == prdt_signaling_proto::CandidateType::Host)
+            .and_then(|c| format!("{}:{}", c.ip, c.port).parse::<std::net::SocketAddr>().ok())
+            .context("no host candidate in peer_candidates")?;
         info!(
-            peer_addr = %outcome.peer_addr,
+            %peer_addr,
             session_id = %outcome.session_id,
             %host_id,
             "signaling_rendezvous_completed"
         );
-        transport.configure_peer(outcome.peer_addr).await;
+        transport.configure_peer(peer_addr).await;
     } else {
         info!("no --signaling-url; using LAN fixed-address mode");
     }
