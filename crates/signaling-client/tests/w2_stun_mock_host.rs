@@ -72,6 +72,7 @@ async fn host_sends_both_host_and_srflx_when_stun_url_given() {
                 host_id: "h1".into(),
                 timeout: Duration::from_secs(5),
                 stun_url: Some(stun_url),
+                turn_url: None,
                 aggregation_window: std::time::Duration::from_millis(100),
             },
             HostIdentity { pubkey_b64: "HPK".into() },

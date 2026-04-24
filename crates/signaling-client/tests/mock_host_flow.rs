@@ -24,7 +24,7 @@ async fn host_rendezvous_completes_when_viewer_arrives() {
     let local_udp: SocketAddr = "127.0.0.1:40001".parse().unwrap();
     let host_task = tokio::spawn(async move {
         rendezvous_as_host(
-            RendezvousConfig { url: ws_url, host_id: "h1".into(), timeout: Duration::from_secs(5), stun_url: None, aggregation_window: std::time::Duration::from_millis(100) },
+            RendezvousConfig { url: ws_url, host_id: "h1".into(), timeout: Duration::from_secs(5), stun_url: None, turn_url: None, aggregation_window: std::time::Duration::from_millis(100) },
             HostIdentity { pubkey_b64: "HOSTPK".into() },
             local_udp,
         ).await

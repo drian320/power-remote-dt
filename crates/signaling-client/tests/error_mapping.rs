@@ -49,7 +49,7 @@ async fn bad_candidate_collected_into_peer_candidates() {
     let url: Url = format!("ws://{addr}/signal").parse().unwrap();
     let local: SocketAddr = "127.0.0.1:50100".parse().unwrap();
     let outcome = rendezvous_as_viewer(
-        RendezvousConfig { url, host_id: "h1".into(), timeout: Duration::from_secs(2), stun_url: None, aggregation_window: std::time::Duration::from_millis(100) },
+        RendezvousConfig { url, host_id: "h1".into(), timeout: Duration::from_secs(2), stun_url: None, turn_url: None, aggregation_window: std::time::Duration::from_millis(100) },
         local,
     ).await.expect("rendezvous should succeed; parsing happens at probe stage");
     let has_bad = outcome.peer_candidates.iter()

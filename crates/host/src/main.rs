@@ -163,6 +163,7 @@ async fn main() -> Result<()> {
                 host_id: host_id.clone(),
                 timeout: Duration::from_secs(args.signaling_timeout),
                 stun_url: args.stun_url.clone(),
+                turn_url: None,
                 aggregation_window: prdt_signaling_client::RendezvousConfig::DEFAULT_AGGREGATION_WINDOW,
             },
             prdt_signaling_client::HostIdentity {

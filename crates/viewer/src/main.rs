@@ -681,6 +681,7 @@ fn spawn_worker_tasks(
                     host_id: host_id.clone(),
                     timeout: std::time::Duration::from_secs(signaling_timeout_s),
                     stun_url: stun_url.clone(),
+                    turn_url: None,
                     aggregation_window: prdt_signaling_client::RendezvousConfig::DEFAULT_AGGREGATION_WINDOW,
                 },
                 local_udp,

@@ -22,7 +22,7 @@ async fn viewer_session_start_timeout() {
     let url: Url = format!("ws://{addr}/signal").parse().unwrap();
     let local: SocketAddr = "127.0.0.1:50001".parse().unwrap();
     let err = rendezvous_as_viewer(
-        RendezvousConfig { url, host_id: "ghost".into(), timeout: Duration::from_millis(300), stun_url: None, aggregation_window: std::time::Duration::from_millis(100) },
+        RendezvousConfig { url, host_id: "ghost".into(), timeout: Duration::from_millis(300), stun_url: None, turn_url: None, aggregation_window: std::time::Duration::from_millis(100) },
         local,
     ).await.unwrap_err();
     match err {
@@ -48,7 +48,7 @@ async fn viewer_peer_candidate_timeout() {
     let url: Url = format!("ws://{addr}/signal").parse().unwrap();
     let local: SocketAddr = "127.0.0.1:50002".parse().unwrap();
     let err = rendezvous_as_viewer(
-        RendezvousConfig { url, host_id: "h1".into(), timeout: Duration::from_secs(1), stun_url: None, aggregation_window: std::time::Duration::from_millis(100) },
+        RendezvousConfig { url, host_id: "h1".into(), timeout: Duration::from_secs(1), stun_url: None, turn_url: None, aggregation_window: std::time::Duration::from_millis(100) },
         local,
     ).await.unwrap_err();
     match err {
@@ -63,7 +63,7 @@ async fn connect_timeout_when_server_unreachable() {
     let url: Url = "ws://127.0.0.1:1/signal".parse().unwrap();
     let local: SocketAddr = "127.0.0.1:50003".parse().unwrap();
     let err = rendezvous_as_viewer(
-        RendezvousConfig { url, host_id: "h1".into(), timeout: Duration::from_secs(1), stun_url: None, aggregation_window: std::time::Duration::from_millis(100) },
+        RendezvousConfig { url, host_id: "h1".into(), timeout: Duration::from_secs(1), stun_url: None, turn_url: None, aggregation_window: std::time::Duration::from_millis(100) },
         local,
     ).await.unwrap_err();
     // Either WebSocket connect error OR Timeout — both are acceptable signals; in CI we prefer the
