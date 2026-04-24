@@ -13,9 +13,9 @@ use stun_codec::rfc5389::attributes::{
     ErrorCode, MessageIntegrity, Nonce, Realm, Username,
 };
 use stun_codec::rfc5766::attributes::{
-    Lifetime, RequestedTransport, XorRelayAddress,
+    Lifetime, RequestedTransport, XorPeerAddress, XorRelayAddress,
 };
-use stun_codec::rfc5766::methods::ALLOCATE;
+use stun_codec::rfc5766::methods::{ALLOCATE, CREATE_PERMISSION};
 use stun_codec::{
     define_attribute_enums, Message, MessageClass, MessageDecoder, MessageEncoder, TransactionId,
 };
@@ -39,7 +39,8 @@ define_attribute_enums!(
         // RFC 5766 attrs we need for Allocate.
         Lifetime,
         RequestedTransport,
-        XorRelayAddress
+        XorRelayAddress,
+        XorPeerAddress
     ]
 );
 
@@ -246,6 +247,61 @@ impl TurnClient {
             .address();
         self.relayed_addr = Some(relayed);
         Ok(relayed)
+    }
+
+    /// Send CreatePermission request for a peer address, authenticated with the
+    /// realm/nonce cached from a prior `allocate()`. RFC 5766 Sec. 9.
+    pub async fn create_permission(
+        &mut self,
+        peer: SocketAddr,
+        timeout: Duration,
+    ) -> Result<(), TurnError> {
+        let realm_str = self
+            .realm
+            .clone()
+            .ok_or_else(|| TurnError::Auth("no realm — call allocate first".into()))?;
+        let nonce_str = self
+            .nonce
+            .clone()
+            .ok_or_else(|| TurnError::Auth("no nonce".into()))?;
+        let txn = random_transaction_id();
+        let mut req =
+            Message::<TurnAttribute>::new(MessageClass::Request, CREATE_PERMISSION, txn);
+        req.add_attribute(TurnAttribute::from(XorPeerAddress::new(peer)));
+        let username = Username::new(self.config.username.clone())
+            .map_err(|e| TurnError::Auth(format!("bad username: {e:?}")))?;
+        let realm = Realm::new(realm_str.clone())
+            .map_err(|e| TurnError::Auth(format!("bad realm: {e:?}")))?;
+        let nonce = Nonce::new(nonce_str.clone())
+            .map_err(|e| TurnError::Auth(format!("bad nonce: {e:?}")))?;
+        req.add_attribute(TurnAttribute::from(username.clone()));
+        req.add_attribute(TurnAttribute::from(realm.clone()));
+        req.add_attribute(TurnAttribute::from(nonce));
+        let mi = MessageIntegrity::new_long_term_credential(
+            &req,
+            &username,
+            &realm,
+            &self.config.password,
+        )
+        .map_err(|e| TurnError::Auth(format!("MI: {e:?}")))?;
+        req.add_attribute(TurnAttribute::from(mi));
+
+        let bytes = encode(&req)?;
+        self.socket.send_to(&bytes, self.config.server_addr).await?;
+
+        let resp_bytes = recv_with_timeout(&self.socket, timeout).await?;
+        let resp_msg = decode(&resp_bytes)?;
+        if resp_msg.class() != MessageClass::SuccessResponse {
+            let code = resp_msg
+                .get_attribute::<ErrorCode>()
+                .map(|e| e.code())
+                .unwrap_or(0);
+            return Err(TurnError::Server {
+                code,
+                reason: "create_permission failed".into(),
+            });
+        }
+        Ok(())
     }
 }
 
