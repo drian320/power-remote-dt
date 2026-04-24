@@ -50,11 +50,15 @@ async fn viewer_rendezvous_gets_host_addr_and_pubkey() {
     let url: Url = format!("ws://{addr}/signal").parse().unwrap();
     let local_udp: SocketAddr = "127.0.0.1:40011".parse().unwrap();
     let outcome = rendezvous_as_viewer(
-        RendezvousConfig { url, host_id: "h1".into(), timeout: Duration::from_secs(5), stun_url: None },
+        RendezvousConfig { url, host_id: "h1".into(), timeout: Duration::from_secs(5), stun_url: None, aggregation_window: std::time::Duration::from_millis(100) },
         local_udp,
     ).await.unwrap();
     host_task.await.unwrap();
 
-    assert_eq!(outcome.peer_addr.port(), 40010);
+    let peer_addr = outcome.peer_candidates.iter()
+        .find(|c| c.typ == prdt_signaling_proto::CandidateType::Host)
+        .and_then(|c| format!("{}:{}", c.ip, c.port).parse::<std::net::SocketAddr>().ok())
+        .expect("no host candidate in peer_candidates");
+    assert_eq!(peer_addr.port(), 40010);
     assert_eq!(outcome.peer_pubkey_b64.as_deref(), Some("HPK"));
 }

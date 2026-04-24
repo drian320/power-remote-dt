@@ -24,7 +24,7 @@ async fn host_rendezvous_completes_when_viewer_arrives() {
     let local_udp: SocketAddr = "127.0.0.1:40001".parse().unwrap();
     let host_task = tokio::spawn(async move {
         rendezvous_as_host(
-            RendezvousConfig { url: ws_url, host_id: "h1".into(), timeout: Duration::from_secs(5), stun_url: None },
+            RendezvousConfig { url: ws_url, host_id: "h1".into(), timeout: Duration::from_secs(5), stun_url: None, aggregation_window: std::time::Duration::from_millis(100) },
             HostIdentity { pubkey_b64: "HOSTPK".into() },
             local_udp,
         ).await
@@ -71,7 +71,11 @@ async fn host_rendezvous_completes_when_viewer_arrives() {
 
     let outcome = host_task.await.unwrap().unwrap();
     assert_eq!(outcome.session_id, sid);
-    assert_eq!(outcome.peer_addr.port(), 40002);
-    assert_eq!(outcome.peer_addr.ip().to_string(), "127.0.0.1");
+    let peer_addr = outcome.peer_candidates.iter()
+        .find(|c| c.typ == prdt_signaling_proto::CandidateType::Host)
+        .and_then(|c| format!("{}:{}", c.ip, c.port).parse::<std::net::SocketAddr>().ok())
+        .expect("no host candidate in peer_candidates");
+    assert_eq!(peer_addr.port(), 40002);
+    assert_eq!(peer_addr.ip().to_string(), "127.0.0.1");
     assert_eq!(outcome.peer_pubkey_b64, None);
 }

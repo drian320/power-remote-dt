@@ -163,6 +163,7 @@ async fn main() -> Result<()> {
                 host_id: host_id.clone(),
                 timeout: Duration::from_secs(args.signaling_timeout),
                 stun_url: args.stun_url.clone(),
+                aggregation_window: prdt_signaling_client::RendezvousConfig::DEFAULT_AGGREGATION_WINDOW,
             },
             prdt_signaling_client::HostIdentity {
                 pubkey_b64: keypair.public.to_base64(),
@@ -171,13 +172,22 @@ async fn main() -> Result<()> {
         )
         .await
         .context("signaling rendezvous (host)")?;
+        let cand_addrs: Vec<SocketAddr> = outcome
+            .peer_candidates
+            .iter()
+            .filter_map(|c| format!("{}:{}", c.ip, c.port).parse().ok())
+            .collect();
         info!(
-            peer_addr = %outcome.peer_addr,
             session_id = %outcome.session_id,
             %host_id,
+            candidate_count = cand_addrs.len(),
             "signaling_rendezvous_completed"
         );
-        transport.configure_peer(outcome.peer_addr).await;
+        let peer_addr = transport
+            .probe_and_commit_peer(&cand_addrs, Duration::from_secs(10))
+            .await
+            .context("probe_and_commit_peer")?;
+        info!(%peer_addr, "probe selected winner");
     } else {
         info!("no --signaling-url; using LAN fixed-address mode");
     }

@@ -1,4 +1,4 @@
-use prdt_signaling_client::{rendezvous_as_viewer, RendezvousConfig, SignalingError};
+use prdt_signaling_client::{rendezvous_as_viewer, RendezvousConfig};
 use prdt_signaling_proto::{Candidate, CandidateType, ClientMessage};
 use prdt_signaling_server::{router, ServerConfig, ServerState};
 use std::net::SocketAddr;
@@ -8,8 +8,13 @@ use url::Url;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
+// W3 note: in W2 rendezvous_as_viewer raised BadCandidate on parse failure.
+// After W3 Task 4, parsing happens later (during probe_and_commit_peer in
+// Task 5), so here we only assert the bad candidate is surfaced verbatim in
+// `peer_candidates` for downstream handling. Task 5 will add a proper
+// BadCandidate regression at the probing layer.
 #[tokio::test]
-async fn bad_candidate_parse_error() {
+async fn bad_candidate_collected_into_peer_candidates() {
     let state = Arc::new(ServerState::new());
     let app = router(state, ServerConfig::default());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -43,12 +48,11 @@ async fn bad_candidate_parse_error() {
 
     let url: Url = format!("ws://{addr}/signal").parse().unwrap();
     let local: SocketAddr = "127.0.0.1:50100".parse().unwrap();
-    let err = rendezvous_as_viewer(
-        RendezvousConfig { url, host_id: "h1".into(), timeout: Duration::from_secs(2), stun_url: None },
+    let outcome = rendezvous_as_viewer(
+        RendezvousConfig { url, host_id: "h1".into(), timeout: Duration::from_secs(2), stun_url: None, aggregation_window: std::time::Duration::from_millis(100) },
         local,
-    ).await.unwrap_err();
-    match err {
-        SignalingError::BadCandidate(msg) => assert!(msg.contains("not-an-ip")),
-        other => panic!("unexpected: {other:?}"),
-    }
+    ).await.expect("rendezvous should succeed; parsing happens at probe stage");
+    let has_bad = outcome.peer_candidates.iter()
+        .any(|c| c.typ == CandidateType::Host && c.ip == "not-an-ip");
+    assert!(has_bad, "bad candidate missing from peer_candidates: {:?}", outcome.peer_candidates);
 }

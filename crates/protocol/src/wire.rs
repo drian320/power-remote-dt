@@ -655,7 +655,8 @@ pub fn decode_control(buf: &[u8]) -> Result<ControlMessage, ProtocolError> {
     let kind = buf[0];
     // We don't trust `kind` blindly; bincode will decode the whole tagged enum.
     // We keep the leading byte as a fast-path dispatch hint for future optimization.
-    if kind > 16 {
+    // 0-16 + 20-21 are defined (see ControlMessage::kind_u8); 17-19 reserved.
+    if kind > 21 {
         return Err(ProtocolError::UnknownControlKind(kind));
     }
     let msg: ControlMessage = bincode::deserialize(&buf[1..])?;
