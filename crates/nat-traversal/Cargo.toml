@@ -12,6 +12,10 @@ bytecodec = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 rand_core = { version = "0.6", features = ["getrandom"] }
+hmac = { workspace = true }
+sha1 = { workspace = true }
+md-5 = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread", "net", "time", "io-util"] }

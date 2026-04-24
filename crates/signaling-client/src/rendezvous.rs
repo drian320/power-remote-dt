@@ -8,7 +8,9 @@ use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, instrument};
 
+use prdt_signaling_proto::PRIORITY_RELAY;
 use prdt_signaling_proto::PRIORITY_SRFLX;
+use std::sync::Arc;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REGISTERED_TIMEOUT: Duration = Duration::from_secs(5);
@@ -76,7 +78,7 @@ pub async fn rendezvous_as_host(
     };
     info!(%session_id, "session_start");
 
-    send_candidates(&mut ws, &session_id, local_udp_addr, cfg.stun_url.as_ref()).await?;
+    send_candidates(&mut ws, &session_id, local_udp_addr, cfg.stun_url.as_ref(), cfg.turn_url.as_ref()).await?;
 
     let peer_candidates = recv_peer_candidates(&mut ws, cfg.timeout, cfg.aggregation_window).await?;
 
@@ -109,7 +111,7 @@ pub async fn rendezvous_as_viewer(
     };
     info!(%session_id, "session_start");
 
-    send_candidates(&mut ws, &session_id, local_udp_addr, cfg.stun_url.as_ref()).await?;
+    send_candidates(&mut ws, &session_id, local_udp_addr, cfg.stun_url.as_ref(), cfg.turn_url.as_ref()).await?;
 
     let peer_candidates = recv_peer_candidates(&mut ws, cfg.timeout, cfg.aggregation_window).await?;
 
@@ -173,6 +175,7 @@ async fn send_candidates(
     session_id: &str,
     local_udp_addr: SocketAddr,
     stun_url: Option<&url::Url>,
+    turn_url: Option<&url::Url>,
 ) -> Result<(), SignalingError> {
     send_msg(ws, &ClientMessage::Candidate {
         session_id: session_id.to_string(),
@@ -196,6 +199,31 @@ async fn send_candidates(
             Err(e) => {
                 tracing::warn!(error = %e, "STUN failed; proceeding without srflx candidate");
             }
+        }
+    }
+
+    if let Some(url) = turn_url {
+        match prdt_nat_traversal::TurnConfig::from_url(url).await {
+            Ok(cfg) => {
+                let probe_socket = Arc::new(tokio::net::UdpSocket::bind("0.0.0.0:0").await?);
+                match prdt_nat_traversal::TurnRelaySocket::allocate_with_socket(probe_socket, cfg).await {
+                    Ok(relay) => {
+                        let relayed = relay.relayed_addr();
+                        send_msg(ws, &ClientMessage::Candidate {
+                            session_id: session_id.to_string(),
+                            candidate: Candidate {
+                                typ: CandidateType::Relay,
+                                ip: relayed.ip().to_string(),
+                                port: relayed.port(),
+                                priority: PRIORITY_RELAY,
+                            },
+                        }).await?;
+                        tracing::info!(%relayed, "relay candidate sent");
+                    }
+                    Err(e) => tracing::warn!(error = %e, "TURN allocate failed; no relay candidate"),
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "TURN URL parse failed"),
         }
     }
     Ok(())

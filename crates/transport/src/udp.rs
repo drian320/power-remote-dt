@@ -17,6 +17,48 @@ use crate::fec::FecCodec;
 use crate::packetize::packetize;
 use crate::transport_trait::{ReceivedMessage, Transport};
 
+/// Internal socket abstraction — direct UDP or TURN-relay-wrapped.
+enum Socket {
+    Direct(Arc<tokio::net::UdpSocket>),
+    Relay(Arc<prdt_nat_traversal::TurnRelaySocket>),
+}
+
+impl Socket {
+    async fn send_to(&self, buf: &[u8], dst: SocketAddr) -> std::io::Result<usize> {
+        match self {
+            Socket::Direct(s) => s.send_to(buf, dst).await,
+            Socket::Relay(s) => s
+                .send_to(buf, dst)
+                .await
+                .map_err(|e| std::io::Error::other(format!("turn: {e}"))),
+        }
+    }
+    async fn recv_from(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+        match self {
+            Socket::Direct(s) => s.recv_from(buf).await,
+            Socket::Relay(s) => s
+                .recv_from(buf)
+                .await
+                .map_err(|e| std::io::Error::other(format!("turn: {e}"))),
+        }
+    }
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        match self {
+            Socket::Direct(s) => s.local_addr(),
+            Socket::Relay(s) => s.local_addr(),
+        }
+    }
+    fn is_relay(&self) -> bool {
+        matches!(self, Socket::Relay(_))
+    }
+    fn direct(&self) -> Option<&Arc<tokio::net::UdpSocket>> {
+        match self {
+            Socket::Direct(s) => Some(s),
+            Socket::Relay(_) => None,
+        }
+    }
+}
+
 /// Default timeout for `handshake_as_client`. If the server doesn't respond
 /// with NoiseE2 within this window (e.g. because the viewer was given the
 /// wrong pubkey, or the host is unreachable), the handshake returns
@@ -50,7 +92,7 @@ impl Default for UdpTransportConfig {
 
 /// UDP transport with per-frame FEC. Recv path lives in a separate task.
 pub struct CustomUdpTransport {
-    socket: Arc<UdpSocket>,
+    socket: Socket,
     cfg: UdpTransportConfig,
     peer: AsyncMutex<Option<SocketAddr>>, // set after first packet received or configure_peer()
     fec: FecCodec,
@@ -71,10 +113,41 @@ pub struct CustomUdpTransport {
 
 impl CustomUdpTransport {
     pub async fn bind(addr: SocketAddr, cfg: UdpTransportConfig) -> Result<Self, TransportError> {
-        let socket = Arc::new(UdpSocket::bind(addr).await?);
+        let socket = Socket::Direct(Arc::new(UdpSocket::bind(addr).await?));
         let fec = FecCodec::new(cfg.fec_k, cfg.fec_m)?;
         Ok(Self {
             socket,
+            cfg,
+            peer: AsyncMutex::new(None),
+            fec,
+            input_seq: AsyncMutex::new(0),
+            assembler: AsyncMutex::new(crate::assembler::FrameAssembler::new(
+                1920,
+                1080,
+                prdt_protocol::frame::Codec::H265,
+            )),
+            crypto: AsyncMutex::new(None),
+            send_nonce: AtomicU64::new(0),
+        })
+    }
+
+    /// Bind via TURN relay. Uses [`prdt_nat_traversal::TurnRelaySocket`] as the
+    /// underlying socket so all traffic is tunnelled through a TURN server.
+    /// `_bind_addr` is accepted for API symmetry with [`bind`] but is unused:
+    /// the relay socket binds internally to `0.0.0.0:0`.
+    pub async fn bind_with_relay(
+        _bind_addr: SocketAddr,
+        cfg: UdpTransportConfig,
+        turn: prdt_nat_traversal::TurnConfig,
+    ) -> Result<Self, TransportError> {
+        let relay = Arc::new(
+            prdt_nat_traversal::TurnRelaySocket::allocate(turn)
+                .await
+                .map_err(|e| TransportError::Io(std::io::Error::other(format!("turn: {e}"))))?,
+        );
+        let fec = FecCodec::new(cfg.fec_k, cfg.fec_m)?;
+        Ok(Self {
+            socket: Socket::Relay(relay),
             cfg,
             peer: AsyncMutex::new(None),
             fec,
@@ -101,8 +174,21 @@ impl CustomUdpTransport {
     /// STUN learning and probe/ack exchange. The returned `Arc` clones the
     /// internal socket ref; returning ownership is safe because all transport
     /// recv/send paths hold their own clone internally.
+    ///
+    /// Panics if called on a relay-mode transport (see [`bind_with_relay`]).
+    /// Callers that need to support both modes should first check
+    /// [`is_relay`](Self::is_relay).
     pub fn socket(&self) -> std::sync::Arc<tokio::net::UdpSocket> {
-        self.socket.clone()
+        self.socket
+            .direct()
+            .expect("socket() called on relay-mode transport")
+            .clone()
+    }
+
+    /// Returns true if this transport was created via [`bind_with_relay`] and
+    /// is tunnelled through a TURN relay rather than a direct UDP socket.
+    pub fn is_relay(&self) -> bool {
+        self.socket.is_relay()
     }
 
     async fn current_peer(&self) -> Result<SocketAddr, TransportError> {

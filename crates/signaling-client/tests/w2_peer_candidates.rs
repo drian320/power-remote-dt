@@ -58,6 +58,7 @@ async fn viewer_collects_host_and_srflx_peer_candidates() {
             host_id: "h1".into(),
             timeout: Duration::from_secs(5),
             stun_url: None,
+            turn_url: None,
             aggregation_window: std::time::Duration::from_millis(100),
         },
         local_udp,
@@ -115,7 +116,7 @@ async fn viewer_collects_srflx_before_host() {
     let url: Url = format!("ws://{addr}/signal").parse().unwrap();
     let local_udp: SocketAddr = "127.0.0.1:40301".parse().unwrap();
     let outcome = rendezvous_as_viewer(
-        RendezvousConfig { url, host_id: "h1".into(), timeout: Duration::from_secs(5), stun_url: None, aggregation_window: std::time::Duration::from_millis(100) },
+        RendezvousConfig { url, host_id: "h1".into(), timeout: Duration::from_secs(5), stun_url: None, turn_url: None, aggregation_window: std::time::Duration::from_millis(100) },
         local_udp,
     ).await.unwrap();
 

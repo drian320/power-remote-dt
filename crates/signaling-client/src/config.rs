@@ -8,6 +8,7 @@ pub struct RendezvousConfig {
     pub host_id: String,
     pub timeout: Duration,
     pub stun_url: Option<Url>,
+    pub turn_url: Option<Url>,
     /// After the first PeerCandidate arrives, wait this long for more before
     /// returning. Default 2s. Tests typically use 100-300ms for speed.
     pub aggregation_window: Duration,

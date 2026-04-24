@@ -110,6 +110,11 @@ struct Args {
     /// addr and sends it alongside the LAN Host candidate.
     #[arg(long)]
     stun_url: Option<url::Url>,
+
+    /// TURN server URL (turn://user:pass@host:port). Optional. When set,
+    /// transport is built via bind_with_relay (TURN relay mode).
+    #[arg(long)]
+    turn_url: Option<url::Url>,
 }
 
 fn parse_resolution(s: &str) -> Result<(u32, u32)> {
@@ -595,6 +600,7 @@ fn main() -> Result<()> {
         args.host_id.clone(),
         args.signaling_timeout,
         args.stun_url.clone(),
+        args.turn_url.clone(),
         args.known_host_ids.clone(),
         args.force_tofu,
         req_w,
@@ -638,6 +644,7 @@ fn spawn_worker_tasks(
     host_id: Option<String>,
     signaling_timeout_s: u64,
     stun_url: Option<url::Url>,
+    turn_url: Option<url::Url>,
     known_host_ids_path: std::path::PathBuf,
     force_tofu: bool,
     req_w: u32,
@@ -656,12 +663,30 @@ fn spawn_worker_tasks(
             (None, None) => unreachable!("args validated earlier"),
         };
         let cfg = UdpTransportConfig::default();
-        let transport = match CustomUdpTransport::bind(bind_addr, cfg).await {
-            Ok(t) => Arc::new(t),
-            Err(e) => {
-                warn!(?e, "UDP bind failed");
-                return;
+        let transport = match turn_url.clone() {
+            Some(url) => {
+                let turn_cfg = match prdt_nat_traversal::TurnConfig::from_url(&url).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::error!(error = %e, "parse turn URL failed");
+                        return;
+                    }
+                };
+                match CustomUdpTransport::bind_with_relay(bind_addr, cfg, turn_cfg).await {
+                    Ok(t) => Arc::new(t),
+                    Err(e) => {
+                        warn!(?e, "bind_with_relay failed");
+                        return;
+                    }
+                }
             }
+            None => match CustomUdpTransport::bind(bind_addr, cfg).await {
+                Ok(t) => Arc::new(t),
+                Err(e) => {
+                    warn!(?e, "UDP bind failed");
+                    return;
+                }
+            },
         };
         let local_udp = match transport.local_addr() {
             Ok(a) => a,
@@ -681,6 +706,7 @@ fn spawn_worker_tasks(
                     host_id: host_id.clone(),
                     timeout: std::time::Duration::from_secs(signaling_timeout_s),
                     stun_url: stun_url.clone(),
+                    turn_url: turn_url.clone(),
                     aggregation_window: prdt_signaling_client::RendezvousConfig::DEFAULT_AGGREGATION_WINDOW,
                 },
                 local_udp,

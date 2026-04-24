@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 prdt-protocol = { path = "../protocol" }
 prdt-crypto = { path = "../crypto" }
+prdt-nat-traversal = { path = "../nat-traversal" }
 tokio.workspace = true
 bincode.workspace = true
 bytes.workspace = true
