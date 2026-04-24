@@ -5,4 +5,4 @@ pub mod error;
 pub mod stun;
 
 pub use error::StunError;
-// `learn_public_addr` re-export lands in Task 2.
+pub use stun::learn_public_addr;
