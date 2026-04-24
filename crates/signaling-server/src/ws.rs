@@ -129,8 +129,8 @@ async fn host_loop(
                     Some(Ok(Message::Text(t))) => {
                         match serde_json::from_str::<ClientMessage>(&t) {
                             Ok(ClientMessage::Candidate { session_id, candidate }) => {
-                                if candidate.typ != prdt_signaling_proto::CandidateType::Host {
-                                    send_error(&mut socket, ErrorCode::UnsupportedCandidateType, "only host candidates supported in W1").await;
+                                if candidate.typ == prdt_signaling_proto::CandidateType::Relay {
+                                    send_error(&mut socket, ErrorCode::UnsupportedCandidateType, "relay candidates require W4 TURN").await;
                                     continue;
                                 }
                                 if let Some(sess) = state.sessions.get(&session_id) {
@@ -178,8 +178,8 @@ async fn viewer_loop(
                     Some(Ok(Message::Text(t))) => {
                         match serde_json::from_str::<ClientMessage>(&t) {
                             Ok(ClientMessage::Candidate { session_id: sid, candidate }) => {
-                                if candidate.typ != prdt_signaling_proto::CandidateType::Host {
-                                    send_error(&mut socket, ErrorCode::UnsupportedCandidateType, "only host candidates supported in W1").await;
+                                if candidate.typ == prdt_signaling_proto::CandidateType::Relay {
+                                    send_error(&mut socket, ErrorCode::UnsupportedCandidateType, "relay candidates require W4 TURN").await;
                                     continue;
                                 }
                                 if let Some(sess) = state.sessions.get(&sid) {

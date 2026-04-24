@@ -134,7 +134,7 @@ async fn connect_unknown_host_returns_error() {
     assert!(matches!(msg, ServerMessage::Error { code, .. } if code == prdt_signaling_proto::ErrorCode::HostNotFound));
 }
 
-use prdt_signaling_proto::{Candidate, CandidateType, PRIORITY_HOST};
+use prdt_signaling_proto::{Candidate, CandidateType, PRIORITY_HOST, PRIORITY_RELAY, PRIORITY_SRFLX};
 
 #[tokio::test]
 async fn candidate_forwarded_both_ways() {
@@ -188,8 +188,50 @@ async fn candidate_forwarded_both_ways() {
 }
 
 #[tokio::test]
-async fn non_host_candidate_type_rejected() {
+async fn srflx_candidate_forwarded() {
     let (addr, _) = start_test_server().await;
+
+    let (mut host_ws, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
+    ws_send(&mut host_ws, ClientMessage::Register { host_id: "h1".into(), pubkey_b64: "P".into() }).await;
+    let _ = ws_recv(&mut host_ws).await;
+
+    let (mut viewer_ws, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
+    ws_send(&mut viewer_ws, ClientMessage::Connect { host_id: "h1".into() }).await;
+
+    let h_start = ws_recv(&mut host_ws).await;
+    let _ = ws_recv(&mut viewer_ws).await;
+    let sid = match h_start {
+        ServerMessage::SessionStart { session_id, .. } => session_id,
+        _ => unreachable!(),
+    };
+
+    ws_send(&mut viewer_ws, ClientMessage::Candidate {
+        session_id: sid.clone(),
+        candidate: Candidate {
+            typ: CandidateType::Srflx,
+            ip: "198.51.100.42".into(),
+            port: 55_000,
+            priority: PRIORITY_SRFLX,
+        },
+    }).await;
+
+    // Host should receive the Srflx candidate as-is.
+    let m = ws_recv(&mut host_ws).await;
+    match m {
+        ServerMessage::PeerCandidate { session_id, candidate } => {
+            assert_eq!(session_id, sid);
+            assert_eq!(candidate.typ, CandidateType::Srflx);
+            assert_eq!(candidate.ip, "198.51.100.42");
+            assert_eq!(candidate.port, 55_000);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn relay_candidate_still_rejected() {
+    let (addr, _) = start_test_server().await;
+
     let (mut host_ws, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
     ws_send(&mut host_ws, ClientMessage::Register { host_id: "h1".into(), pubkey_b64: "P".into() }).await;
     let _ = ws_recv(&mut host_ws).await;
@@ -201,10 +243,17 @@ async fn non_host_candidate_type_rejected() {
         ServerMessage::SessionStart { session_id, .. } => session_id,
         _ => unreachable!(),
     };
+
     ws_send(&mut viewer_ws, ClientMessage::Candidate {
         session_id: sid,
-        candidate: Candidate { typ: CandidateType::Srflx, ip: "1.2.3.4".into(), port: 1, priority: 50 },
+        candidate: Candidate {
+            typ: CandidateType::Relay,
+            ip: "1.2.3.4".into(),
+            port: 1,
+            priority: PRIORITY_RELAY,
+        },
     }).await;
+
     let err = ws_recv(&mut viewer_ws).await;
     match err {
         ServerMessage::Error { code, .. } => {
