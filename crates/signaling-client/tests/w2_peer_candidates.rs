@@ -63,16 +63,13 @@ async fn viewer_collects_host_and_srflx_peer_candidates() {
         local_udp,
     ).await.unwrap();
 
-    // peer_addr = first Host-typ candidate
-    let peer_addr = outcome.peer_candidates.iter()
-        .find(|c| c.typ == prdt_signaling_proto::CandidateType::Host)
-        .and_then(|c| format!("{}:{}", c.ip, c.port).parse::<std::net::SocketAddr>().ok())
-        .expect("no host candidate in peer_candidates");
-    assert_eq!(peer_addr.port(), 40200);
     // peer_candidates should contain the Host (always) and may contain the
-    // Srflx if it arrived before viewer committed. At minimum Host is present.
-    let has_host = outcome.peer_candidates.iter().any(|c| c.typ == CandidateType::Host);
-    assert!(has_host, "peer_candidates missing Host: {:?}", outcome.peer_candidates);
+    // Srflx if it arrived before aggregation closed. At minimum Host is present
+    // and carries the port signaled above.
+    let host_cand = outcome.peer_candidates.iter()
+        .find(|c| c.typ == CandidateType::Host)
+        .expect("peer_candidates missing Host");
+    assert_eq!(host_cand.port, 40200);
 }
 
 #[tokio::test]
@@ -122,11 +119,10 @@ async fn viewer_collects_srflx_before_host() {
         local_udp,
     ).await.unwrap();
 
-    let peer_addr = outcome.peer_candidates.iter()
-        .find(|c| c.typ == prdt_signaling_proto::CandidateType::Host)
-        .and_then(|c| format!("{}:{}", c.ip, c.port).parse::<std::net::SocketAddr>().ok())
-        .expect("no host candidate in peer_candidates");
-    assert_eq!(peer_addr.port(), 40300);
+    let host_cand = outcome.peer_candidates.iter()
+        .find(|c| c.typ == CandidateType::Host)
+        .expect("peer_candidates missing Host");
+    assert_eq!(host_cand.port, 40300);
     // Both should be in peer_candidates because Srflx arrived before Host
     let types: Vec<CandidateType> = outcome.peer_candidates.iter().map(|c| c.typ).collect();
     assert!(types.contains(&CandidateType::Host), "missing Host in {types:?}");

@@ -114,11 +114,13 @@ async fn w2_smoke_stun_plus_signaling_plus_noise() {
         );
         eprintln!("w2_smoke host_side: peer Srflx observed = {has_srflx}");
 
-        let peer_addr = outcome.peer_candidates.iter()
-            .find(|c| c.typ == prdt_signaling_proto::CandidateType::Host)
-            .and_then(|c| format!("{}:{}", c.ip, c.port).parse::<std::net::SocketAddr>().ok())
-            .expect("no host candidate in peer_candidates");
-        transport.configure_peer(peer_addr).await;
+        let cand_addrs: Vec<std::net::SocketAddr> = outcome.peer_candidates.iter()
+            .filter_map(|c| format!("{}:{}", c.ip, c.port).parse().ok())
+            .collect();
+        let _peer_addr = transport
+            .probe_and_commit_peer(&cand_addrs, std::time::Duration::from_secs(5))
+            .await
+            .expect("probe winner");
         transport
             .handshake_as_server(&host_kp)
             .await
@@ -174,11 +176,13 @@ async fn w2_smoke_stun_plus_signaling_plus_noise() {
         );
         eprintln!("w2_smoke viewer_side: peer Srflx observed = {has_srflx}");
 
-        let peer_addr = outcome.peer_candidates.iter()
-            .find(|c| c.typ == prdt_signaling_proto::CandidateType::Host)
-            .and_then(|c| format!("{}:{}", c.ip, c.port).parse::<std::net::SocketAddr>().ok())
-            .expect("no host candidate in peer_candidates");
-        transport.configure_peer(peer_addr).await;
+        let cand_addrs: Vec<std::net::SocketAddr> = outcome.peer_candidates.iter()
+            .filter_map(|c| format!("{}:{}", c.ip, c.port).parse().ok())
+            .collect();
+        let _peer_addr = transport
+            .probe_and_commit_peer(&cand_addrs, std::time::Duration::from_secs(5))
+            .await
+            .expect("probe winner");
         transport
             .handshake_as_client(&host_pub_copy, DEFAULT_HANDSHAKE_TIMEOUT)
             .await
