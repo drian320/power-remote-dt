@@ -42,7 +42,7 @@ use winit::window::{Window, WindowId};
 struct Args {
     /// Host address, e.g. 192.168.1.5:9000 or 127.0.0.1:9000.
     #[arg(long)]
-    host: SocketAddr,
+    host: Option<SocketAddr>,
 
     /// Requested resolution; currently just used for the window size hint and
     /// as the viewer's request in the Hello. The actual resolution is decided
@@ -83,6 +83,27 @@ struct Args {
     /// build time, `nvdec` falls back to `mf` with a warning.
     #[arg(long, default_value = "mf", value_parser = ["mf", "nvdec"])]
     decoder: String,
+
+    /// Rendezvous via a signaling server instead of direct host address.
+    #[arg(long)]
+    signaling_url: Option<url::Url>,
+
+    /// Opaque host identifier to look up on the signaling server.
+    /// Required when --signaling-url is set.
+    #[arg(long)]
+    host_id: Option<String>,
+
+    /// Rendezvous overall timeout in seconds.
+    #[arg(long, default_value_t = 10)]
+    signaling_timeout: u64,
+
+    /// Path to the host_id-indexed known-hosts file (TOFU store for signaling mode).
+    #[arg(long, default_value = "known-host-ids")]
+    known_host_ids: std::path::PathBuf,
+
+    /// Proceed even when the signaling-learned pubkey mismatches a previously recorded one.
+    #[arg(long)]
+    force_tofu: bool,
 }
 
 fn parse_resolution(s: &str) -> Result<(u32, u32)> {
@@ -476,25 +497,41 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
     let (req_w, req_h) = parse_resolution(&args.resolution)?;
-    let pubkey = match (&args.host_pubkey, &args.known_hosts) {
-        (Some(b64), _) => {
-            PubKey::from_base64(b64).map_err(|e| anyhow::anyhow!("invalid --host-pubkey: {e}"))?
-        }
-        (None, Some(path)) => {
+    // Resolve host address + static pubkey. In signaling mode, both are learned at runtime from the
+    // rendezvous server (pubkey via TOFU against --known-host-ids). In direct mode, --host is required
+    // and the pubkey comes from --host-pubkey or --known-hosts.
+    let direct_host: Option<SocketAddr> = args.host;
+    let direct_pubkey: Option<PubKey> = match (&args.host_pubkey, &args.known_hosts, &direct_host) {
+        (Some(b64), _, _) => Some(
+            PubKey::from_base64(b64).map_err(|e| anyhow::anyhow!("invalid --host-pubkey: {e}"))?,
+        ),
+        (None, Some(path), Some(host_addr)) => {
             let kh = KnownHosts::load(path)
                 .with_context(|| format!("load --known-hosts {}", path.display()))?;
-            let host_str = args.host.to_string();
-            kh.get(&host_str).copied().with_context(|| {
+            let host_str = host_addr.to_string();
+            Some(kh.get(&host_str).copied().with_context(|| {
                 format!(
                     "no entry for {host_str} in known-hosts file ({} entries)",
                     kh.len()
                 )
-            })?
+            })?)
         }
-        (None, None) => {
-            anyhow::bail!("one of --host-pubkey or --known-hosts is required");
-        }
+        (None, _, None) => None, // signaling mode will resolve below
+        (None, None, Some(_)) => None, // no pubkey source; validated below
     };
+
+    if args.signaling_url.is_some() {
+        if args.host_id.is_none() {
+            anyhow::bail!("--host-id is required when --signaling-url is set");
+        }
+    } else {
+        if direct_host.is_none() {
+            anyhow::bail!("either --host or --signaling-url is required");
+        }
+        if direct_pubkey.is_none() {
+            anyhow::bail!("one of --host-pubkey, --known-hosts, or --signaling-url is required");
+        }
+    }
 
     // D3D11 device. Created on the main thread, cloned into the worker so the
     // decoder uses the same device (required for zero-copy texture handoff).
@@ -502,7 +539,9 @@ fn main() -> Result<()> {
     let dev = D3d11Device::create(&adapter).context("D3D11 device")?;
 
     info!(
-        host = %args.host,
+        host = ?args.host,
+        signaling_url = ?args.signaling_url,
+        host_id = ?args.host_id,
         resolution = %args.resolution,
         fps = args.fps,
         adapter = %dev.adapter().name,
@@ -544,8 +583,13 @@ fn main() -> Result<()> {
         Arc::clone(&shared),
         input_rx,
         file_drop_rx,
-        args.host,
-        pubkey,
+        direct_host,
+        direct_pubkey,
+        args.signaling_url.clone(),
+        args.host_id.clone(),
+        args.signaling_timeout,
+        args.known_host_ids.clone(),
+        args.force_tofu,
         req_w,
         req_h,
         args.fps,
@@ -581,8 +625,13 @@ fn spawn_worker_tasks(
     shared: Arc<ViewerShared>,
     mut input_rx: mpsc::UnboundedReceiver<InputEvent>,
     mut file_drop_rx: mpsc::UnboundedReceiver<std::path::PathBuf>,
-    host_addr: SocketAddr,
-    pubkey: PubKey,
+    direct_host: Option<SocketAddr>,
+    direct_pubkey: Option<PubKey>,
+    signaling_url: Option<url::Url>,
+    host_id: Option<String>,
+    signaling_timeout_s: u64,
+    known_host_ids_path: std::path::PathBuf,
+    force_tofu: bool,
     req_w: u32,
     req_h: u32,
     req_fps: u32,
@@ -590,12 +639,13 @@ fn spawn_worker_tasks(
     decoder: String,
 ) {
     handle.clone().spawn(async move {
-        // Bind an ephemeral UDP socket and point it at the host. The host binds
-        // the well-known port; we are the initiator.
-        let bind_addr: SocketAddr = if host_addr.is_ipv4() {
-            "0.0.0.0:0".parse().unwrap()
-        } else {
-            "[::]:0".parse().unwrap()
+        // Decide initial bind. In signaling mode we prefer 127.0.0.1 loopback so same-machine smoke
+        // tests work; in direct mode we pick 0.0.0.0 or [::] based on host family as before.
+        let bind_addr: SocketAddr = match (&signaling_url, &direct_host) {
+            (Some(_), _) => "127.0.0.1:0".parse().unwrap(),
+            (None, Some(h)) if h.is_ipv4() => "0.0.0.0:0".parse().unwrap(),
+            (None, Some(_)) => "[::]:0".parse().unwrap(),
+            (None, None) => unreachable!("args validated earlier"),
         };
         let cfg = UdpTransportConfig::default();
         let transport = match CustomUdpTransport::bind(bind_addr, cfg).await {
@@ -605,6 +655,75 @@ fn spawn_worker_tasks(
                 return;
             }
         };
+        let local_udp = match transport.local_addr() {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::error!(error = %e, "local_addr failed");
+                return;
+            }
+        };
+
+        // Resolve (host_addr, pubkey) now. Signaling mode pulls both at runtime; direct mode uses
+        // CLI-supplied values.
+        let (host_addr, pubkey) = if let Some(url) = signaling_url.clone() {
+            let host_id = host_id.clone().expect("clap-checked");
+            let outcome = match prdt_signaling_client::rendezvous_as_viewer(
+                prdt_signaling_client::RendezvousConfig {
+                    url,
+                    host_id: host_id.clone(),
+                    timeout: std::time::Duration::from_secs(signaling_timeout_s),
+                },
+                local_udp,
+            ).await {
+                Ok(o) => o,
+                Err(e) => {
+                    tracing::error!(error = %e, "signaling rendezvous failed");
+                    return;
+                }
+            };
+            tracing::info!(peer_addr = %outcome.peer_addr, session_id = %outcome.session_id, %host_id, "signaling_rendezvous_completed");
+
+            let pk_b64 = match outcome.peer_pubkey_b64.as_deref() {
+                Some(s) => s,
+                None => {
+                    tracing::error!("signaling did not return a host pubkey");
+                    return;
+                }
+            };
+            let pk = match PubKey::from_base64(pk_b64) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::error!(error = %e, "bad host pubkey from signaling");
+                    return;
+                }
+            };
+
+            use prdt_crypto::TofuVerdict;
+            match prdt_crypto::KnownHosts::verify_or_record(&known_host_ids_path, &host_id, &pk) {
+                Ok(TofuVerdict::FirstSeen) => {
+                    tracing::info!(%host_id, "tofu_first_seen: recorded host pubkey");
+                }
+                Ok(TofuVerdict::Matched) => {
+                    tracing::info!(%host_id, "tofu_matched");
+                }
+                Ok(TofuVerdict::Mismatch { .. }) if force_tofu => {
+                    tracing::warn!(%host_id, "tofu_mismatch forced-through by --force-tofu");
+                }
+                Ok(TofuVerdict::Mismatch { .. }) => {
+                    tracing::error!(%host_id, "TOFU pubkey mismatch. Refusing to connect. Use --force-tofu to override.");
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "known-host-ids error");
+                    return;
+                }
+            }
+
+            (outcome.peer_addr, pk)
+        } else {
+            (direct_host.expect("args validated"), direct_pubkey.expect("args validated"))
+        };
+
         transport.configure_peer(host_addr).await;
         info!(%host_addr, local = ?transport.local_addr().ok(), "viewer transport ready");
 

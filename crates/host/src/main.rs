@@ -58,6 +58,19 @@ struct Args {
     /// `<outgoing_dir>/sent/` so it isn't sent twice. Created on demand.
     #[arg(long, default_value = FILE_SEND_DIR)]
     outgoing_dir: std::path::PathBuf,
+
+    /// Rendezvous via a signaling server instead of listening for a direct viewer.
+    #[arg(long)]
+    signaling_url: Option<url::Url>,
+
+    /// Opaque host identifier to register with the signaling server.
+    /// Required when --signaling-url is specified.
+    #[arg(long, required = false)]
+    host_id: Option<String>,
+
+    /// Rendezvous overall timeout in seconds.
+    #[arg(long, default_value_t = 10)]
+    signaling_timeout: u64,
 }
 
 #[tokio::main]
@@ -130,7 +143,39 @@ async fn main() -> Result<()> {
             .await
             .context("UDP bind")?,
     );
-    info!(local = ?transport.local_addr()?, "listening; waiting for Noise handshake");
+    let local_udp = transport.local_addr()?;
+    info!(local = ?local_udp, "UDP bound");
+
+    if let Some(signaling_url) = args.signaling_url.clone() {
+        let host_id = args
+            .host_id
+            .clone()
+            .context("--host-id is required when --signaling-url is set")?;
+        let outcome = prdt_signaling_client::rendezvous_as_host(
+            prdt_signaling_client::RendezvousConfig {
+                url: signaling_url,
+                host_id: host_id.clone(),
+                timeout: Duration::from_secs(args.signaling_timeout),
+            },
+            prdt_signaling_client::HostIdentity {
+                pubkey_b64: keypair.public.to_base64(),
+            },
+            local_udp,
+        )
+        .await
+        .context("signaling rendezvous (host)")?;
+        info!(
+            peer_addr = %outcome.peer_addr,
+            session_id = %outcome.session_id,
+            %host_id,
+            "signaling_rendezvous_completed"
+        );
+        transport.configure_peer(outcome.peer_addr).await;
+    } else {
+        info!("no --signaling-url; using LAN fixed-address mode");
+    }
+
+    info!("waiting for Noise handshake");
     transport
         .handshake_as_server(&keypair)
         .await

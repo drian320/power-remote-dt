@@ -15,6 +15,9 @@ prdt-crypto = { path = "../crypto" }
 prdt-filetransfer = { path = "../filetransfer" }
 prdt-protocol = { path = "../protocol" }
 prdt-transport = { path = "../transport" }
+prdt-signaling-client = { path = "../signaling-client" }
+prdt-signaling-proto = { path = "../signaling-proto" }
+url = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "sync", "time", "signal", "fs", "io-util"] }
 clap = { workspace = true }
 tracing = { workspace = true }
