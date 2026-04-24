@@ -204,14 +204,7 @@ impl CustomUdpTransport {
             if body_end > n {
                 continue;
             }
-            // Decode directly via bincode (skipping the 1-byte kind prefix)
-            // rather than via `decode_control`, which currently gates on
-            // `kind <= 16` and would reject our kinds 20/21.
-            let ctrl_body = &buf[HEADER_LEN..body_end];
-            if ctrl_body.is_empty() {
-                continue;
-            }
-            let msg: ControlMessage = match bincode::deserialize(&ctrl_body[1..]) {
+            let msg = match prdt_protocol::decode_control(&buf[HEADER_LEN..body_end]) {
                 Ok(m) => m,
                 Err(_) => continue,
             };
