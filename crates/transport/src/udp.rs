@@ -151,6 +151,88 @@ impl CustomUdpTransport {
         }
     }
 
+    /// Send Probe to each candidate; concurrently listen for incoming Probes
+    /// (respond with ProbeAck) and incoming ProbeAcks (first match commits
+    /// peer and returns). Times out if no candidate replies within
+    /// `timeout_duration`. Intended to be called BEFORE `handshake_as_*`.
+    pub async fn probe_and_commit_peer(
+        &self,
+        candidates: &[SocketAddr],
+        timeout_duration: std::time::Duration,
+    ) -> Result<SocketAddr, TransportError> {
+        use rand_core::{OsRng, RngCore};
+        use std::collections::HashSet;
+
+        let mut pending: HashSet<[u8; 16]> = HashSet::new();
+        for &addr in candidates {
+            let mut nonce = [0u8; 16];
+            OsRng.fill_bytes(&mut nonce);
+            pending.insert(nonce);
+            if let Err(e) = self.send_control_to(ControlMessage::Probe { nonce }, addr).await {
+                tracing::warn!(?addr, error = ?e, "probe send failed; skipping candidate");
+            }
+        }
+
+        let deadline = tokio::time::Instant::now() + timeout_duration;
+        let mut buf = vec![0u8; 4096];
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(TransportError::HandshakeTimeout);
+            }
+            let (n, from) =
+                match tokio::time::timeout(remaining, self.socket.recv_from(&mut buf)).await {
+                    Ok(Ok(v)) => v,
+                    Ok(Err(e)) => return Err(TransportError::Io(e)),
+                    Err(_) => return Err(TransportError::HandshakeTimeout),
+                };
+
+            let hdr = match PacketHeader::decode(&buf[..n]) {
+                Ok(h) => h,
+                Err(_) => continue,
+            };
+            if hdr.session_id != self.cfg.session_id && self.cfg.session_id != 0 {
+                continue;
+            }
+            if hdr.packet_type != PacketType::Control {
+                continue;
+            }
+            if hdr.flags & prdt_protocol::packet_flags::ENCRYPTED != 0 {
+                continue;
+            }
+            let body_end = HEADER_LEN + hdr.payload_len as usize;
+            if body_end > n {
+                continue;
+            }
+            // Decode directly via bincode (skipping the 1-byte kind prefix)
+            // rather than via `decode_control`, which currently gates on
+            // `kind <= 16` and would reject our kinds 20/21.
+            let ctrl_body = &buf[HEADER_LEN..body_end];
+            if ctrl_body.is_empty() {
+                continue;
+            }
+            let msg: ControlMessage = match bincode::deserialize(&ctrl_body[1..]) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            match msg {
+                ControlMessage::Probe { nonce } => {
+                    let _ = self
+                        .send_control_to(ControlMessage::ProbeAck { nonce }, from)
+                        .await;
+                }
+                ControlMessage::ProbeAck { nonce } => {
+                    if pending.contains(&nonce) {
+                        self.configure_peer(from).await;
+                        tracing::info!(peer = ?from, "probe winner");
+                        return Ok(from);
+                    }
+                }
+                _ => continue,
+            }
+        }
+    }
+
     /// Client-side Noise handshake. Sends NoiseE1 to the configured peer and
     /// awaits the server's NoiseE2, installing the transport session on
     /// completion.
@@ -266,7 +348,6 @@ impl CustomUdpTransport {
     /// Send a ControlMessage unencrypted to an explicit destination addr,
     /// bypassing `configure_peer`. Used by `probe_and_commit_peer` which
     /// broadcasts Probes to multiple candidates before any peer is committed.
-    #[allow(dead_code)]
     async fn send_control_to(
         &self,
         msg: ControlMessage,
