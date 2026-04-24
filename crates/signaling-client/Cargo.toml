@@ -27,3 +27,5 @@ axum = { workspace = true }
 prdt-transport = { path = "../transport" }
 prdt-crypto = { path = "../crypto" }
 prdt-protocol = { path = "../protocol" }
+stun_codec = { workspace = true }
+bytecodec = { workspace = true }

@@ -8,6 +8,8 @@ use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, instrument};
 
+use prdt_signaling_proto::PRIORITY_SRFLX;
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REGISTERED_TIMEOUT: Duration = Duration::from_secs(5);
 const PEER_CANDIDATE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -75,10 +77,7 @@ pub async fn rendezvous_as_host(
     };
     info!(%session_id, "session_start");
 
-    send_msg(&mut ws, &ClientMessage::Candidate {
-        session_id: session_id.clone(),
-        candidate: candidate_for(local_udp_addr),
-    }).await?;
+    send_candidates(&mut ws, &session_id, local_udp_addr, cfg.stun_url.as_ref()).await?;
 
     let peer = match recv_msg(&mut ws, "peer_candidate", PEER_CANDIDATE_TIMEOUT).await? {
         ServerMessage::PeerCandidate { candidate, .. } => {
@@ -118,10 +117,7 @@ pub async fn rendezvous_as_viewer(
     };
     info!(%session_id, "session_start");
 
-    send_msg(&mut ws, &ClientMessage::Candidate {
-        session_id: session_id.clone(),
-        candidate: candidate_for(local_udp_addr),
-    }).await?;
+    send_candidates(&mut ws, &session_id, local_udp_addr, cfg.stun_url.as_ref()).await?;
 
     let peer = match recv_msg(&mut ws, "peer_candidate", PEER_CANDIDATE_TIMEOUT).await? {
         ServerMessage::PeerCandidate { candidate, .. } => {
@@ -143,4 +139,68 @@ pub async fn rendezvous_as_viewer(
 
     let _ = ws.close(None).await;
     Ok(RendezvousOutcome { session_id, peer_addr: peer, peer_pubkey_b64, peer_candidates: vec![] })
+}
+
+async fn send_candidates(
+    ws: &mut Ws,
+    session_id: &str,
+    local_udp_addr: SocketAddr,
+    stun_url: Option<&url::Url>,
+) -> Result<(), SignalingError> {
+    send_msg(ws, &ClientMessage::Candidate {
+        session_id: session_id.to_string(),
+        candidate: candidate_for(local_udp_addr),
+    }).await?;
+
+    if let Some(url) = stun_url {
+        match resolve_and_learn_srflx(url).await {
+            Ok(srflx) => {
+                send_msg(ws, &ClientMessage::Candidate {
+                    session_id: session_id.to_string(),
+                    candidate: Candidate {
+                        typ: CandidateType::Srflx,
+                        ip: srflx.ip().to_string(),
+                        port: srflx.port(),
+                        priority: PRIORITY_SRFLX,
+                    },
+                }).await?;
+                tracing::info!(%srflx, "srflx candidate sent");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "STUN failed; proceeding without srflx candidate");
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn resolve_and_learn_srflx(
+    stun_url: &url::Url,
+) -> Result<SocketAddr, SignalingError> {
+    if stun_url.scheme() != "stun" {
+        return Err(SignalingError::Protocol(format!(
+            "unsupported stun URL scheme: {}",
+            stun_url.scheme()
+        )));
+    }
+    let host = stun_url
+        .host_str()
+        .ok_or_else(|| SignalingError::Protocol("stun URL missing host".into()))?;
+    let port = stun_url.port().unwrap_or(3478);
+    let stun_addr = tokio::net::lookup_host(format!("{host}:{port}"))
+        .await
+        .map_err(|e| SignalingError::Protocol(format!("resolve stun: {e}")))?
+        .next()
+        .ok_or_else(|| SignalingError::Protocol("no addrs for stun host".into()))?;
+
+    // Separate UDP socket for STUN (W2 limitation — see spec Open Questions).
+    let probe = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+    let addr = prdt_nat_traversal::learn_public_addr(
+        &probe,
+        stun_addr,
+        std::time::Duration::from_secs(3),
+    )
+    .await
+    .map_err(|e| SignalingError::Protocol(format!("stun: {e}")))?;
+    Ok(addr)
 }
