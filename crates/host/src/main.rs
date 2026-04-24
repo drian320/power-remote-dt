@@ -68,6 +68,11 @@ struct Args {
     #[arg(long, required = false)]
     host_id: Option<String>,
 
+    /// Path to persist the signaling-server-allocated host ID. Created on
+    /// first successful register; read on subsequent starts.
+    #[arg(long, default_value = "host-id.txt")]
+    host_id_file: std::path::PathBuf,
+
     /// Rendezvous overall timeout in seconds.
     #[arg(long, default_value_t = 10)]
     signaling_timeout: u64,
@@ -166,14 +171,18 @@ async fn main() -> Result<()> {
     info!(local = ?local_udp, "UDP bound");
 
     if let Some(signaling_url) = args.signaling_url.clone() {
-        let host_id = args
-            .host_id
-            .clone()
-            .context("--host-id is required when --signaling-url is set")?;
+        // Priority: explicit --host-id > persisted host-id.txt > empty (triggers allocation)
+        let effective_host_id = match &args.host_id {
+            Some(id) => id.clone(),
+            None => std::fs::read_to_string(&args.host_id_file)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default(),
+        };
         let outcome = prdt_signaling_client::rendezvous_as_host(
             prdt_signaling_client::RendezvousConfig {
                 url: signaling_url,
-                host_id: host_id.clone(),
+                host_id: effective_host_id.clone(),
                 timeout: Duration::from_secs(args.signaling_timeout),
                 stun_url: args.stun_url.clone(),
                 turn_url: args.turn_url.clone(),
@@ -186,6 +195,13 @@ async fn main() -> Result<()> {
         )
         .await
         .context("signaling rendezvous (host)")?;
+        if outcome.allocated_host_id != effective_host_id {
+            if let Err(e) = std::fs::write(&args.host_id_file, &outcome.allocated_host_id) {
+                tracing::warn!(error = %e, path = %args.host_id_file.display(), "failed to persist host_id");
+            } else {
+                tracing::info!(host_id = %outcome.allocated_host_id, path = %args.host_id_file.display(), "persisted host_id");
+            }
+        }
         let cand_addrs: Vec<SocketAddr> = outcome
             .peer_candidates
             .iter()
@@ -193,7 +209,7 @@ async fn main() -> Result<()> {
             .collect();
         info!(
             session_id = %outcome.session_id,
-            %host_id,
+            host_id = %outcome.allocated_host_id,
             candidate_count = cand_addrs.len(),
             "signaling_rendezvous_completed"
         );
