@@ -40,24 +40,44 @@ async fn handle_socket(mut socket: WebSocket, app: AppState) {
 
     match classified {
         ClientMessage::Register { host_id, pubkey_b64 } => {
-            if state.hosts.contains_key(&host_id) {
+            let input_id = if host_id.trim().is_empty() {
+                None
+            } else {
+                Some(host_id.as_str())
+            };
+            let allocated = match state.store.allocate_or_verify(input_id, &pubkey_b64) {
+                Ok(id) => id,
+                Err(crate::host_store::StoreError::PubkeyMismatch) => {
+                    send_error(
+                        &mut socket,
+                        ErrorCode::HostIdPubkeyMismatch,
+                        "host_id pubkey does not match registered key",
+                    ).await;
+                    return;
+                }
+                Err(e) => {
+                    send_error(&mut socket, ErrorCode::InternalError, &format!("store: {e}")).await;
+                    return;
+                }
+            };
+            if state.hosts.contains_key(&allocated) {
                 send_error(&mut socket, ErrorCode::HostAlreadyRegistered, "host_id already in use").await;
                 return;
             }
             let (tx, rx) = mpsc::channel::<ServerMessage>(SEND_CHAN_CAP);
-            state.hosts.insert(host_id.clone(), HostEntry {
+            state.hosts.insert(allocated.clone(), HostEntry {
                 pubkey_b64,
                 tx: tx.clone(),
                 registered_at: Instant::now(),
             });
-            info!(host_id = %host_id, "register");
-            if send_message(&mut socket, &ServerMessage::Registered { host_id: host_id.clone() })
+            info!(host_id = %allocated, "register");
+            if send_message(&mut socket, &ServerMessage::Registered { host_id: allocated.clone() })
                 .await.is_err()
             {
-                state.hosts.remove(&host_id);
+                state.hosts.remove(&allocated);
                 return;
             }
-            host_loop(socket, state, host_id, rx).await;
+            host_loop(socket, state, allocated, rx).await;
         }
         ClientMessage::Connect { host_id } => {
             let (viewer_tx, viewer_rx) = mpsc::channel::<ServerMessage>(SEND_CHAN_CAP);
