@@ -1,5 +1,8 @@
+pub mod host_store;
 pub mod state;
 pub mod ws;
+
+pub use host_store::{HostStore, StoreError};
 
 use axum::{extract::State, routing::get, Json, Router};
 use serde_json::json;

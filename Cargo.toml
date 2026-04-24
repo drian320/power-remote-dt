@@ -64,6 +64,9 @@ hmac = "0.12"
 sha1 = "0.10"
 md-5 = "0.10"
 
+# Persistence
+rusqlite = { version = "0.31", features = ["bundled"] }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

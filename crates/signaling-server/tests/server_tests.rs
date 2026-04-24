@@ -78,11 +78,11 @@ async fn duplicate_register_rejected() {
     let (addr, _state) = start_test_server().await;
 
     let (mut ws1, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
-    ws_send(&mut ws1, ClientMessage::Register { host_id: "h1".into(), pubkey_b64: "A".into() }).await;
+    ws_send(&mut ws1, ClientMessage::Register { host_id: "h1".into(), pubkey_b64: "PK1".into() }).await;
     let _ = ws_recv(&mut ws1).await;
 
     let (mut ws2, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
-    ws_send(&mut ws2, ClientMessage::Register { host_id: "h1".into(), pubkey_b64: "B".into() }).await;
+    ws_send(&mut ws2, ClientMessage::Register { host_id: "h1".into(), pubkey_b64: "PK1".into() }).await;
 
     let msg = ws_recv(&mut ws2).await;
     match msg {
@@ -295,6 +295,52 @@ async fn session_timeout_kills_silent_session() {
         ServerMessage::Error { code, message } => {
             assert_eq!(code, prdt_signaling_proto::ErrorCode::InternalError);
             assert!(message.contains("timeout"));
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn register_allocates_new_id_when_empty() {
+    let (addr, _) = start_test_server().await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
+    ws_send(&mut ws, ClientMessage::Register {
+        host_id: "".into(), pubkey_b64: "PK1".into(),
+    }).await;
+    let msg = ws_recv(&mut ws).await;
+    match msg {
+        ServerMessage::Registered { host_id } => {
+            assert_eq!(host_id.len(), 11, "expected dashed 9-digit ID, got {host_id}");
+            assert!(host_id.chars().filter(|c| c.is_ascii_digit()).count() == 9);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn register_rejects_pubkey_mismatch() {
+    let (addr, _) = start_test_server().await;
+
+    // First-time register with explicit ID (treated as first registration)
+    let (mut ws1, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
+    ws_send(&mut ws1, ClientMessage::Register {
+        host_id: "987654321".into(), pubkey_b64: "PKX".into(),
+    }).await;
+    let _ = ws_recv(&mut ws1).await;
+
+    // Drop ws1 so hosts map is free (leave it open a bit for cleanup)
+    drop(ws1);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Re-register with same ID but different pubkey → Mismatch
+    let (mut ws2, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
+    ws_send(&mut ws2, ClientMessage::Register {
+        host_id: "987654321".into(), pubkey_b64: "PKY".into(),
+    }).await;
+    let msg = ws_recv(&mut ws2).await;
+    match msg {
+        ServerMessage::Error { code, .. } => {
+            assert_eq!(code, prdt_signaling_proto::ErrorCode::HostIdPubkeyMismatch);
         }
         other => panic!("unexpected: {other:?}"),
     }

@@ -65,11 +65,11 @@ pub async fn rendezvous_as_host(
         pubkey_b64: identity.pubkey_b64,
     }).await?;
 
-    match recv_msg(&mut ws, "registered", REGISTERED_TIMEOUT).await? {
-        ServerMessage::Registered { .. } => {}
+    let allocated_host_id = match recv_msg(&mut ws, "registered", REGISTERED_TIMEOUT).await? {
+        ServerMessage::Registered { host_id } => host_id,
         ServerMessage::Error { code, message } => return Err(SignalingError::Server { code, message }),
         other => return Err(SignalingError::Protocol(format!("expected Registered, got {other:?}"))),
-    }
+    };
 
     let session_id = match recv_msg(&mut ws, "session_start", cfg.timeout).await? {
         ServerMessage::SessionStart { session_id, role: Role::Host, .. } => session_id,
@@ -92,6 +92,7 @@ pub async fn rendezvous_as_host(
         session_id,
         peer_pubkey_b64: None,
         peer_candidates,
+        allocated_host_id,
     })
 }
 
@@ -125,6 +126,7 @@ pub async fn rendezvous_as_viewer(
         session_id,
         peer_pubkey_b64,
         peer_candidates,
+        allocated_host_id: String::new(),
     })
 }
 

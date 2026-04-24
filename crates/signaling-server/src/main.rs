@@ -17,6 +17,9 @@ struct Args {
     /// Session inactivity timeout in milliseconds.
     #[arg(long = "session-timeout-ms", default_value_t = 60_000)]
     session_timeout_ms: u64,
+    /// Path to the SQLite database file (created on first run).
+    #[arg(long, default_value = "prdt-signaling.sqlite")]
+    db: std::path::PathBuf,
 }
 
 #[tokio::main]
@@ -26,7 +29,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(args.log.clone())
         .init();
 
-    let state = Arc::new(ServerState::new());
+    let store = Arc::new(
+        prdt_signaling_server::HostStore::open(&args.db)
+            .map_err(|e| -> Box<dyn std::error::Error> {
+                format!("open store {}: {e}", args.db.display()).into()
+            })?,
+    );
+    let state = Arc::new(ServerState::with_store(store));
     let cfg = ServerConfig { session_timeout: Duration::from_millis(args.session_timeout_ms) };
     let app = router(state, cfg);
 

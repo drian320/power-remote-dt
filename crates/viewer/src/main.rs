@@ -117,6 +117,18 @@ struct Args {
     turn_url: Option<url::Url>,
 }
 
+/// Normalize a user-supplied host_id for signaling: 9-digit numeric inputs
+/// get the standard `XXX-XXX-XXX` dashed form; all other inputs are returned
+/// verbatim.
+fn normalize_host_id_input(input: &str) -> String {
+    let stripped: String = input.chars().filter(|c| *c != '-').collect();
+    if stripped.len() == 9 && stripped.chars().all(|c| c.is_ascii_digit()) {
+        format!("{}-{}-{}", &stripped[0..3], &stripped[3..6], &stripped[6..9])
+    } else {
+        input.to_string()
+    }
+}
+
 fn parse_resolution(s: &str) -> Result<(u32, u32)> {
     let (w, h) = s
         .split_once('x')
@@ -508,6 +520,11 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
     let (req_w, req_h) = parse_resolution(&args.resolution)?;
+    // Normalize --host-id: accept 9-digit numeric IDs with or without dashes
+    // so both `--host-id 123456789` and `--host-id 123-456-789` resolve to the
+    // same DashMap key the server stored at Register time.
+    let normalized_host_id: Option<String> =
+        args.host_id.as_ref().map(|s| normalize_host_id_input(s));
     // Resolve host address + static pubkey. In signaling mode, both are learned at runtime from the
     // rendezvous server (pubkey via TOFU against --known-host-ids). In direct mode, --host is required
     // and the pubkey comes from --host-pubkey or --known-hosts.
@@ -552,7 +569,7 @@ fn main() -> Result<()> {
     info!(
         host = ?args.host,
         signaling_url = ?args.signaling_url,
-        host_id = ?args.host_id,
+        host_id = ?normalized_host_id,
         resolution = %args.resolution,
         fps = args.fps,
         adapter = %dev.adapter().name,
@@ -597,7 +614,7 @@ fn main() -> Result<()> {
         direct_host,
         direct_pubkey,
         args.signaling_url.clone(),
-        args.host_id.clone(),
+        normalized_host_id,
         args.signaling_timeout,
         args.stun_url.clone(),
         args.turn_url.clone(),
@@ -1234,5 +1251,26 @@ mod tests {
         let (x, y) = map_cursor_to_virtual_desktop(960.0, 540.0, 1920.0, 1080.0, mon, vd);
         assert!((x - 32767).abs() <= 2);
         assert!((y - 32767).abs() <= 2);
+    }
+
+    #[test]
+    fn normalize_9digit_with_dashes() {
+        assert_eq!(normalize_host_id_input("123-456-789"), "123-456-789");
+    }
+
+    #[test]
+    fn normalize_9digit_without_dashes() {
+        assert_eq!(normalize_host_id_input("123456789"), "123-456-789");
+    }
+
+    #[test]
+    fn normalize_opaque_passthrough() {
+        assert_eq!(normalize_host_id_input("alice-desktop"), "alice-desktop");
+        assert_eq!(normalize_host_id_input("w1-test"), "w1-test");
+    }
+
+    #[test]
+    fn normalize_short_numeric_passthrough() {
+        assert_eq!(normalize_host_id_input("12345"), "12345");
     }
 }

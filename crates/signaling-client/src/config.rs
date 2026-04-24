@@ -32,4 +32,8 @@ pub struct RendezvousOutcome {
     /// arrival preserved). W3's `probe_and_commit_peer` selects the actual
     /// peer address from this list via live probing.
     pub peer_candidates: Vec<Candidate>,
+    /// Server-allocated / confirmed host_id. For rendezvous_as_host, this is
+    /// the ID the signaling-server returned in its `Registered` reply. For
+    /// rendezvous_as_viewer, this is an empty string.
+    pub allocated_host_id: String,
 }
