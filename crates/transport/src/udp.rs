@@ -97,6 +97,14 @@ impl CustomUdpTransport {
         self.socket.local_addr()
     }
 
+    /// Borrow the underlying UDP socket for pre-handshake operations such as
+    /// STUN learning and probe/ack exchange. The returned `Arc` clones the
+    /// internal socket ref; returning ownership is safe because all transport
+    /// recv/send paths hold their own clone internally.
+    pub fn socket(&self) -> std::sync::Arc<tokio::net::UdpSocket> {
+        self.socket.clone()
+    }
+
     async fn current_peer(&self) -> Result<SocketAddr, TransportError> {
         self.peer.lock().await.ok_or_else(|| {
             TransportError::Io(std::io::Error::new(
@@ -253,6 +261,29 @@ impl CustomUdpTransport {
             payload_len: body.len() as u32,
         };
         self.send_raw_unencrypted(hdr, &body).await
+    }
+
+    /// Send a ControlMessage unencrypted to an explicit destination addr,
+    /// bypassing `configure_peer`. Used by `probe_and_commit_peer` which
+    /// broadcasts Probes to multiple candidates before any peer is committed.
+    #[allow(dead_code)]
+    async fn send_control_to(
+        &self,
+        msg: ControlMessage,
+        dst: SocketAddr,
+    ) -> Result<(), TransportError> {
+        let body = prdt_protocol::encode_control(&msg)?;
+        let hdr = PacketHeader {
+            packet_type: PacketType::Control,
+            flags: 0,
+            session_id: self.cfg.session_id,
+            payload_len: body.len() as u32,
+        };
+        let mut buf = Vec::with_capacity(HEADER_LEN + body.len());
+        buf.extend_from_slice(&hdr.encode());
+        buf.extend_from_slice(&body);
+        self.socket.send_to(&buf, dst).await?;
+        Ok(())
     }
 
     /// Receive a single datagram without performing decryption. Used by the
