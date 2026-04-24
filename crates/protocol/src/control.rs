@@ -111,6 +111,12 @@ pub enum ControlMessage {
         present_p95_us: u32,
         present_p99_us: u32,
     },
+    /// Pre-Noise connectivity probe; both sides send these for each candidate
+    /// and echo matching ProbeAck back. Used by
+    /// `CustomUdpTransport::probe_and_commit_peer`.
+    Probe { nonce: [u8; 16] },
+    /// Reply to a Probe — echoes the received nonce back to the original sender.
+    ProbeAck { nonce: [u8; 16] },
 }
 
 impl ControlMessage {
@@ -132,6 +138,8 @@ impl ControlMessage {
             Self::FileChunk { .. } => 14,
             Self::FileTransferEnd { .. } => 15,
             Self::LatencyReport { .. } => 16,
+            Self::Probe { .. } => 20,
+            Self::ProbeAck { .. } => 21,
         }
     }
 }
@@ -195,5 +203,21 @@ mod tests {
             assert_eq!(ping_seq, 7);
             assert_eq!(viewer_ts_us, 1_000_000);
         }
+    }
+
+    #[test]
+    fn probe_kinds_are_stable() {
+        let p = ControlMessage::Probe { nonce: [0u8; 16] };
+        assert_eq!(p.kind_u8(), 20);
+        let a = ControlMessage::ProbeAck { nonce: [0u8; 16] };
+        assert_eq!(a.kind_u8(), 21);
+    }
+
+    #[test]
+    fn probe_roundtrip_bincode() {
+        let msg = ControlMessage::Probe { nonce: [0x11; 16] };
+        let bytes = bincode::serialize(&msg).unwrap();
+        let back: ControlMessage = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(msg, back);
     }
 }
