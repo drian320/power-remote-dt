@@ -20,10 +20,9 @@ async fn probe_retry_survives_first_packet_drops() {
     // the (DROP_COUNT+1)th, and only then emits the ProbeAck. The client
     // should retry enough times to get past this.
     const DROP_COUNT: u32 = 2;
-    assert!(
-        DROP_COUNT < PROBE_RETRY_COUNT,
-        "DROP_COUNT must be strictly less than PROBE_RETRY_COUNT"
-    );
+    // Compile-time invariant: DROP_COUNT must stay below PROBE_RETRY_COUNT
+    // for the scenario to be meaningful (otherwise the test would hang).
+    const _: () = assert!(DROP_COUNT < PROBE_RETRY_COUNT);
 
     let client = Arc::new(
         CustomUdpTransport::bind(
