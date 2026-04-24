@@ -130,7 +130,12 @@ struct Args {
 fn normalize_host_id_input(input: &str) -> String {
     let stripped: String = input.chars().filter(|c| *c != '-').collect();
     if stripped.len() == 9 && stripped.chars().all(|c| c.is_ascii_digit()) {
-        format!("{}-{}-{}", &stripped[0..3], &stripped[3..6], &stripped[6..9])
+        format!(
+            "{}-{}-{}",
+            &stripped[0..3],
+            &stripped[3..6],
+            &stripped[6..9]
+        )
     } else {
         input.to_string()
     }
@@ -551,7 +556,7 @@ fn main() -> Result<()> {
                 )
             })?)
         }
-        (None, _, None) => None, // signaling mode will resolve below
+        (None, _, None) => None,       // signaling mode will resolve below
         (None, None, Some(_)) => None, // no pubkey source; validated below
     };
 

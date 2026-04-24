@@ -214,7 +214,8 @@ async fn main() -> Result<()> {
                 timeout: Duration::from_secs(args.signaling_timeout),
                 stun_url: args.stun_url.clone(),
                 turn_url: args.turn_url.clone(),
-                aggregation_window: prdt_signaling_client::RendezvousConfig::DEFAULT_AGGREGATION_WINDOW,
+                aggregation_window:
+                    prdt_signaling_client::RendezvousConfig::DEFAULT_AGGREGATION_WINDOW,
             },
             prdt_signaling_client::HostIdentity {
                 pubkey_b64: keypair.public.to_base64(),

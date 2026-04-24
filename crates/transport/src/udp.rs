@@ -274,7 +274,10 @@ impl CustomUdpTransport {
             let mut nonce = [0u8; 16];
             OsRng.fill_bytes(&mut nonce);
             pending.insert(nonce, addr);
-            if let Err(e) = self.send_control_to(ControlMessage::Probe { nonce }, addr).await {
+            if let Err(e) = self
+                .send_control_to(ControlMessage::Probe { nonce }, addr)
+                .await
+            {
                 tracing::warn!(?addr, error = ?e, "probe send failed; skipping candidate");
             }
         }
