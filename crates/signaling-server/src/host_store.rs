@@ -52,7 +52,17 @@ impl HostStore {
         let conn = self.conn.lock().unwrap();
         match host_id {
             Some(id) => {
-                let id_normalized = id.replace('-', "");
+                // Only normalize dashes for 9-digit numeric IDs. Opaque
+                // strings ("w1-test", "alice-desktop") keep dashes so the
+                // ws.rs DashMap key matches what clients send in Connect.
+                let stripped = id.replace('-', "");
+                let id_normalized = if stripped.len() == 9
+                    && stripped.chars().all(|c| c.is_ascii_digit())
+                {
+                    stripped
+                } else {
+                    id.to_string()
+                };
                 let existing: Option<String> = conn
                     .query_row(
                         "SELECT pubkey_b64 FROM hosts WHERE host_id = ?1",
@@ -158,7 +168,10 @@ mod tests {
     fn first_time_register_with_opaque_string() {
         let s = HostStore::open_in_memory().unwrap();
         let id = s.allocate_or_verify(Some("alice-desktop"), "AAA").unwrap();
-        // "alicedesktop" is 12 chars, not 9 digits; returned verbatim (no dashes).
-        assert_eq!(id, "alicedesktop");
+        // Opaque strings preserve their dashes verbatim (not 9-digit numeric).
+        assert_eq!(id, "alice-desktop");
+        // Re-register with same pubkey reuses the same ID.
+        let id2 = s.allocate_or_verify(Some("alice-desktop"), "AAA").unwrap();
+        assert_eq!(id2, "alice-desktop");
     }
 }
