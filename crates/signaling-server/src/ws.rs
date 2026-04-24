@@ -129,10 +129,7 @@ async fn host_loop(
                     Some(Ok(Message::Text(t))) => {
                         match serde_json::from_str::<ClientMessage>(&t) {
                             Ok(ClientMessage::Candidate { session_id, candidate }) => {
-                                if candidate.typ == prdt_signaling_proto::CandidateType::Relay {
-                                    send_error(&mut socket, ErrorCode::UnsupportedCandidateType, "relay candidates require W4 TURN").await;
-                                    continue;
-                                }
+                                // W4: Host, Srflx, and Relay all forwarded.
                                 if let Some(sess) = state.sessions.get(&session_id) {
                                     let _ = sess.viewer_tx.send(ServerMessage::PeerCandidate {
                                         session_id: session_id.clone(),
@@ -178,10 +175,7 @@ async fn viewer_loop(
                     Some(Ok(Message::Text(t))) => {
                         match serde_json::from_str::<ClientMessage>(&t) {
                             Ok(ClientMessage::Candidate { session_id: sid, candidate }) => {
-                                if candidate.typ == prdt_signaling_proto::CandidateType::Relay {
-                                    send_error(&mut socket, ErrorCode::UnsupportedCandidateType, "relay candidates require W4 TURN").await;
-                                    continue;
-                                }
+                                // W4: Host, Srflx, and Relay all forwarded.
                                 if let Some(sess) = state.sessions.get(&sid) {
                                     let _ = sess.host_tx.send(ServerMessage::PeerCandidate {
                                         session_id: sid.clone(),

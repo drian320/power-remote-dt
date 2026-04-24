@@ -229,7 +229,7 @@ async fn srflx_candidate_forwarded() {
 }
 
 #[tokio::test]
-async fn relay_candidate_still_rejected() {
+async fn relay_candidate_forwarded() {
     let (addr, _) = start_test_server().await;
 
     let (mut host_ws, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
@@ -245,19 +245,23 @@ async fn relay_candidate_still_rejected() {
     };
 
     ws_send(&mut viewer_ws, ClientMessage::Candidate {
-        session_id: sid,
+        session_id: sid.clone(),
         candidate: Candidate {
             typ: CandidateType::Relay,
-            ip: "1.2.3.4".into(),
-            port: 1,
+            ip: "198.51.100.33".into(),
+            port: 33000,
             priority: PRIORITY_RELAY,
         },
     }).await;
 
-    let err = ws_recv(&mut viewer_ws).await;
-    match err {
-        ServerMessage::Error { code, .. } => {
-            assert_eq!(code, prdt_signaling_proto::ErrorCode::UnsupportedCandidateType);
+    // W4: Relay is now forwarded like Host/Srflx.
+    let m = ws_recv(&mut host_ws).await;
+    match m {
+        ServerMessage::PeerCandidate { session_id, candidate } => {
+            assert_eq!(session_id, sid);
+            assert_eq!(candidate.typ, CandidateType::Relay);
+            assert_eq!(candidate.ip, "198.51.100.33");
+            assert_eq!(candidate.port, 33000);
         }
         other => panic!("unexpected: {other:?}"),
     }
