@@ -115,6 +115,34 @@ struct Args {
     /// transport is built via bind_with_relay (TURN relay mode).
     #[arg(long)]
     turn_url: Option<url::Url>,
+
+    /// Local UDP bind address. Default in signaling mode is `0.0.0.0:0`
+    /// (ephemeral, any interface) so cross-LAN probing works; set explicitly
+    /// to a specific interface IP (e.g. `192.168.1.20:0`) when you need the
+    /// Host candidate to carry that interface's address.
+    #[arg(long, default_value = "0.0.0.0:0")]
+    bind: SocketAddr,
+}
+
+/// Discover the local IP the OS would route outbound traffic over toward the
+/// signaling server. Opens a temp UDP socket, `connect`s it (no packets sent)
+/// to force the kernel to pick the outbound interface, then reads `local_addr`.
+///
+/// This avoids hard-coding `127.0.0.1` or relying on a user-supplied `--bind`
+/// for cross-LAN viewer deployments where the viewer has no reason to know
+/// its own LAN IP ahead of time.
+async fn discover_outbound_ip(signaling_url: &url::Url) -> std::io::Result<std::net::IpAddr> {
+    let host = signaling_url
+        .host_str()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing host"))?;
+    let port = signaling_url.port().unwrap_or(80);
+    let resolved = tokio::net::lookup_host(format!("{host}:{port}"))
+        .await?
+        .next()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "no addr"))?;
+    let probe = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+    probe.connect(resolved).await?;
+    Ok(probe.local_addr()?.ip())
 }
 
 /// Normalize a user-supplied host_id for signaling: 9-digit numeric inputs
@@ -620,6 +648,7 @@ fn main() -> Result<()> {
         args.turn_url.clone(),
         args.known_host_ids.clone(),
         args.force_tofu,
+        args.bind,
         req_w,
         req_h,
         args.fps,
@@ -664,6 +693,7 @@ fn spawn_worker_tasks(
     turn_url: Option<url::Url>,
     known_host_ids_path: std::path::PathBuf,
     force_tofu: bool,
+    cli_bind: SocketAddr,
     req_w: u32,
     req_h: u32,
     req_fps: u32,
@@ -671,14 +701,33 @@ fn spawn_worker_tasks(
     decoder: String,
 ) {
     handle.clone().spawn(async move {
-        // Decide initial bind. In signaling mode we prefer 127.0.0.1 loopback so same-machine smoke
-        // tests work; in direct mode we pick 0.0.0.0 or [::] based on host family as before.
-        let bind_addr: SocketAddr = match (&signaling_url, &direct_host) {
-            (Some(_), _) => "127.0.0.1:0".parse().unwrap(),
-            (None, Some(h)) if h.is_ipv4() => "0.0.0.0:0".parse().unwrap(),
-            (None, Some(_)) => "[::]:0".parse().unwrap(),
-            (None, None) => unreachable!("args validated earlier"),
+        // CLI --bind supplies the local UDP bind (default 0.0.0.0:0). We only
+        // override to [::]:0 when we're in direct-mode and the host address is
+        // IPv6; everywhere else honour the CLI value so cross-LAN probing works.
+        let mut bind_addr: SocketAddr = match (&signaling_url, &direct_host) {
+            (None, Some(h)) if h.is_ipv6() && cli_bind.is_ipv4() => {
+                "[::]:0".parse().unwrap()
+            }
+            _ => cli_bind,
         };
+        // In signaling mode, if the caller left the bind IP as a wildcard
+        // (0.0.0.0 / ::), auto-detect the outbound interface by opening a
+        // temp UDP socket "connected" to the signaling server. The resulting
+        // local IP is the one the OS routes out over, which is also the
+        // interface addr we want to advertise as the Host candidate.
+        if bind_addr.ip().is_unspecified() {
+            if let Some(url) = signaling_url.as_ref() {
+                match discover_outbound_ip(url).await {
+                    Ok(ip) => {
+                        bind_addr.set_ip(ip);
+                        tracing::info!(%bind_addr, "auto-detected LAN bind IP via signaling URL");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "outbound IP discovery failed; falling back to wildcard bind (candidate may be unroutable)");
+                    }
+                }
+            }
+        }
         let cfg = UdpTransportConfig::default();
         let transport = match turn_url.clone() {
             Some(url) => {
