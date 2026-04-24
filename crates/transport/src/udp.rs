@@ -65,6 +65,18 @@ impl Socket {
 /// [`TransportError::HandshakeTimeout`] instead of hanging forever.
 pub const DEFAULT_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Interval between Probe retransmissions inside `probe_and_commit_peer`.
+/// 200ms is short enough for LAN RTT (typically <5ms) plus firewall
+/// connection-tracking install, yet long enough to avoid flooding. Exposed
+/// for integration tests.
+pub const PROBE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Total number of Probe transmissions per candidate (initial + retries).
+/// With `PROBE_RETRY_INTERVAL = 200ms`, `PROBE_RETRY_COUNT = 5` means probes
+/// are sent over the first 800ms of the overall timeout; the remaining
+/// budget stays passive (only receiving). Exposed for integration tests.
+pub const PROBE_RETRY_COUNT: u32 = 5;
+
 /// Configuration for a CustomUdpTransport instance.
 #[derive(Debug, Clone, Copy)]
 pub struct UdpTransportConfig {
@@ -239,75 +251,109 @@ impl CustomUdpTransport {
 
     /// Send Probe to each candidate; concurrently listen for incoming Probes
     /// (respond with ProbeAck) and incoming ProbeAcks (first match commits
-    /// peer and returns). Times out if no candidate replies within
-    /// `timeout_duration`. Intended to be called BEFORE `handshake_as_*`.
+    /// peer and returns). Retries Probes every `PROBE_RETRY_INTERVAL` up to
+    /// `PROBE_RETRY_COUNT` total sends per candidate, to mask transient
+    /// single-packet drops (common with stateful firewalls that reject the
+    /// first inbound UDP until a mapping is established). Times out if no
+    /// candidate replies within `timeout_duration`. Intended to be called
+    /// BEFORE `handshake_as_*`.
     pub async fn probe_and_commit_peer(
         &self,
         candidates: &[SocketAddr],
         timeout_duration: std::time::Duration,
     ) -> Result<SocketAddr, TransportError> {
         use rand_core::{OsRng, RngCore};
-        use std::collections::HashSet;
+        use std::collections::HashMap;
 
-        let mut pending: HashSet<[u8; 16]> = HashSet::new();
+        // nonce → addr map. Nonces stay in the map until success (we return
+        // on the first matching ProbeAck) so periodic retries know where to
+        // resend. `candidates` being empty is tolerated: the loop below just
+        // waits for the overall timeout.
+        let mut pending: HashMap<[u8; 16], SocketAddr> = HashMap::new();
         for &addr in candidates {
             let mut nonce = [0u8; 16];
             OsRng.fill_bytes(&mut nonce);
-            pending.insert(nonce);
+            pending.insert(nonce, addr);
             if let Err(e) = self.send_control_to(ControlMessage::Probe { nonce }, addr).await {
                 tracing::warn!(?addr, error = ?e, "probe send failed; skipping candidate");
             }
         }
 
         let deadline = tokio::time::Instant::now() + timeout_duration;
+        // Start the retry ticker one interval out so its first tick fires at
+        // t=PROBE_RETRY_INTERVAL (not immediately, which would double-send).
+        let mut retry_ticker = tokio::time::interval_at(
+            tokio::time::Instant::now() + PROBE_RETRY_INTERVAL,
+            PROBE_RETRY_INTERVAL,
+        );
+        let mut sends_done: u32 = 1;
         let mut buf = vec![0u8; 4096];
+
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 return Err(TransportError::HandshakeTimeout);
             }
-            let (n, from) =
-                match tokio::time::timeout(remaining, self.socket.recv_from(&mut buf)).await {
-                    Ok(Ok(v)) => v,
-                    Ok(Err(e)) => return Err(TransportError::Io(e)),
-                    Err(_) => return Err(TransportError::HandshakeTimeout),
-                };
 
-            let hdr = match PacketHeader::decode(&buf[..n]) {
-                Ok(h) => h,
-                Err(_) => continue,
-            };
-            if hdr.session_id != self.cfg.session_id && self.cfg.session_id != 0 {
-                continue;
-            }
-            if hdr.packet_type != PacketType::Control {
-                continue;
-            }
-            if hdr.flags & prdt_protocol::packet_flags::ENCRYPTED != 0 {
-                continue;
-            }
-            let body_end = HEADER_LEN + hdr.payload_len as usize;
-            if body_end > n {
-                continue;
-            }
-            let msg = match prdt_protocol::decode_control(&buf[HEADER_LEN..body_end]) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            match msg {
-                ControlMessage::Probe { nonce } => {
-                    let _ = self
-                        .send_control_to(ControlMessage::ProbeAck { nonce }, from)
-                        .await;
-                }
-                ControlMessage::ProbeAck { nonce } => {
-                    if pending.contains(&nonce) {
-                        self.configure_peer(from).await;
-                        tracing::info!(peer = ?from, "probe winner");
-                        return Ok(from);
+            tokio::select! {
+                biased;
+                recv = tokio::time::timeout(remaining, self.socket.recv_from(&mut buf)) => {
+                    let (n, from) = match recv {
+                        Ok(Ok(v)) => v,
+                        Ok(Err(e)) => return Err(TransportError::Io(e)),
+                        Err(_) => return Err(TransportError::HandshakeTimeout),
+                    };
+                    let hdr = match PacketHeader::decode(&buf[..n]) {
+                        Ok(h) => h,
+                        Err(_) => continue,
+                    };
+                    if hdr.session_id != self.cfg.session_id && self.cfg.session_id != 0 {
+                        continue;
+                    }
+                    if hdr.packet_type != PacketType::Control {
+                        continue;
+                    }
+                    if hdr.flags & prdt_protocol::packet_flags::ENCRYPTED != 0 {
+                        continue;
+                    }
+                    let body_end = HEADER_LEN + hdr.payload_len as usize;
+                    if body_end > n {
+                        continue;
+                    }
+                    let msg = match prdt_protocol::decode_control(&buf[HEADER_LEN..body_end]) {
+                        Ok(m) => m,
+                        Err(_) => continue,
+                    };
+                    match msg {
+                        ControlMessage::Probe { nonce } => {
+                            let _ = self
+                                .send_control_to(ControlMessage::ProbeAck { nonce }, from)
+                                .await;
+                        }
+                        ControlMessage::ProbeAck { nonce } => {
+                            if pending.contains_key(&nonce) {
+                                self.configure_peer(from).await;
+                                tracing::info!(peer = ?from, "probe winner");
+                                return Ok(from);
+                            }
+                        }
+                        _ => continue,
                     }
                 }
-                _ => continue,
+                _ = retry_ticker.tick(), if sends_done < PROBE_RETRY_COUNT && !pending.is_empty() => {
+                    sends_done += 1;
+                    tracing::trace!(attempt = sends_done, pending = pending.len(), "probe retry");
+                    // Copy to avoid holding borrow across await.
+                    let snapshot: Vec<(_, _)> = pending
+                        .iter()
+                        .map(|(nonce, addr)| (*nonce, *addr))
+                        .collect();
+                    for (nonce, addr) in snapshot {
+                        if let Err(e) = self.send_control_to(ControlMessage::Probe { nonce }, addr).await {
+                            tracing::warn!(?addr, error = ?e, "probe retry send failed");
+                        }
+                    }
+                }
             }
         }
     }
