@@ -691,18 +691,6 @@ fn spawn_worker_tasks(
                     return;
                 }
             };
-            let peer_addr = match outcome.peer_candidates.iter()
-                .find(|c| c.typ == prdt_signaling_proto::CandidateType::Host)
-                .and_then(|c| format!("{}:{}", c.ip, c.port).parse::<std::net::SocketAddr>().ok())
-            {
-                Some(a) => a,
-                None => {
-                    tracing::error!("no host candidate in peer_candidates");
-                    return;
-                }
-            };
-            tracing::info!(%peer_addr, session_id = %outcome.session_id, %host_id, "signaling_rendezvous_completed");
-
             let pk_b64 = match outcome.peer_pubkey_b64.as_deref() {
                 Some(s) => s,
                 None => {
@@ -739,12 +727,39 @@ fn spawn_worker_tasks(
                 }
             }
 
-            (peer_addr, pk)
+            let cand_addrs: Vec<std::net::SocketAddr> = outcome
+                .peer_candidates
+                .iter()
+                .filter_map(|c| format!("{}:{}", c.ip, c.port).parse().ok())
+                .collect();
+            tracing::info!(
+                session_id = %outcome.session_id,
+                %host_id,
+                candidate_count = cand_addrs.len(),
+                "signaling_rendezvous_completed"
+            );
+            let probed = match transport
+                .probe_and_commit_peer(&cand_addrs, std::time::Duration::from_secs(10))
+                .await
+            {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::error!(error = %e, "probe_and_commit_peer failed");
+                    return;
+                }
+            };
+            tracing::info!(peer = %probed, "probe selected winner");
+
+            (probed, pk)
         } else {
             (direct_host.expect("args validated"), direct_pubkey.expect("args validated"))
         };
 
-        transport.configure_peer(host_addr).await;
+        // In direct mode we still need an explicit configure_peer; in
+        // signaling mode probe_and_commit_peer already committed.
+        if signaling_url.is_none() {
+            transport.configure_peer(host_addr).await;
+        }
         info!(%host_addr, local = ?transport.local_addr().ok(), "viewer transport ready");
 
         // Noise client handshake first (establishes encrypted channel).
