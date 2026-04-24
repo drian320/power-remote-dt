@@ -1,0 +1,16 @@
+[package]
+name = "prdt-nat-traversal"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["net", "time", "rt"] }
+stun_codec = { workspace = true }
+bytecodec = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread", "net", "time", "io-util"] }
