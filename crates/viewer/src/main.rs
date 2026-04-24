@@ -124,34 +124,18 @@ struct Args {
     bind: SocketAddr,
 }
 
-/// Discover the local IP the OS would route outbound traffic over toward the
-/// signaling server. Opens a temp UDP socket, `connect`s it (no packets sent)
-/// to force the kernel to pick the outbound interface, then reads `local_addr`.
-///
-/// This avoids hard-coding `127.0.0.1` or relying on a user-supplied `--bind`
-/// for cross-LAN viewer deployments where the viewer has no reason to know
-/// its own LAN IP ahead of time.
-async fn discover_outbound_ip(signaling_url: &url::Url) -> std::io::Result<std::net::IpAddr> {
-    let host = signaling_url
-        .host_str()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing host"))?;
-    let port = signaling_url.port().unwrap_or(80);
-    let resolved = tokio::net::lookup_host(format!("{host}:{port}"))
-        .await?
-        .next()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "no addr"))?;
-    let probe = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
-    probe.connect(resolved).await?;
-    Ok(probe.local_addr()?.ip())
-}
-
 /// Normalize a user-supplied host_id for signaling: 9-digit numeric inputs
 /// get the standard `XXX-XXX-XXX` dashed form; all other inputs are returned
 /// verbatim.
 fn normalize_host_id_input(input: &str) -> String {
     let stripped: String = input.chars().filter(|c| *c != '-').collect();
     if stripped.len() == 9 && stripped.chars().all(|c| c.is_ascii_digit()) {
-        format!("{}-{}-{}", &stripped[0..3], &stripped[3..6], &stripped[6..9])
+        format!(
+            "{}-{}-{}",
+            &stripped[0..3],
+            &stripped[3..6],
+            &stripped[6..9]
+        )
     } else {
         input.to_string()
     }
@@ -572,7 +556,7 @@ fn main() -> Result<()> {
                 )
             })?)
         }
-        (None, _, None) => None, // signaling mode will resolve below
+        (None, _, None) => None,       // signaling mode will resolve below
         (None, None, Some(_)) => None, // no pubkey source; validated below
     };
 
@@ -717,7 +701,7 @@ fn spawn_worker_tasks(
         // interface addr we want to advertise as the Host candidate.
         if bind_addr.ip().is_unspecified() {
             if let Some(url) = signaling_url.as_ref() {
-                match discover_outbound_ip(url).await {
+                match prdt_signaling_client::discover_outbound_ip(url).await {
                     Ok(ip) => {
                         bind_addr.set_ip(ip);
                         tracing::info!(%bind_addr, "auto-detected LAN bind IP via signaling URL");

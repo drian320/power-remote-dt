@@ -155,15 +155,43 @@ async fn main() -> Result<()> {
         session_id: 0, // client picks
         ..Default::default()
     };
+
+    // If --bind's IP is wildcard (0.0.0.0 or ::) and we're in signaling mode,
+    // auto-detect the outbound interface the kernel would use to reach the
+    // signaling server. This avoids the operator having to hand the host its
+    // LAN IP explicitly. Direct mode has no URL to probe, so we keep the
+    // user-supplied wildcard (the transport binds to all interfaces, which
+    // is fine for server-side listen, but the Host candidate we emit won't
+    // be used in direct mode anyway).
+    let effective_bind = if args.bind.ip().is_unspecified() {
+        if let Some(url) = args.signaling_url.as_ref() {
+            match prdt_signaling_client::discover_outbound_ip(url).await {
+                Ok(ip) => {
+                    let new_bind = SocketAddr::new(ip, args.bind.port());
+                    info!(orig = %args.bind, new = %new_bind, "host auto-detected LAN bind IP via signaling URL");
+                    new_bind
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "outbound IP discovery failed; keeping wildcard bind (Host candidate may be unroutable)");
+                    args.bind
+                }
+            }
+        } else {
+            args.bind
+        }
+    } else {
+        args.bind
+    };
+
     let transport = Arc::new(if let Some(url) = args.turn_url.clone() {
         let turn_cfg = prdt_nat_traversal::TurnConfig::from_url(&url)
             .await
             .context("parse turn URL")?;
-        CustomUdpTransport::bind_with_relay(args.bind, cfg, turn_cfg)
+        CustomUdpTransport::bind_with_relay(effective_bind, cfg, turn_cfg)
             .await
             .context("UDP bind with TURN relay")?
     } else {
-        CustomUdpTransport::bind(args.bind, cfg)
+        CustomUdpTransport::bind(effective_bind, cfg)
             .await
             .context("UDP bind")?
     });
@@ -186,7 +214,8 @@ async fn main() -> Result<()> {
                 timeout: Duration::from_secs(args.signaling_timeout),
                 stun_url: args.stun_url.clone(),
                 turn_url: args.turn_url.clone(),
-                aggregation_window: prdt_signaling_client::RendezvousConfig::DEFAULT_AGGREGATION_WINDOW,
+                aggregation_window:
+                    prdt_signaling_client::RendezvousConfig::DEFAULT_AGGREGATION_WINDOW,
             },
             prdt_signaling_client::HostIdentity {
                 pubkey_b64: keypair.public.to_base64(),

@@ -21,4 +21,5 @@ pub use packetize::{packetize, MAX_SOURCE_CHUNKS};
 pub use transport_trait::{ReceivedMessage, Transport};
 pub use udp::{
     now_monotonic_us, CustomUdpTransport, UdpTransportConfig, DEFAULT_HANDSHAKE_TIMEOUT,
+    PROBE_RETRY_COUNT, PROBE_RETRY_INTERVAL,
 };
