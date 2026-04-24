@@ -44,7 +44,7 @@ async fn bad_candidate_parse_error() {
     let url: Url = format!("ws://{addr}/signal").parse().unwrap();
     let local: SocketAddr = "127.0.0.1:50100".parse().unwrap();
     let err = rendezvous_as_viewer(
-        RendezvousConfig { url, host_id: "h1".into(), timeout: Duration::from_secs(2) },
+        RendezvousConfig { url, host_id: "h1".into(), timeout: Duration::from_secs(2), stun_url: None },
         local,
     ).await.unwrap_err();
     match err {

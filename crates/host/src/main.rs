@@ -71,6 +71,12 @@ struct Args {
     /// Rendezvous overall timeout in seconds.
     #[arg(long, default_value_t = 10)]
     signaling_timeout: u64,
+
+    /// STUN server URL (e.g. stun://stun.l.google.com:19302). Optional.
+    /// When set together with --signaling-url, the host learns its public
+    /// addr and sends it alongside the LAN Host candidate.
+    #[arg(long)]
+    stun_url: Option<url::Url>,
 }
 
 #[tokio::main]
@@ -156,6 +162,7 @@ async fn main() -> Result<()> {
                 url: signaling_url,
                 host_id: host_id.clone(),
                 timeout: Duration::from_secs(args.signaling_timeout),
+                stun_url: args.stun_url.clone(),
             },
             prdt_signaling_client::HostIdentity {
                 pubkey_b64: keypair.public.to_base64(),

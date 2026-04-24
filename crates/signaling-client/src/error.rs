@@ -14,4 +14,6 @@ pub enum SignalingError {
     BadCandidate(String),
     #[error("unexpected message: {0}")]
     Protocol(String),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
 }

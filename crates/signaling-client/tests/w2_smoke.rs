@@ -1,0 +1,197 @@
+//! W2 end-to-end: mock STUN + in-process signaling-server + both rendezvous
+//! functions with stun_url set + Noise handshake + Hello/HelloAck.
+//! Asserts both peers see Host in peer_candidates (Srflx is observational due
+//! to the commit-on-first-Host race) and still establish a working encrypted
+//! channel (peer_addr still = Host candidate in W2).
+
+use bytecodec::{DecodeExt, EncodeExt};
+use prdt_crypto::KeyPair;
+use prdt_protocol::{frame::Codec, MonitorRect};
+use prdt_signaling_client::{rendezvous_as_host, rendezvous_as_viewer, HostIdentity, RendezvousConfig};
+use prdt_signaling_proto::CandidateType;
+use prdt_signaling_server::{router, ServerConfig, ServerState};
+use prdt_transport::{
+    host_handshake, viewer_handshake, CustomUdpTransport, HelloRequest, UdpTransportConfig,
+    DEFAULT_HANDSHAKE_TIMEOUT,
+};
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+use stun_codec::rfc5389::attributes::XorMappedAddress;
+use stun_codec::rfc5389::methods::BINDING;
+use stun_codec::{
+    define_attribute_enums, Message, MessageClass, MessageDecoder, MessageEncoder,
+};
+use tokio::net::UdpSocket;
+use url::Url;
+
+define_attribute_enums!(
+    Attribute,
+    AttributeDecoder,
+    AttributeEncoder,
+    [XorMappedAddress]
+);
+
+async fn spawn_stun_mock(report_addr: SocketAddr) -> SocketAddr {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = socket.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 512];
+        loop {
+            let Ok((n, src)) = socket.recv_from(&mut buf).await else { break };
+            let mut dec = MessageDecoder::<Attribute>::new();
+            let Ok(Ok(req)) = dec.decode_from_bytes(&buf[..n]) else { continue };
+            if req.class() != MessageClass::Request || req.method() != BINDING {
+                continue;
+            }
+            let mut resp = Message::new(MessageClass::SuccessResponse, BINDING, req.transaction_id());
+            resp.add_attribute(Attribute::from(XorMappedAddress::new(report_addr)));
+            let mut enc = MessageEncoder::<Attribute>::new();
+            let bytes = enc.encode_into_bytes(resp).unwrap();
+            let _ = socket.send_to(&bytes, src).await;
+        }
+    });
+    addr
+}
+
+async fn spawn_signaling() -> Url {
+    let state = Arc::new(ServerState::new());
+    let app = router(state, ServerConfig::default());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    format!("ws://{addr}/signal").parse().unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn w2_smoke_stun_plus_signaling_plus_noise() {
+    let signaling_url = spawn_signaling().await;
+
+    let fake_host_public: SocketAddr = "198.51.100.10:10000".parse().unwrap();
+    let fake_viewer_public: SocketAddr = "198.51.100.20:20000".parse().unwrap();
+    let host_stun = spawn_stun_mock(fake_host_public).await;
+    let viewer_stun = spawn_stun_mock(fake_viewer_public).await;
+
+    let host_kp = KeyPair::generate();
+    let host_pub_b64 = host_kp.public.to_base64();
+    let host_pub_copy = host_kp.public;
+
+    let sig_url_a = signaling_url.clone();
+    let host_stun_url: Url = format!("stun://{host_stun}").parse().unwrap();
+    let host_fut = async move {
+        let transport = Arc::new(
+            CustomUdpTransport::bind(
+                "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+                UdpTransportConfig::default(),
+            )
+            .await
+            .unwrap(),
+        );
+        let local = transport.local_addr().unwrap();
+        let outcome = rendezvous_as_host(
+            RendezvousConfig {
+                url: sig_url_a,
+                host_id: "w2-smoke".into(),
+                timeout: Duration::from_secs(5),
+                stun_url: Some(host_stun_url),
+            },
+            HostIdentity { pubkey_b64: host_pub_b64 },
+            local,
+        )
+        .await
+        .expect("host rendezvous");
+
+        // W2 race-free assertion: Host is guaranteed; Srflx may or may not have
+        // arrived before we committed on the first Host. Logging for observation.
+        let has_host = outcome.peer_candidates.iter().any(|c| c.typ == CandidateType::Host);
+        let has_srflx = outcome.peer_candidates.iter().any(|c| c.typ == CandidateType::Srflx);
+        assert!(
+            has_host,
+            "host missing peer Host; got {:?}",
+            outcome.peer_candidates
+        );
+        eprintln!("w2_smoke host_side: peer Srflx observed = {has_srflx}");
+
+        transport.configure_peer(outcome.peer_addr).await;
+        transport
+            .handshake_as_server(&host_kp)
+            .await
+            .expect("host Noise");
+        let _req = host_handshake(
+            &*transport,
+            0xDEAD_BEEF,
+            0,
+            10_000_000,
+            MonitorRect::new(0, 0, 1920, 1080),
+            MonitorRect::new(0, 0, 1920, 1080),
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("host Hello");
+    };
+
+    let sig_url_b = signaling_url.clone();
+    let viewer_stun_url: Url = format!("stun://{viewer_stun}").parse().unwrap();
+    let viewer_fut = async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let transport = Arc::new(
+            CustomUdpTransport::bind(
+                "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+                UdpTransportConfig::default(),
+            )
+            .await
+            .unwrap(),
+        );
+        let local = transport.local_addr().unwrap();
+        let outcome = rendezvous_as_viewer(
+            RendezvousConfig {
+                url: sig_url_b,
+                host_id: "w2-smoke".into(),
+                timeout: Duration::from_secs(5),
+                stun_url: Some(viewer_stun_url),
+            },
+            local,
+        )
+        .await
+        .expect("viewer rendezvous");
+        assert!(outcome.peer_pubkey_b64.is_some());
+
+        // W2 race-free assertion: Host is guaranteed; Srflx may or may not have
+        // arrived before we committed on the first Host. Logging for observation.
+        let has_host = outcome.peer_candidates.iter().any(|c| c.typ == CandidateType::Host);
+        let has_srflx = outcome.peer_candidates.iter().any(|c| c.typ == CandidateType::Srflx);
+        assert!(
+            has_host,
+            "viewer missing peer Host; got {:?}",
+            outcome.peer_candidates
+        );
+        eprintln!("w2_smoke viewer_side: peer Srflx observed = {has_srflx}");
+
+        transport.configure_peer(outcome.peer_addr).await;
+        transport
+            .handshake_as_client(&host_pub_copy, DEFAULT_HANDSHAKE_TIMEOUT)
+            .await
+            .expect("viewer Noise");
+        let ack = viewer_handshake(
+            &*transport,
+            &HelloRequest {
+                req_width: 1920,
+                req_height: 1080,
+                req_fps: 60,
+                codec: Codec::H265,
+            },
+            Duration::from_millis(500),
+            5,
+        )
+        .await
+        .expect("viewer Hello");
+        assert_eq!(ack.session_id, 0xDEAD_BEEF);
+    };
+
+    tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::join!(host_fut, viewer_fut)
+    })
+    .await
+    .expect("W2 smoke must complete within 15s");
+}
