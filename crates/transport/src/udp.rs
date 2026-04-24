@@ -282,10 +282,15 @@ impl CustomUdpTransport {
         let deadline = tokio::time::Instant::now() + timeout_duration;
         // Start the retry ticker one interval out so its first tick fires at
         // t=PROBE_RETRY_INTERVAL (not immediately, which would double-send).
+        // Skip missed ticks rather than bursting them — under executor
+        // contention we want retries spread across the first
+        // PROBE_RETRY_COUNT*PROBE_RETRY_INTERVAL window, not collapsed into
+        // back-to-back sends.
         let mut retry_ticker = tokio::time::interval_at(
             tokio::time::Instant::now() + PROBE_RETRY_INTERVAL,
             PROBE_RETRY_INTERVAL,
         );
+        retry_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut sends_done: u32 = 1;
         let mut buf = vec![0u8; 4096];
 
