@@ -183,3 +183,27 @@ async fn send_indication_echoed_as_data_indication() {
     assert_eq!(decoded.peer, peer);
     assert_eq!(decoded.data, b"hello-turn");
 }
+
+use prdt_nat_traversal::TurnRelaySocket;
+
+#[tokio::test]
+async fn turn_relay_socket_send_recv_roundtrip() {
+    let (server_addr, _) = spawn_mock_turn("u", "p").await;
+    let cfg = TurnConfig {
+        server_addr,
+        username: "u".into(),
+        password: "p".into(),
+        requested_lifetime: Duration::from_secs(600),
+    };
+    let socket = std::sync::Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let relay = TurnRelaySocket::allocate_with_socket(socket, cfg)
+        .await.expect("allocate");
+    let peer: SocketAddr = "198.51.100.99:44000".parse().unwrap();
+    relay.ensure_permission(peer).await.expect("perm");
+
+    relay.send_to(b"ping", peer).await.expect("send_to");
+    let mut buf = vec![0u8; 1500];
+    let (n, from_peer) = relay.recv_from(&mut buf).await.expect("recv_from");
+    assert_eq!(&buf[..n], b"ping");
+    assert_eq!(from_peer, peer);
+}
