@@ -26,6 +26,8 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 dashmap = { workspace = true }
 clap = { workspace = true }
+rusqlite = { workspace = true }
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 [dev-dependencies]
 tokio-tungstenite = { workspace = true }
