@@ -99,7 +99,7 @@ pub async fn rendezvous_as_host(
     }).await?;
 
     let _ = ws.close(None).await;
-    Ok(RendezvousOutcome { session_id, peer_addr: peer, peer_pubkey_b64: None })
+    Ok(RendezvousOutcome { session_id, peer_addr: peer, peer_pubkey_b64: None, peer_candidates: vec![] })
 }
 
 #[instrument(skip(cfg), fields(host_id = %cfg.host_id))]
@@ -142,5 +142,5 @@ pub async fn rendezvous_as_viewer(
     }).await?;
 
     let _ = ws.close(None).await;
-    Ok(RendezvousOutcome { session_id, peer_addr: peer, peer_pubkey_b64 })
+    Ok(RendezvousOutcome { session_id, peer_addr: peer, peer_pubkey_b64, peer_candidates: vec![] })
 }

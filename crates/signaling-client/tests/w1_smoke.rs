@@ -45,7 +45,7 @@ async fn w1_smoke_signaling_noise_hello_ack_completes() {
         let local = transport.local_addr().expect("host local_addr");
 
         let outcome = rendezvous_as_host(
-            RendezvousConfig { url: host_url, host_id: "w1-smoke".into(), timeout: Duration::from_secs(5) },
+            RendezvousConfig { url: host_url, host_id: "w1-smoke".into(), timeout: Duration::from_secs(5), stun_url: None },
             HostIdentity { pubkey_b64: host_pub_b64 },
             local,
         )
@@ -86,7 +86,7 @@ async fn w1_smoke_signaling_noise_hello_ack_completes() {
         let local = transport.local_addr().expect("viewer local_addr");
 
         let outcome = rendezvous_as_viewer(
-            RendezvousConfig { url: viewer_url, host_id: "w1-smoke".into(), timeout: Duration::from_secs(5) },
+            RendezvousConfig { url: viewer_url, host_id: "w1-smoke".into(), timeout: Duration::from_secs(5), stun_url: None },
             local,
         )
         .await

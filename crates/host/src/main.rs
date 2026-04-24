@@ -156,6 +156,7 @@ async fn main() -> Result<()> {
                 url: signaling_url,
                 host_id: host_id.clone(),
                 timeout: Duration::from_secs(args.signaling_timeout),
+                stun_url: None,
             },
             prdt_signaling_client::HostIdentity {
                 pubkey_b64: keypair.public.to_base64(),

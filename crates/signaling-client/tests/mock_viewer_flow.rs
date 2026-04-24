@@ -50,7 +50,7 @@ async fn viewer_rendezvous_gets_host_addr_and_pubkey() {
     let url: Url = format!("ws://{addr}/signal").parse().unwrap();
     let local_udp: SocketAddr = "127.0.0.1:40011".parse().unwrap();
     let outcome = rendezvous_as_viewer(
-        RendezvousConfig { url, host_id: "h1".into(), timeout: Duration::from_secs(5) },
+        RendezvousConfig { url, host_id: "h1".into(), timeout: Duration::from_secs(5), stun_url: None },
         local_udp,
     ).await.unwrap();
     host_task.await.unwrap();

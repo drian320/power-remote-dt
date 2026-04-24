@@ -672,6 +672,7 @@ fn spawn_worker_tasks(
                     url,
                     host_id: host_id.clone(),
                     timeout: std::time::Duration::from_secs(signaling_timeout_s),
+                    stun_url: None,
                 },
                 local_udp,
             ).await {
