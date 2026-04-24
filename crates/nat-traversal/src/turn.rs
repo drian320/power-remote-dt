@@ -13,9 +13,9 @@ use stun_codec::rfc5389::attributes::{
     ErrorCode, MessageIntegrity, Nonce, Realm, Username,
 };
 use stun_codec::rfc5766::attributes::{
-    Lifetime, RequestedTransport, XorPeerAddress, XorRelayAddress,
+    Data, Lifetime, RequestedTransport, XorPeerAddress, XorRelayAddress,
 };
-use stun_codec::rfc5766::methods::{ALLOCATE, CREATE_PERMISSION};
+use stun_codec::rfc5766::methods::{ALLOCATE, CREATE_PERMISSION, DATA, SEND};
 use stun_codec::{
     define_attribute_enums, Message, MessageClass, MessageDecoder, MessageEncoder, TransactionId,
 };
@@ -40,7 +40,8 @@ define_attribute_enums!(
         Lifetime,
         RequestedTransport,
         XorRelayAddress,
-        XorPeerAddress
+        XorPeerAddress,
+        Data
     ]
 );
 
@@ -303,6 +304,55 @@ impl TurnClient {
         }
         Ok(())
     }
+
+    /// Wrap `data` in a Send Indication addressed to `peer` and send it to the
+    /// TURN server. Send Indications are NOT authenticated per RFC 5766 §10.
+    pub async fn send_indication(
+        &self,
+        peer: SocketAddr,
+        data: &[u8],
+    ) -> Result<(), TurnError> {
+        let txn = random_transaction_id();
+        let mut msg = Message::<TurnAttribute>::new(MessageClass::Indication, SEND, txn);
+        msg.add_attribute(TurnAttribute::from(XorPeerAddress::new(peer)));
+        msg.add_attribute(TurnAttribute::from(
+            Data::new(data.to_vec())
+                .map_err(|e| TurnError::Protocol(format!("data too large: {e:?}")))?,
+        ));
+        let bytes = encode(&msg)?;
+        self.socket.send_to(&bytes, self.config.server_addr).await?;
+        Ok(())
+    }
+}
+
+/// One decoded Data Indication: opaque payload + the peer addr it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataIndication {
+    pub peer: SocketAddr,
+    pub data: Vec<u8>,
+}
+
+/// If `bytes` is a TURN Data Indication, return Some(DataIndication). Otherwise
+/// (not a STUN message at all, or another type), return Ok(None).
+pub fn try_decode_data_indication(bytes: &[u8]) -> Result<Option<DataIndication>, TurnError> {
+    let mut d = MessageDecoder::<TurnAttribute>::new();
+    let msg = match d.decode_from_bytes(bytes) {
+        Ok(Ok(m)) => m,
+        _ => return Ok(None),
+    };
+    if msg.class() != MessageClass::Indication || msg.method() != DATA {
+        return Ok(None);
+    }
+    let peer = msg
+        .get_attribute::<XorPeerAddress>()
+        .ok_or_else(|| TurnError::Protocol("DataIndication without XOR-PEER-ADDRESS".into()))?
+        .address();
+    let data = msg
+        .get_attribute::<Data>()
+        .ok_or_else(|| TurnError::Protocol("DataIndication without DATA".into()))?
+        .data()
+        .to_vec();
+    Ok(Some(DataIndication { peer, data }))
 }
 
 pub(crate) fn random_transaction_id() -> TransactionId {

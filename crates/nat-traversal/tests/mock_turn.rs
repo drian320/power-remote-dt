@@ -5,8 +5,8 @@ use prdt_nat_traversal::turn::{TurnAttribute, TurnClient, TurnConfig};
 use std::net::SocketAddr;
 use std::time::Duration;
 use stun_codec::rfc5389::attributes::{ErrorCode, MessageIntegrity, Nonce, Realm, Username};
-use stun_codec::rfc5766::attributes::{Lifetime, XorRelayAddress};
-use stun_codec::rfc5766::methods::ALLOCATE;
+use stun_codec::rfc5766::attributes::{Data, Lifetime, XorPeerAddress, XorRelayAddress};
+use stun_codec::rfc5766::methods::{ALLOCATE, DATA, SEND};
 use stun_codec::{Message, MessageClass, MessageDecoder, MessageEncoder};
 use tokio::net::UdpSocket;
 
@@ -31,6 +31,28 @@ async fn spawn_mock_turn(
                 Ok(Ok(m)) => m,
                 _ => continue,
             };
+            if req.class() == MessageClass::Indication && req.method() == SEND {
+                let Some(peer) = req.get_attribute::<XorPeerAddress>().map(|a| a.address())
+                else {
+                    continue;
+                };
+                let Some(payload) =
+                    req.get_attribute::<Data>().map(|d| d.data().to_vec())
+                else {
+                    continue;
+                };
+                let mut resp = Message::<TurnAttribute>::new(
+                    MessageClass::Indication,
+                    DATA,
+                    req.transaction_id(),
+                );
+                resp.add_attribute(TurnAttribute::from(XorPeerAddress::new(peer)));
+                resp.add_attribute(TurnAttribute::from(Data::new(payload).unwrap()));
+                let mut enc = MessageEncoder::<TurnAttribute>::new();
+                let bytes = enc.encode_into_bytes(resp).unwrap();
+                let _ = socket.send_to(&bytes, src).await;
+                continue;
+            }
             if req.class() != MessageClass::Request {
                 continue;
             }
@@ -133,4 +155,31 @@ async fn create_permission_after_allocate() {
         .create_permission(peer, Duration::from_secs(3))
         .await
         .expect("permission ok");
+}
+
+#[tokio::test]
+async fn send_indication_echoed_as_data_indication() {
+    let (server_addr, _) = spawn_mock_turn("u", "p").await;
+    let cfg = TurnConfig {
+        server_addr,
+        username: "u".into(),
+        password: "p".into(),
+        requested_lifetime: Duration::from_secs(600),
+    };
+    let socket = std::sync::Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let mut client = TurnClient::new(socket.clone(), cfg);
+    client.allocate(Duration::from_secs(3)).await.unwrap();
+
+    let peer: SocketAddr = "198.51.100.77:33000".parse().unwrap();
+    client.send_indication(peer, b"hello-turn").await.expect("send_indication");
+
+    // Read raw bytes from our socket; should be a Data Indication.
+    let mut buf = vec![0u8; 1500];
+    let (n, from) = socket.recv_from(&mut buf).await.unwrap();
+    assert_eq!(from, server_addr);
+    let decoded = prdt_nat_traversal::turn::try_decode_data_indication(&buf[..n])
+        .expect("decode ok")
+        .expect("is data indication");
+    assert_eq!(decoded.peer, peer);
+    assert_eq!(decoded.data, b"hello-turn");
 }
