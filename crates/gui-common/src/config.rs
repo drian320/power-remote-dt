@@ -87,6 +87,7 @@ pub struct HostEntry {
     pub last_connected: String,
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for Config {
     fn default() -> Self {
         Self {

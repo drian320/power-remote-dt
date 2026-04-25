@@ -1,10 +1,11 @@
-//! Host GUI state machine. Task 4 ships the Idle (key-loaded) screen.
-//! Task 5 adds the Listening state + Settings modal.
+//! Host GUI state machine. Stage transitions: NeedsKey → Idle → Listening.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use prdt_gui_common::{generate_qr, Config};
+use prdt_gui_common::{generate_qr, Config, TailHandle};
+use tokio::runtime::Handle;
+use tokio_util::sync::CancellationToken;
 
 use crate::keygen;
 
@@ -12,6 +13,7 @@ use crate::keygen;
 pub enum Stage {
     NeedsKey,
     Idle,
+    Listening,
 }
 
 pub struct HostApp {
@@ -21,10 +23,22 @@ pub struct HostApp {
     pubkey_b64: String,
     qr_handle: Option<egui::TextureHandle>,
     error: Option<String>,
+    tail: TailHandle,
+    rt_handle: Handle,
+    cancel: Option<CancellationToken>,
+    join: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
+    run_host: crate::RunHostFn,
+    settings_open: bool,
 }
 
 impl HostApp {
-    pub fn new(config: Arc<Mutex<Config>>, config_path: PathBuf) -> Self {
+    pub fn new(
+        config: Arc<Mutex<Config>>,
+        config_path: PathBuf,
+        tail: TailHandle,
+        rt_handle: Handle,
+        run_host: crate::RunHostFn,
+    ) -> Self {
         let key_path = config.lock().unwrap().host.key_file.clone();
         let mut app = Self {
             config,
@@ -37,6 +51,12 @@ impl HostApp {
             pubkey_b64: String::new(),
             qr_handle: None,
             error: None,
+            tail,
+            rt_handle,
+            cancel: None,
+            join: None,
+            run_host,
+            settings_open: false,
         };
         if app.stage == Stage::Idle {
             app.try_load_key(&key_path);
@@ -67,15 +87,54 @@ impl HostApp {
             Err(e) => self.error = Some(format!("qr generation failed: {e}")),
         }
     }
+
+    fn start_listening(&mut self) {
+        let cancel = CancellationToken::new();
+        // Spawn the host main loop via the injected closure. The closure
+        // is responsible for capturing the current Args, spawning a
+        // tokio task that calls run_host(args, None, cancel), and
+        // returning the JoinHandle.
+        let _enter = self.rt_handle.enter();
+        let join = (self.run_host)(cancel.clone());
+        self.cancel = Some(cancel);
+        self.join = Some(join);
+        self.stage = Stage::Listening;
+    }
+
+    fn stop_listening(&mut self) {
+        if let Some(c) = self.cancel.take() {
+            c.cancel();
+        }
+        // Don't block on join here — let it drop / clean up async.
+        self.join = None;
+        self.stage = Stage::Idle;
+    }
 }
 
 impl eframe::App for HostApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Re-paint at 4 Hz so log tail flows even without input events.
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+
+        if self.settings_open {
+            crate::settings::render(
+                ctx,
+                &self.config,
+                &self.config_path,
+                &mut self.settings_open,
+                &mut self.error,
+            );
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| match self.stage {
             Stage::NeedsKey => self.show_needs_key(ui),
             Stage::Idle => {
                 self.ensure_qr_texture(ctx);
                 self.show_idle(ui);
+            }
+            Stage::Listening => {
+                self.ensure_qr_texture(ctx);
+                self.show_listening(ui);
             }
         });
     }
@@ -101,6 +160,49 @@ impl HostApp {
     fn show_idle(&mut self, ui: &mut egui::Ui) {
         ui.heading("Status: Idle");
         ui.add_space(8.0);
+        self.draw_pubkey_with_qr(ui);
+        ui.add_space(16.0);
+        ui.horizontal(|ui| {
+            if ui.button("Start listening").clicked() {
+                self.start_listening();
+            }
+            if ui.button("Settings…").clicked() {
+                self.settings_open = true;
+            }
+        });
+        if let Some(err) = &self.error {
+            ui.colored_label(egui::Color32::RED, err);
+        }
+    }
+
+    fn show_listening(&mut self, ui: &mut egui::Ui) {
+        let bind = self.config.lock().unwrap().host.bind.clone();
+        ui.heading(format!("Status: ● Listening on {bind}"));
+        ui.add_space(8.0);
+        self.draw_pubkey_with_qr(ui);
+        ui.add_space(12.0);
+        ui.label("Recent activity:");
+        let lines = self.tail.snapshot();
+        egui::ScrollArea::vertical()
+            .max_height(160.0)
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                for l in &lines {
+                    ui.label(l);
+                }
+            });
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.button("Stop").clicked() {
+                self.stop_listening();
+            }
+            if ui.button("Settings…").clicked() {
+                self.settings_open = true;
+            }
+        });
+    }
+
+    fn draw_pubkey_with_qr(&mut self, ui: &mut egui::Ui) {
         ui.label("Public key:");
         ui.horizontal(|ui| {
             ui.code(&self.pubkey_b64);
@@ -108,15 +210,9 @@ impl HostApp {
                 ui.output_mut(|o| o.copied_text = self.pubkey_b64.clone());
             }
         });
-        ui.add_space(12.0);
         if let Some(qr) = &self.qr_handle {
+            ui.add_space(8.0);
             ui.image(egui::load::SizedTexture::new(qr.id(), qr.size_vec2()));
         }
-        ui.add_space(16.0);
-        ui.label("[ Start listening ] (added in Task 5)");
-        if let Some(err) = &self.error {
-            ui.colored_label(egui::Color32::RED, err);
-        }
-        let _ = &self.config_path; // used by Task 5 settings modal
     }
 }

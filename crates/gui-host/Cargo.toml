@@ -14,8 +14,10 @@ egui = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 anyhow = "1"
+rfd = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
