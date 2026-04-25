@@ -10,8 +10,8 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::Parser;
 use prdt_latency_bench::{
-    aggregate, config_id, expand_matrix, full_pipeline, write_per_frame_csv,
-    write_summary_csv, ConfigStats, ConsumerBackend, MatrixAxes,
+    aggregate, config_id, expand_matrix, full_pipeline, write_per_frame_csv, write_summary_csv,
+    ConfigStats, ConsumerBackend, MatrixAxes,
 };
 use tracing::{info, warn};
 
@@ -56,7 +56,9 @@ fn parse_decoders(strs: &[String]) -> anyhow::Result<Vec<ConsumerBackend>> {
         .map(|s| match s.as_str() {
             "mf" => Ok(ConsumerBackend::Mf),
             "nvdec" => Ok(ConsumerBackend::Nvdec),
-            other => Err(anyhow::anyhow!("unknown decoder {other:?} (options: mf, nvdec)")),
+            other => Err(anyhow::anyhow!(
+                "unknown decoder {other:?} (options: mf, nvdec)"
+            )),
         })
         .collect()
 }

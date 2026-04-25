@@ -97,7 +97,11 @@ pub async fn run(cfg: FullPipelineConfig) -> anyhow::Result<()> {
     let stats = run_for_matrix(&cfg).await?;
 
     if stats.frames.is_empty() {
-        info!(sent = stats.sent, decoded = stats.received, "bench done but decoded 0 frames");
+        info!(
+            sent = stats.sent,
+            decoded = stats.received,
+            "bench done but decoded 0 frames"
+        );
         return Ok(());
     }
 
@@ -150,7 +154,10 @@ pub async fn run(cfg: FullPipelineConfig) -> anyhow::Result<()> {
     if let Some(path) = csv_path {
         use std::io::Write;
         let mut wtr = std::fs::File::create(&path)?;
-        writeln!(wtr, "seq,capture_us,encode_done_us,recv_us,decode_done_us,e2e_us")?;
+        writeln!(
+            wtr,
+            "seq,capture_us,encode_done_us,recv_us,decode_done_us,e2e_us"
+        )?;
         for s in &stats.frames {
             let e = s.decode_done_us.saturating_sub(s.capture_us);
             writeln!(
@@ -188,8 +195,8 @@ pub async fn run_for_matrix(cfg: &FullPipelineConfig) -> anyhow::Result<RunStats
         bitrate_bps: cfg.bitrate_bps,
         gop_length: cfg.fps * 2,
     };
-    let encoder = NvencEncoder::new(&dev, &enc_cfg)
-        .map_err(|e| anyhow::anyhow!("NvencEncoder::new: {e}"))?;
+    let encoder =
+        NvencEncoder::new(&dev, &enc_cfg).map_err(|e| anyhow::anyhow!("NvencEncoder::new: {e}"))?;
     info!(
         resolution = format!("{}x{}", cfg.width, cfg.height),
         fps = cfg.fps,

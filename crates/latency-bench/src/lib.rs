@@ -152,8 +152,7 @@ mod matrix {
         let (d50, _, d95, d99, _) = percentiles(&mut decode);
         let (e50, _, e95, e99, _) = percentiles(&mut e2e);
         let loss_ppm = if run.sent > 0 {
-            ((run.sent.saturating_sub(run.received)) as f64 / run.sent as f64
-                * 1_000_000.0) as u64
+            ((run.sent.saturating_sub(run.received)) as f64 / run.sent as f64 * 1_000_000.0) as u64
         } else {
             0
         };
@@ -196,8 +195,14 @@ mod matrix {
             writeln!(
                 wtr,
                 "{},{},{},{},{},{},{},{}",
-                s.seq, s.capture_us, s.encode_done_us, s.recv_us, s.decode_done_us,
-                arrival, decode, e2e
+                s.seq,
+                s.capture_us,
+                s.encode_done_us,
+                s.recv_us,
+                s.decode_done_us,
+                arrival,
+                decode,
+                e2e
             )?;
         }
         Ok(())
@@ -222,12 +227,23 @@ mod matrix {
                 wtr,
                 "{},{}x{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
                 s.config_id,
-                s.resolution.0, s.resolution.1,
-                s.bitrate_mbps, dec, s.fps,
-                s.sent, s.received, s.loss_ppm,
-                s.arrival_p50_us, s.arrival_p95_us, s.arrival_p99_us,
-                s.decode_p50_us, s.decode_p95_us, s.decode_p99_us,
-                s.e2e_p50_us, s.e2e_p95_us, s.e2e_p99_us
+                s.resolution.0,
+                s.resolution.1,
+                s.bitrate_mbps,
+                dec,
+                s.fps,
+                s.sent,
+                s.received,
+                s.loss_ppm,
+                s.arrival_p50_us,
+                s.arrival_p95_us,
+                s.arrival_p99_us,
+                s.decode_p50_us,
+                s.decode_p95_us,
+                s.decode_p99_us,
+                s.e2e_p50_us,
+                s.e2e_p95_us,
+                s.e2e_p99_us
             )?;
         }
         Ok(())
@@ -236,8 +252,8 @@ mod matrix {
 
 #[cfg(windows)]
 pub use matrix::{
-    aggregate, config_id, expand_matrix, write_per_frame_csv, write_summary_csv,
-    ConfigStats, MatrixAxes,
+    aggregate, config_id, expand_matrix, write_per_frame_csv, write_summary_csv, ConfigStats,
+    MatrixAxes,
 };
 
 #[cfg(test)]
@@ -300,12 +316,21 @@ mod tests {
     #[test]
     fn aggregate_empty_run_emits_skip_row() {
         let cfg = FullPipelineConfig {
-            width: 1920, height: 1080, fps: 60,
+            width: 1920,
+            height: 1080,
+            fps: 60,
             duration: std::time::Duration::from_secs(10),
-            bitrate_bps: 30_000_000, drop_ppm: 0, latency_ms: 0,
-            csv: None, consumer: ConsumerBackend::Mf,
+            bitrate_bps: 30_000_000,
+            drop_ppm: 0,
+            latency_ms: 0,
+            csv: None,
+            consumer: ConsumerBackend::Mf,
         };
-        let run = RunStats { sent: 0, received: 0, frames: vec![] };
+        let run = RunStats {
+            sent: 0,
+            received: 0,
+            frames: vec![],
+        };
         let stats = aggregate(&cfg, &run);
         assert_eq!(stats.config_id, "1080p60-30mbps-mf");
         assert_eq!(stats.loss_ppm, 1_000_000);
@@ -317,10 +342,15 @@ mod tests {
     #[test]
     fn aggregate_full_run_computes_percentiles() {
         let cfg = FullPipelineConfig {
-            width: 1920, height: 1080, fps: 60,
+            width: 1920,
+            height: 1080,
+            fps: 60,
             duration: std::time::Duration::from_secs(10),
-            bitrate_bps: 30_000_000, drop_ppm: 0, latency_ms: 0,
-            csv: None, consumer: ConsumerBackend::Mf,
+            bitrate_bps: 30_000_000,
+            drop_ppm: 0,
+            latency_ms: 0,
+            csv: None,
+            consumer: ConsumerBackend::Mf,
         };
         // 100 frames with arrival_lag_us = i, decode_lag_us = 2*i, e2e = 3*i.
         let frames: Vec<StageTimes> = (1..=100u64)
@@ -332,7 +362,11 @@ mod tests {
                 decode_done_us: 3 * i,
             })
             .collect();
-        let run = RunStats { sent: 100, received: 100, frames };
+        let run = RunStats {
+            sent: 100,
+            received: 100,
+            frames,
+        };
         let stats = aggregate(&cfg, &run);
         assert_eq!(stats.sent, 100);
         assert_eq!(stats.received, 100);
@@ -353,14 +387,27 @@ mod tests {
     #[test]
     fn summary_csv_writer_emits_header_and_one_row() {
         let cfg = FullPipelineConfig {
-            width: 1920, height: 1080, fps: 60,
+            width: 1920,
+            height: 1080,
+            fps: 60,
             duration: std::time::Duration::from_secs(10),
-            bitrate_bps: 30_000_000, drop_ppm: 0, latency_ms: 0,
-            csv: None, consumer: ConsumerBackend::Mf,
+            bitrate_bps: 30_000_000,
+            drop_ppm: 0,
+            latency_ms: 0,
+            csv: None,
+            consumer: ConsumerBackend::Mf,
         };
-        let run = RunStats { sent: 600, received: 598, frames: vec![
-            StageTimes { seq: 0, capture_us: 0, encode_done_us: 100, recv_us: 200, decode_done_us: 300 },
-        ]};
+        let run = RunStats {
+            sent: 600,
+            received: 598,
+            frames: vec![StageTimes {
+                seq: 0,
+                capture_us: 0,
+                encode_done_us: 100,
+                recv_us: 200,
+                decode_done_us: 300,
+            }],
+        };
         let s = aggregate(&cfg, &run);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("summary.csv");
@@ -370,18 +417,34 @@ mod tests {
         assert_eq!(lines.len(), 2, "header + 1 row");
         assert!(
             lines[0].starts_with("config_id,resolution,bitrate_mbps,decoder,fps,"),
-            "unexpected header: {}", lines[0]
+            "unexpected header: {}",
+            lines[0]
         );
-        assert!(lines[1].starts_with("1080p60-30mbps-mf,1920x1080,30,mf,60,600,598,"),
-            "unexpected row: {}", lines[1]);
+        assert!(
+            lines[1].starts_with("1080p60-30mbps-mf,1920x1080,30,mf,60,600,598,"),
+            "unexpected row: {}",
+            lines[1]
+        );
     }
 
     #[cfg(windows)]
     #[test]
     fn per_frame_csv_writer_round_trips() {
         let frames = vec![
-            StageTimes { seq: 0, capture_us: 0, encode_done_us: 100, recv_us: 200, decode_done_us: 300 },
-            StageTimes { seq: 1, capture_us: 16_667, encode_done_us: 16_770, recv_us: 16_870, decode_done_us: 16_970 },
+            StageTimes {
+                seq: 0,
+                capture_us: 0,
+                encode_done_us: 100,
+                recv_us: 200,
+                decode_done_us: 300,
+            },
+            StageTimes {
+                seq: 1,
+                capture_us: 16_667,
+                encode_done_us: 16_770,
+                recv_us: 16_870,
+                decode_done_us: 16_970,
+            },
         ];
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("frames.csv");
