@@ -18,6 +18,11 @@ use prdt_media_win::NvdecD3d11Consumer;
 use prdt_media_win::{pick_default_adapter, D3d11Device, MfD3d11Consumer, Nv12Renderer, SwapChain};
 use prdt_protocol::{frame::Codec, ControlMessage, InputEvent, MonitorRect, VideoConsumer};
 
+#[allow(dead_code)] // wired into ViewerApp in Task 3
+mod overlay_ipc;
+#[allow(dead_code)] // wired into ViewerApp in Task 3
+mod overlay_supervisor;
+
 mod latency;
 use latency::LatencyProbe;
 
