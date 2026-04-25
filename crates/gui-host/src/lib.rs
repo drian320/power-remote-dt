@@ -43,6 +43,19 @@ pub fn run_host_gui(config_path: Option<PathBuf>, run_host: RunHostFn) -> anyhow
         .with(tail_layer)
         .try_init();
 
+    // Phase 4 G5: feed the panic hook so crash dumps include recent log lines.
+    prdt_gui_common::register_tail(tail_handle.clone());
+    prdt_gui_common::install_panic_hook(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+
+    // Read any unacknowledged crash reports from previous runs.
+    let pending_crashes = match prdt_gui_common::list_pending_crashes() {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(?e, "failed to list pending crashes");
+            Vec::new()
+        }
+    };
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -77,7 +90,13 @@ pub fn run_host_gui(config_path: Option<PathBuf>, run_host: RunHostFn) -> anyhow
         Box::new(move |cc| {
             install_jp_font(&cc.egui_ctx);
             Ok(Box::new(app::HostApp::new(
-                cfg, path, tail, rt_handle, run_host, tray,
+                cfg,
+                path,
+                tail,
+                rt_handle,
+                run_host,
+                tray,
+                pending_crashes,
             )))
         }),
     )

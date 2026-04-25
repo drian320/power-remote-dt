@@ -38,6 +38,10 @@ pub struct HostApp {
     /// Sticky exit flag set by tray Quit menu. Checked in update().
     quit_requested: bool,
     update_ui: Arc<Mutex<crate::settings::UpdateUi>>,
+    /// Phase 4 G5 — Crash reports from previous runs that the user has not
+    /// yet acknowledged. Populated once at startup; mutated when the user
+    /// clicks "Acknowledge all".
+    pending_crashes: Vec<prdt_gui_common::CrashReport>,
 }
 
 impl HostApp {
@@ -48,6 +52,7 @@ impl HostApp {
         rt_handle: Handle,
         run_host: crate::RunHostFn,
         tray: Option<crate::tray::TrayController>,
+        pending_crashes: Vec<prdt_gui_common::CrashReport>,
     ) -> Self {
         let key_path = config.lock().unwrap().host.key_file.clone();
         let mut app = Self {
@@ -72,6 +77,7 @@ impl HostApp {
             last_tray_state: None,
             quit_requested: false,
             update_ui: Arc::new(Mutex::new(crate::settings::UpdateUi::default())),
+            pending_crashes,
         };
         if app.stage == Stage::Idle {
             app.try_load_key(&key_path);
@@ -174,7 +180,7 @@ impl HostApp {
     }
 }
 
-fn open_in_explorer(path: &std::path::Path) -> std::io::Result<()> {
+pub(crate) fn open_in_explorer(path: &std::path::Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
         std::process::Command::new("explorer")
@@ -236,6 +242,7 @@ impl eframe::App for HostApp {
                 &mut self.error,
                 &self.update_ui,
                 &self.rt_handle,
+                &mut self.pending_crashes,
             );
         }
 
