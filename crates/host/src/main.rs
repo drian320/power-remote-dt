@@ -93,6 +93,14 @@ pub struct Args {
     /// signaling-client emits a Relay candidate.
     #[arg(long)]
     turn_url: Option<url::Url>,
+
+    /// Run in CLI-only mode without launching the GUI. Required for headless servers / CI.
+    #[arg(long)]
+    headless: bool,
+
+    /// Override the GUI config file location (default: %APPDATA%/prdt/config.toml).
+    #[arg(long)]
+    config: Option<std::path::PathBuf>,
 }
 
 pub async fn run_host(
@@ -561,11 +569,28 @@ pub async fn run_host(
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    init_tracing();
+fn main() -> Result<()> {
     let args = Args::parse();
-    run_host(args, None, CancellationToken::new()).await
+
+    if args.headless {
+        return run_cli(args);
+    }
+
+    // GUI mode: gui-host installs its own tracing subscriber + tokio runtime.
+    let args_arc = std::sync::Arc::new(args.clone());
+    let run_host_fn: prdt_gui_host::RunHostFn = std::sync::Arc::new(move |cancel| {
+        let args = args_arc.clone();
+        tokio::spawn(async move {
+            run_host((*args).clone(), None, cancel).await
+        })
+    });
+    prdt_gui_host::run_host_gui(args.config.clone(), run_host_fn)
+}
+
+#[tokio::main(flavor = "multi_thread")]
+async fn run_cli(args: Args) -> Result<()> {
+    init_tracing();
+    run_host(args, None, tokio_util::sync::CancellationToken::new()).await
 }
 
 fn init_tracing() {
