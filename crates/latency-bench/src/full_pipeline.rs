@@ -190,6 +190,12 @@ pub async fn run_for_matrix(cfg: &FullPipelineConfig) -> anyhow::Result<RunStats
     };
     let encoder = NvencEncoder::new(&dev, &enc_cfg)
         .map_err(|e| anyhow::anyhow!("NvencEncoder::new: {e}"))?;
+    info!(
+        resolution = format!("{}x{}", cfg.width, cfg.height),
+        fps = cfg.fps,
+        bitrate_mbps = cfg.bitrate_bps / 1_000_000,
+        "NVENC encoder ready",
+    );
 
     let mut consumer = match cfg.consumer {
         ConsumerBackend::Mf => BenchConsumer::Mf(
@@ -201,6 +207,7 @@ pub async fn run_for_matrix(cfg: &FullPipelineConfig) -> anyhow::Result<RunStats
                 .map_err(|e| anyhow::anyhow!("NvdecD3d11Consumer::new: {e}"))?,
         ),
     };
+    info!(backend = ?cfg.consumer, "decoder ready");
 
     let (host_side, viewer_side) = InProcTransport::pair(LoopbackOptions {
         drop_ppm: cfg.drop_ppm,
