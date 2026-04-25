@@ -102,7 +102,11 @@ fn write_report(report: &CrashReport) -> std::io::Result<PathBuf> {
 
 fn write_report_to(report: &CrashReport, dir: &Path) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
-    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+    // Use the timestamp already in the report so the filename and the
+    // JSON content can never disagree.
+    let stamp = chrono::DateTime::parse_from_rfc3339(&report.timestamp_iso)
+        .map(|dt| dt.format("%Y%m%d-%H%M%S").to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
     let path = dir.join(format!(
         "{}-{}-{}.json",
         stamp,
@@ -271,5 +275,19 @@ mod tests {
         write_report_to(&r, dir.path()).unwrap();
         let err = mark_acknowledged_in(dir.path(), "wrong-ts", "prdt-host").unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn filename_stamp_matches_timestamp_iso() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = sample_report("prdt-host", "2026-04-25T12:00:00+00:00");
+        let path = write_report_to(&r, dir.path()).unwrap();
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        // Expect "20260425-120000-prdt-host-<pid>.json"
+        assert!(
+            name.starts_with("20260425-120000-prdt-host-"),
+            "filename stamp must match timestamp_iso, got: {name}"
+        );
+        assert!(name.ends_with(".json"));
     }
 }
