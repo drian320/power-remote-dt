@@ -75,11 +75,7 @@ pub fn render(
                     ),
                 );
                 for r in pending_crashes.iter().take(5) {
-                    let summary = if r.panic_message.len() > 80 {
-                        format!("{}…", &r.panic_message[..80])
-                    } else {
-                        r.panic_message.clone()
-                    };
+                    let summary = prdt_gui_common::truncate_for_display(&r.panic_message, 80);
                     ui.label(format!(
                         "{}  {}  \"{}\"",
                         r.timestamp_iso, r.binary, summary

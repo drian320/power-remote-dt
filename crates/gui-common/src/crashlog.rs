@@ -84,6 +84,18 @@ fn build_report(binary: &str, version: &str, info: &std::panic::PanicInfo<'_>) -
     }
 }
 
+/// Truncate `s` to at most `max_chars` Unicode scalar values, appending an
+/// ellipsis when truncation occurred. Operates on chars (not bytes), so it
+/// is safe for any UTF-8 string including multi-byte sequences.
+pub fn truncate_for_display(s: &str, max_chars: usize) -> String {
+    if s.chars().count() > max_chars {
+        let head: String = s.chars().take(max_chars).collect();
+        format!("{head}…")
+    } else {
+        s.to_string()
+    }
+}
+
 /// Resolve the crashes directory, honoring the `PRDT_CRASHLOG_DIR` env
 /// override (used by tests). Falls back to `dirs::cache_dir()/prdt/crashes/`.
 pub fn crashes_dir() -> Option<PathBuf> {
@@ -289,5 +301,37 @@ mod tests {
             "filename stamp must match timestamp_iso, got: {name}"
         );
         assert!(name.ends_with(".json"));
+    }
+
+    #[test]
+    fn truncate_short_string_unchanged() {
+        assert_eq!(truncate_for_display("boom", 80), "boom");
+        assert_eq!(truncate_for_display("", 80), "");
+    }
+
+    #[test]
+    fn truncate_long_ascii_adds_ellipsis() {
+        let long = "a".repeat(100);
+        let out = truncate_for_display(&long, 80);
+        assert_eq!(out.chars().count(), 81); // 80 'a' + '…'
+        assert!(out.ends_with('…'));
+        assert!(out.starts_with("aaaa"));
+    }
+
+    #[test]
+    fn truncate_multibyte_does_not_panic() {
+        // 30 Japanese chars (each 3 bytes in UTF-8 = 90 bytes).
+        // Byte slicing at [..80] would panic mid-codepoint; char-aware
+        // truncation must succeed.
+        let s = "あ".repeat(30);
+        let out = truncate_for_display(&s, 80);
+        // No truncation since 30 < 80
+        assert_eq!(out, s);
+
+        // Now force truncation
+        let s = "あ".repeat(100);
+        let out = truncate_for_display(&s, 80);
+        assert_eq!(out.chars().count(), 81); // 80 + ellipsis
+        assert!(out.ends_with('…'));
     }
 }

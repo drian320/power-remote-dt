@@ -10,7 +10,8 @@ pub mod style;
 
 pub use config::{Config, ConfigError, GuiConfig, HostConfig, HostEntry, ViewerConfig};
 pub use crashlog::{
-    install_panic_hook, list_pending_crashes, mark_acknowledged, register_tail, CrashReport,
+    install_panic_hook, list_pending_crashes, mark_acknowledged, register_tail,
+    truncate_for_display, CrashReport,
 };
 pub use i18n::{
     current_locale, detect_locale, init as init_locale, set_locale, tr, tr_args, FluentValue,
