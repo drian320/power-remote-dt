@@ -1,6 +1,7 @@
 //! Phase 4 G1 host GUI.
 
 mod app;
+mod autostart;
 mod keygen;
 mod settings;
 
