@@ -95,3 +95,9 @@ update-checking = アップデートを確認中…
 update-up-to-date = 最新版を利用中です。
 update-available = 新しいバージョン: { $version }
 update-error = アップデート確認に失敗: { $error }
+
+# クラッシュレポータ (Phase 4 G5)
+crashlog-pending-heading = 前回のセッションでクラッシュしました ({ $n } 件)
+crashlog-button-open-folder = クラッシュフォルダを開く
+crashlog-button-acknowledge = すべて確認済みにする
+crashlog-no-pending = 未送信のクラッシュレポートはありません。

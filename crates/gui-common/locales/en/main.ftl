@@ -95,3 +95,9 @@ update-checking = Checking for updates…
 update-up-to-date = You are running the latest version.
 update-available = Update available: { $version }
 update-error = Update check failed: { $error }
+
+# Crash reporter (Phase 4 G5)
+crashlog-pending-heading = Last session crashed ({ $n } reports):
+crashlog-button-open-folder = Open crashes folder
+crashlog-button-acknowledge = Acknowledge all
+crashlog-no-pending = No pending crash reports.

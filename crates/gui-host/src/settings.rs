@@ -4,9 +4,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
+use crate::app::open_in_explorer;
 use prdt_gui_common::t;
 use prdt_gui_common::Config;
-use crate::app::open_in_explorer;
 
 /// Phase 4 G4 — shared, mutable state for the Settings modal's update widgets.
 /// Lives in `HostApp` and is passed by reference into `render()` so the
@@ -90,10 +90,9 @@ pub fn render(
                     if ui.button(t!("crashlog-button-acknowledge")).clicked() {
                         let snapshot = pending_crashes.clone();
                         for r in &snapshot {
-                            if let Err(e) = prdt_gui_common::mark_acknowledged(
-                                &r.timestamp_iso,
-                                &r.binary,
-                            ) {
+                            if let Err(e) =
+                                prdt_gui_common::mark_acknowledged(&r.timestamp_iso, &r.binary)
+                            {
                                 tracing::warn!(?e, "mark_acknowledged failed");
                             }
                         }

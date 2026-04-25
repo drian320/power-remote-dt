@@ -106,9 +106,8 @@ pub fn crashes_dir() -> Option<PathBuf> {
 }
 
 fn write_report(report: &CrashReport) -> std::io::Result<PathBuf> {
-    let dir = crashes_dir().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound, "no cache dir")
-    })?;
+    let dir = crashes_dir()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no cache dir"))?;
     write_report_to(report, &dir)
 }
 
