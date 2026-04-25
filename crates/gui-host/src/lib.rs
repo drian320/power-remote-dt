@@ -7,7 +7,6 @@ mod keygen;
 mod notif;
 mod settings;
 mod tray;
-#[allow(dead_code)] // wired into Settings/HostApp in G4 Task 3
 pub mod update;
 
 use std::path::PathBuf;

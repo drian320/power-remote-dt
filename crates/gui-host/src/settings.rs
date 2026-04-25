@@ -2,9 +2,19 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use prdt_gui_common::t;
 use prdt_gui_common::Config;
+
+/// Phase 4 G4 — shared, mutable state for the Settings modal's update widgets.
+/// Lives in `HostApp` and is passed by reference into `render()` so the
+/// async check task can publish results.
+#[derive(Default)]
+pub struct UpdateUi {
+    pub status: crate::update::CheckStatus,
+    pub last_checked: Option<SystemTime>,
+}
 
 pub fn render(
     ctx: &egui::Context,
@@ -12,6 +22,8 @@ pub fn render(
     config_path: &std::path::Path,
     open: &mut bool,
     error: &mut Option<String>,
+    update_ui: &Arc<Mutex<UpdateUi>>,
+    rt_handle: &tokio::runtime::Handle,
 ) {
     let mut local: Config = config.lock().unwrap().clone();
     let mut close = false;
@@ -19,6 +31,37 @@ pub fn render(
         .open(open)
         .resizable(false)
         .show(ctx, |ui| {
+            // Phase 4 G4: Update banner (shown only when there's something
+            // to say).
+            {
+                let ui_state = update_ui.lock().unwrap();
+                match &ui_state.status {
+                    crate::update::CheckStatus::Available { version, .. } => {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(255, 220, 100),
+                            t!("update-available", version => version.as_str()),
+                        );
+                        ui.separator();
+                    }
+                    crate::update::CheckStatus::UpToDate => {
+                        ui.label(t!("update-up-to-date"));
+                        ui.separator();
+                    }
+                    crate::update::CheckStatus::Checking => {
+                        ui.label(t!("update-checking"));
+                        ui.separator();
+                    }
+                    crate::update::CheckStatus::Error(msg) => {
+                        ui.colored_label(
+                            egui::Color32::RED,
+                            t!("update-error", error => msg.as_str()),
+                        );
+                        ui.separator();
+                    }
+                    crate::update::CheckStatus::Idle => {}
+                }
+            }
+
             ui.label(t!("host-settings-bind"));
             ui.text_edit_singleline(&mut local.host.bind);
             ui.label(t!("host-settings-monitor"));
@@ -48,6 +91,56 @@ pub fn render(
             ui.separator();
             ui.label(t!("settings-language"));
             language_dropdown(ui, &mut local.gui.locale);
+
+            // Phase 4 G4: manual update check + install.
+            ui.separator();
+            ui.label(t!("update-section-heading"));
+            {
+                let ui_state = update_ui.lock().unwrap();
+                if let Some(last) = ui_state.last_checked {
+                    if let Ok(d) = SystemTime::now().duration_since(last) {
+                        ui.label(format!(
+                            "Last checked: {} hours ago",
+                            d.as_secs() / 3600
+                        ));
+                    }
+                }
+            }
+            if ui.button(t!("update-button-check")).clicked() {
+                {
+                    let mut ui_state = update_ui.lock().unwrap();
+                    ui_state.status = crate::update::CheckStatus::Checking;
+                }
+                let update_ui_clone = update_ui.clone();
+                rt_handle.spawn(async move {
+                    let status = crate::update::check_async().await;
+                    let mut ui_state = update_ui_clone.lock().unwrap();
+                    ui_state.status = status;
+                    ui_state.last_checked = Some(SystemTime::now());
+                });
+            }
+            // Install button only appears in Available state.
+            {
+                let ui_state = update_ui.lock().unwrap();
+                if let crate::update::CheckStatus::Available { download_url, .. } =
+                    &ui_state.status
+                {
+                    let download_url = download_url.clone();
+                    drop(ui_state);
+                    if ui.button(t!("update-button-install")).clicked() {
+                        let rt = rt_handle.clone();
+                        rt_handle.spawn(async move {
+                            if let Err(e) = crate::update::install_async(download_url).await {
+                                tracing::error!(?e, "install_async failed");
+                            } else {
+                                tracing::info!("MSI install spawned; exiting");
+                                let _ = rt;
+                                std::process::exit(0);
+                            }
+                        });
+                    }
+                }
+            }
 
             ui.separator();
             ui.horizontal(|ui| {
