@@ -177,10 +177,68 @@ mod matrix {
             e2e_p99_us: e99,
         }
     }
+
+    use std::io::Write;
+    use std::path::Path;
+
+    /// Write per-frame raw CSV. Header:
+    /// `seq,capture_us,encode_done_us,recv_us,decode_done_us,arrival_lag_us,decode_lag_us,e2e_lag_us`.
+    pub fn write_per_frame_csv(path: &Path, frames: &[super::StageTimes]) -> std::io::Result<()> {
+        let mut wtr = std::fs::File::create(path)?;
+        writeln!(
+            wtr,
+            "seq,capture_us,encode_done_us,recv_us,decode_done_us,arrival_lag_us,decode_lag_us,e2e_lag_us"
+        )?;
+        for s in frames {
+            let arrival = s.recv_us.saturating_sub(s.capture_us);
+            let decode = s.decode_done_us.saturating_sub(s.recv_us);
+            let e2e = s.decode_done_us.saturating_sub(s.capture_us);
+            writeln!(
+                wtr,
+                "{},{},{},{},{},{},{},{}",
+                s.seq, s.capture_us, s.encode_done_us, s.recv_us, s.decode_done_us,
+                arrival, decode, e2e
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Write summary.csv across all configs. 17-column header per spec.
+    pub fn write_summary_csv(path: &Path, stats: &[ConfigStats]) -> std::io::Result<()> {
+        let mut wtr = std::fs::File::create(path)?;
+        writeln!(
+            wtr,
+            "config_id,resolution,bitrate_mbps,decoder,fps,sent,received,loss_ppm,\
+             arrival_p50_us,arrival_p95_us,arrival_p99_us,\
+             decode_p50_us,decode_p95_us,decode_p99_us,\
+             e2e_p50_us,e2e_p95_us,e2e_p99_us"
+        )?;
+        for s in stats {
+            let dec = match s.decoder {
+                ConsumerBackend::Mf => "mf",
+                ConsumerBackend::Nvdec => "nvdec",
+            };
+            writeln!(
+                wtr,
+                "{},{}x{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                s.config_id,
+                s.resolution.0, s.resolution.1,
+                s.bitrate_mbps, dec, s.fps,
+                s.sent, s.received, s.loss_ppm,
+                s.arrival_p50_us, s.arrival_p95_us, s.arrival_p99_us,
+                s.decode_p50_us, s.decode_p95_us, s.decode_p99_us,
+                s.e2e_p50_us, s.e2e_p95_us, s.e2e_p99_us
+            )?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(windows)]
-pub use matrix::{aggregate, config_id, expand_matrix, ConfigStats, MatrixAxes};
+pub use matrix::{
+    aggregate, config_id, expand_matrix, write_per_frame_csv, write_summary_csv,
+    ConfigStats, MatrixAxes,
+};
 
 #[cfg(test)]
 mod tests {
@@ -289,5 +347,53 @@ mod tests {
         // p50 = 3*51 = 153, p99 = 3*99 = 297.
         assert_eq!(stats.e2e_p50_us, 153);
         assert_eq!(stats.e2e_p99_us, 297);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn summary_csv_writer_emits_header_and_one_row() {
+        let cfg = FullPipelineConfig {
+            width: 1920, height: 1080, fps: 60,
+            duration: std::time::Duration::from_secs(10),
+            bitrate_bps: 30_000_000, drop_ppm: 0, latency_ms: 0,
+            csv: None, consumer: ConsumerBackend::Mf,
+        };
+        let run = RunStats { sent: 600, received: 598, frames: vec![
+            StageTimes { seq: 0, capture_us: 0, encode_done_us: 100, recv_us: 200, decode_done_us: 300 },
+        ]};
+        let s = aggregate(&cfg, &run);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("summary.csv");
+        write_summary_csv(&path, std::slice::from_ref(&s)).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "header + 1 row");
+        assert!(
+            lines[0].starts_with("config_id,resolution,bitrate_mbps,decoder,fps,"),
+            "unexpected header: {}", lines[0]
+        );
+        assert!(lines[1].starts_with("1080p60-30mbps-mf,1920x1080,30,mf,60,600,598,"),
+            "unexpected row: {}", lines[1]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn per_frame_csv_writer_round_trips() {
+        let frames = vec![
+            StageTimes { seq: 0, capture_us: 0, encode_done_us: 100, recv_us: 200, decode_done_us: 300 },
+            StageTimes { seq: 1, capture_us: 16_667, encode_done_us: 16_770, recv_us: 16_870, decode_done_us: 16_970 },
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frames.csv");
+        write_per_frame_csv(&path, &frames).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3, "header + 2 rows");
+        assert_eq!(
+            lines[0],
+            "seq,capture_us,encode_done_us,recv_us,decode_done_us,arrival_lag_us,decode_lag_us,e2e_lag_us"
+        );
+        // Row 0: arrival = 200-0 = 200, decode_lag = 300-200 = 100, e2e = 300-0 = 300
+        assert!(lines[1].ends_with(",200,100,300"), "got: {}", lines[1]);
     }
 }
