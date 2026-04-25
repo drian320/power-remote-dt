@@ -1,0 +1,23 @@
+[package]
+name = "prdt-gui-host"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+prdt-gui-common = { path = "../gui-common" }
+prdt-protocol = { path = "../protocol" }
+prdt-crypto = { path = "../crypto" }
+eframe = { workspace = true }
+egui = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+anyhow = "1"
+rfd = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

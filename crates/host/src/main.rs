@@ -1,5 +1,7 @@
 #![cfg(windows)]
 
+mod status;
+
 use std::fs;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -22,19 +24,22 @@ use prdt_transport::{
     host_handshake, now_monotonic_us, CustomUdpTransport, ReceivedMessage, Transport,
     UdpTransportConfig,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
+
+use status::SharedStatus;
 
 const FILE_RECV_DIR: &str = "prdt-received";
 const FILE_SEND_DIR: &str = "prdt-outgoing";
 const FILE_SEND_SENT_SUBDIR: &str = "sent";
 const OUTGOING_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(
     name = "prdt-host",
     about = "power-remote-dt host (capture + encode + input inject)"
 )]
-struct Args {
+pub struct Args {
     /// Local bind address, e.g. 0.0.0.0:9000.
     #[arg(long, default_value = "0.0.0.0:9000")]
     bind: SocketAddr,
@@ -88,18 +93,21 @@ struct Args {
     /// signaling-client emits a Relay candidate.
     #[arg(long)]
     turn_url: Option<url::Url>,
+
+    /// Run in CLI-only mode without launching the GUI. Required for headless servers / CI.
+    #[arg(long)]
+    headless: bool,
+
+    /// Override the GUI config file location (default: %APPDATA%/prdt/config.toml).
+    #[arg(long)]
+    config: Option<std::path::PathBuf>,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
-
-    let args = Args::parse();
-
+pub async fn run_host(
+    args: Args,
+    _status: Option<SharedStatus>,
+    _cancel: CancellationToken,
+) -> Result<()> {
     // Load or generate the host keypair.
     let keypair = if args.key_file.exists() {
         let priv_bytes = fs::read(&args.key_file)
@@ -559,4 +567,34 @@ async fn main() -> Result<()> {
         _ = tokio::signal::ctrl_c() => info!("ctrl-c received"),
     }
     Ok(())
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+
+    if args.headless {
+        return run_cli(args);
+    }
+
+    // GUI mode: gui-host installs its own tracing subscriber + tokio runtime.
+    let args_arc = std::sync::Arc::new(args.clone());
+    let run_host_fn: prdt_gui_host::RunHostFn = std::sync::Arc::new(move |cancel| {
+        let args = args_arc.clone();
+        tokio::spawn(async move { run_host((*args).clone(), None, cancel).await })
+    });
+    prdt_gui_host::run_host_gui(args.config.clone(), run_host_fn)
+}
+
+#[tokio::main(flavor = "multi_thread")]
+async fn run_cli(args: Args) -> Result<()> {
+    init_tracing();
+    run_host(args, None, tokio_util::sync::CancellationToken::new()).await
+}
+
+fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .init();
 }

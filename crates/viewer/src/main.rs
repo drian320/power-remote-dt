@@ -148,6 +148,14 @@ struct Args {
     /// Host candidate to carry that interface's address.
     #[arg(long, default_value = "0.0.0.0:0")]
     bind: SocketAddr,
+
+    /// Run in CLI-only mode without launching the GUI launcher. Required for headless / CI.
+    #[arg(long)]
+    headless: bool,
+
+    /// Override the GUI config file location (default: %APPDATA%/prdt/config.toml).
+    #[arg(long)]
+    config: Option<std::path::PathBuf>,
 }
 
 /// Normalize a user-supplied host_id for signaling: 9-digit numeric inputs
@@ -610,6 +618,30 @@ fn physical_key_to_scancode(key: PhysicalKey) -> Option<u32> {
     PhysicalKeyExtScancode::to_scancode(key)
 }
 
+fn apply_connect_args(args: &mut Args, c: prdt_gui_viewer::ConnectArgs) {
+    // Map ConnectArgs into the existing Args fields. Each ConnectArgs
+    // value either replaces the corresponding Args field or is ignored
+    // when ConnectArgs has no value (e.g. signaling_url is None for
+    // direct mode). The existing CLI defaults survive when unset.
+    if let Some(url) = c.signaling_url.clone() {
+        args.signaling_url = Some(url);
+    }
+    if let Some(id) = c.host_id.clone() {
+        args.host_id = Some(id);
+    }
+    if let Some(addr) = c.direct_addr {
+        args.host = Some(addr);
+    }
+    if let Some(pk) = c.pubkey.clone() {
+        args.host_pubkey = Some(pk);
+    }
+    args.recv_dir = c.recv_dir.clone();
+    args.decoder = c.decoder.clone();
+    args.resolution = c.default_resolution.clone();
+    args.known_hosts = Some(c.known_hosts_path.clone());
+    args.known_host_ids = c.known_host_ids_path.clone();
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -622,7 +654,16 @@ fn main() -> Result<()> {
         tracing::error!(panic = %info, "PANIC");
     }));
 
-    let args = Args::parse();
+    let mut args = Args::parse();
+
+    if !args.headless {
+        match prdt_gui_viewer::run_viewer_launcher(args.config.clone())
+            .map_err(|e| anyhow::anyhow!(e))?
+        {
+            prdt_gui_viewer::LaunchOutcome::Quit => return Ok(()),
+            prdt_gui_viewer::LaunchOutcome::Connect(c) => apply_connect_args(&mut args, *c),
+        }
+    }
     let (req_w, req_h) = parse_resolution(&args.resolution)?;
     // Normalize --host-id: accept 9-digit numeric IDs with or without dashes
     // so both `--host-id 123456789` and `--host-id 123-456-789` resolve to the
