@@ -8,3 +8,4 @@ Cargo.lock
 *.jsonl
 /tmp/
 /.omc/state/
+crates/gui-host/assets/*.png
