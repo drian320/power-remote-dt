@@ -20,6 +20,7 @@ host-recent-activity = 最近の動き:
 host-error-key-load = 鍵の読み込みに失敗しました: { $error }
 host-error-qr = QR 生成に失敗しました: { $error }
 host-error-config-save = 設定の保存に失敗しました: { $error }
+host-error-autostart = 自動起動の切り替えに失敗: { $error }
 
 # ホスト設定
 host-settings-bind = バインド:
@@ -27,6 +28,7 @@ host-settings-monitor = モニター:
 host-settings-bitrate = ビットレート (Mbps):
 host-settings-outgoing = 送信ディレクトリ:
 host-settings-signaling-optional = シグナリング URL (任意):
+settings-autostart-label = ログイン時に自動起動
 
 # Viewer ランチャー
 viewer-window-title = Power Remote Desktop — ビューアー
@@ -74,3 +76,13 @@ overlay-stats-decoder = デコーダー: { $name }
 overlay-stats-connecting = 接続中…
 overlay-button-resume = 再開
 overlay-button-disconnect = 切断
+
+# トレイ + 通知 (Phase 4 G3)
+tray-tooltip = PrdtHost
+tray-menu-open = 設定を開く
+tray-menu-stop = 待ち受けを停止
+tray-menu-show-logs = ログを開く
+tray-menu-quit = 終了
+notif-connected = Viewer 接続: { $detail }
+notif-disconnected = Viewer が切断されました
+notif-error = ホストエラー: { $detail }

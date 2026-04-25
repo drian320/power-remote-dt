@@ -1,8 +1,12 @@
 //! Phase 4 G1 host GUI.
 
 mod app;
+#[allow(dead_code)] // is_enabled() consumed in Phase 4 G4+ for query UI
+mod autostart;
 mod keygen;
+mod notif;
 mod settings;
+mod tray;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -51,6 +55,17 @@ pub fn run_host_gui(config_path: Option<PathBuf>, run_host: RunHostFn) -> anyhow
         ..Default::default()
     };
 
+    // Phase 4 G3: Build the system tray (best-effort — failures are logged
+    // and the app continues without a tray icon).
+    let asset_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets");
+    let tray = match tray::TrayController::new(&asset_dir) {
+        Ok(t) => Some(t),
+        Err(e) => {
+            tracing::warn!(?e, "tray init failed; continuing without tray icon");
+            None
+        }
+    };
+
     let cfg = shared_cfg.clone();
     let path = config_path.clone();
     let tail = tail_handle.clone();
@@ -61,7 +76,7 @@ pub fn run_host_gui(config_path: Option<PathBuf>, run_host: RunHostFn) -> anyhow
         Box::new(move |cc| {
             install_jp_font(&cc.egui_ctx);
             Ok(Box::new(app::HostApp::new(
-                cfg, path, tail, rt_handle, run_host,
+                cfg, path, tail, rt_handle, run_host, tray,
             )))
         }),
     )

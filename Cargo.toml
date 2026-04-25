@@ -84,6 +84,12 @@ fluent-templates = "0.9"
 sys-locale = "0.3"
 unic-langid = "0.9"
 
+# Phase 4 G3 (tray + notifications + autostart)
+tray-icon = "0.14"
+notify-rust = "4"
+winreg = "0.52"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

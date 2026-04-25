@@ -20,6 +20,7 @@ host-recent-activity = Recent activity:
 host-error-key-load = key load failed: { $error }
 host-error-qr = qr generation failed: { $error }
 host-error-config-save = config save failed: { $error }
+host-error-autostart = autostart toggle failed: { $error }
 
 # Host settings
 host-settings-bind = Bind:
@@ -27,6 +28,7 @@ host-settings-monitor = Monitor:
 host-settings-bitrate = Bitrate (Mbps):
 host-settings-outgoing = Outgoing dir:
 host-settings-signaling-optional = Signaling URL (optional):
+settings-autostart-label = Auto-start on login
 
 # Viewer launcher
 viewer-window-title = Power Remote Desktop — Viewer
@@ -74,3 +76,13 @@ overlay-stats-decoder = Decoder: { $name }
 overlay-stats-connecting = Connecting…
 overlay-button-resume = Resume
 overlay-button-disconnect = Disconnect
+
+# Tray + notifications (Phase 4 G3)
+tray-tooltip = PrdtHost
+tray-menu-open = Open settings
+tray-menu-stop = Stop listening
+tray-menu-show-logs = Show logs
+tray-menu-quit = Quit
+notif-connected = Viewer connected: { $detail }
+notif-disconnected = Viewer disconnected
+notif-error = Host error: { $detail }
