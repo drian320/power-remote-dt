@@ -10,13 +10,11 @@
 //! a Rust panic can't unwind across the FFI boundary (which would be UB
 //! under MSVC's `-C panic=abort` release profile).
 //!
-//! Output is a CPU-side packed NV12 Vec<u8>. The consumer side uploads
-//! it into a cached D3D11 NV12 texture via UpdateSubresource on the
-//! viewer's event-loop thread (Plan 2d step 2c). A direct CUDA-D3D11
-//! interop path was attempted but NV12 D3D11 textures don't expose the
-//! UV plane as a separate CUarray — a future optimization could revisit
-//! with dual R8 + R8G8 textures if measurements show the CPU bounce
-//! matters.
+//! Production output is a GPU-side dual-plane D3D11 texture pair
+//! (R8 Y + R8G8 UV) populated via CUDA-D3D11 device-to-device
+//! `cuMemcpy2D_v2`, eliminating the CPU NV12 bounce entirely.
+//! The CPU NV12 path is kept behind `#[cfg(any(test, feature = "cpu-nv12"))]`
+//! so unit tests can still exercise pixel-level comparison.
 
 // Module-level cfg gate is applied at the `mod decoder` site in nvdec/mod.rs,
 // so a redundant `#![cfg]` here would trip clippy::duplicated_attributes.
@@ -48,12 +46,88 @@ pub struct DecodedFrame {
     pub nv12: Vec<u8>,
 }
 
+/// One decoded frame as a pair of D3D11 textures sitting in GPU memory,
+/// already populated by the display callback via CUDA-D3D11 device-to-device
+/// `cuMemcpy2D_v2`. Cloning is cheap (refcount bump on the inner ID3D11Texture2D).
+#[derive(Clone)]
+pub struct DualPlaneFrame {
+    /// R8 texture, width × height. Holds the Y (luma) plane.
+    pub y_tex: crate::d3d11::D3d11Texture,
+    /// R8G8 texture, (width/2) × (height/2). Each element is (Cb, Cr).
+    pub uv_tex: crate::d3d11::D3d11Texture,
+    /// Width of the original NV12 frame in pixels (Y plane size).
+    pub width: u32,
+    /// Height of the original NV12 frame in pixels (Y plane size).
+    pub height: u32,
+    pub timestamp_us: i64,
+}
+
+/// CUDA-side handle for a registered D3D11 texture pair. The `Drop` impl
+/// unregisters both resources on the same CUDA context they were registered on.
+struct DualCache {
+    y_tex: crate::d3d11::D3d11Texture,
+    uv_tex: crate::d3d11::D3d11Texture,
+    y_cuda_res: ffi::CUgraphicsResource,
+    uv_cuda_res: ffi::CUgraphicsResource,
+    width: u32,
+    height: u32,
+}
+
+unsafe impl Send for DualCache {}
+
+impl DualCache {
+    /// Build a fresh dual cache for `(width, height)`. `width` is the Y plane
+    /// width in pixels; the UV texture is half that in each dimension.
+    /// Caller must hold the CUDA context push BEFORE calling this.
+    fn new(dev: &crate::d3d11::D3d11Device, width: u32, height: u32) -> Result<Self, MediaError> {
+        use crate::d3d11::{D3d11Texture, TextureFormat};
+
+        let y_tex = D3d11Texture::new_for_cuda_interop(dev, width, height, TextureFormat::R8)?;
+        let uv_tex =
+            D3d11Texture::new_for_cuda_interop(dev, width / 2, height / 2, TextureFormat::R8G8)?;
+
+        let mut y_cuda_res: ffi::CUgraphicsResource = std::ptr::null_mut();
+        let mut uv_cuda_res: ffi::CUgraphicsResource = std::ptr::null_mut();
+        unsafe {
+            use windows::core::Interface;
+            let y_ptr: *mut std::ffi::c_void = y_tex.raw().as_raw() as *mut _;
+            let uv_ptr: *mut std::ffi::c_void = uv_tex.raw().as_raw() as *mut _;
+            super::cuda::check(
+                "cuGraphicsD3D11RegisterResource(Y)",
+                ffi::cuGraphicsD3D11RegisterResource(&mut y_cuda_res, y_ptr as *mut _, 0),
+            )?;
+            super::cuda::check(
+                "cuGraphicsD3D11RegisterResource(UV)",
+                ffi::cuGraphicsD3D11RegisterResource(&mut uv_cuda_res, uv_ptr as *mut _, 0),
+            )?;
+        }
+        Ok(Self {
+            y_tex,
+            uv_tex,
+            y_cuda_res,
+            uv_cuda_res,
+            width,
+            height,
+        })
+    }
+}
+
+impl Drop for DualCache {
+    fn drop(&mut self) {
+        unsafe {
+            // Best-effort unregister; failing here only leaks until the
+            // CUDA context is destroyed.
+            let _ = ffi::cuGraphicsUnregisterResource(self.y_cuda_res);
+            let _ = ffi::cuGraphicsUnregisterResource(self.uv_cuda_res);
+        }
+    }
+}
+
 /// State shared between the Rust side and the C callback trio. Owned
 /// by `CuvidDecoder` via `Box<DecoderState>`; the parser keeps a raw
 /// pointer to it for the duration of its life.
 struct DecoderState {
     ctx: Arc<CudaContext>,
-    #[allow(dead_code)]
     dev: D3d11Device,
     decoder: Option<ffi::CUvideodecoder>,
     /// Set by the sequence callback; read by the display callback to
@@ -63,12 +137,19 @@ struct DecoderState {
     /// Max decode surfaces the decoder was created with. Returned from
     /// pfnSequenceCallback so cuvid knows the parser's ring depth.
     surfaces: u32,
-    /// Latest decoded NV12 frame in CPU memory. Populated on every
-    /// successful display callback. The consumer side uploads this
-    /// into a cached D3D11 NV12 texture when `take_latest_texture` is
-    /// called (on the viewer's event-loop thread, which owns the
-    /// D3D11 immediate context).
+    /// Latest decoded NV12 frame in CPU memory. Populated by the display
+    /// callback only when `cpu-nv12` feature is on (or under cfg(test)).
+    /// Production uses the dual-plane GPU path below.
+    #[cfg(any(test, feature = "cpu-nv12"))]
     latest: Mutex<Option<DecodedFrame>>,
+    /// CUDA-registered dual-plane D3D11 cache. Lazily built on the first
+    /// display callback once the decode resolution is known. Populated in
+    /// place by every subsequent display callback via device-to-device
+    /// `cuMemcpy2D_v2`.
+    dual_cache: Mutex<Option<DualCache>>,
+    /// Latest decoded GPU dual-plane frame. Holds clones (refcount bumps)
+    /// of the textures inside `dual_cache`, plus the timestamp.
+    latest_dual: Mutex<Option<DualPlaneFrame>>,
     /// Sticky error from a callback: any MediaError produced inside
     /// a callback gets stashed so `submit()` can surface it.
     error: Mutex<Option<MediaError>>,
@@ -90,11 +171,8 @@ unsafe impl Send for CuvidDecoder {}
 impl CuvidDecoder {
     /// Create a fresh HEVC decoder bound to `ctx`. `max_w` / `max_h` are
     /// capacity hints the bitstream's real sequence header may raise —
-    /// we currently fail if it does. `dev` is used in the sequence
-    /// callback to create an NV12 D3D11 texture for zero-copy output.
-    /// When `enable_cpu_nv12` is true the display callback additionally
-    /// exposes a CPU NV12 `Vec<u8>` via `take_latest_frame`, used by
-    /// tests; production callers leave it false.
+    /// we currently fail if it does. `dev` is used in the display
+    /// callback to create the dual-plane D3D11 interop textures.
     pub fn new_hevc(
         ctx: Arc<CudaContext>,
         dev: D3d11Device,
@@ -108,7 +186,10 @@ impl CuvidDecoder {
             width: max_w,
             height: max_h,
             surfaces: 0,
+            #[cfg(any(test, feature = "cpu-nv12"))]
             latest: Mutex::new(None),
+            dual_cache: Mutex::new(None),
+            latest_dual: Mutex::new(None),
             error: Mutex::new(None),
         });
 
@@ -166,17 +247,32 @@ impl CuvidDecoder {
         Ok(())
     }
 
-    /// Pop the latest decoded CPU-side NV12 frame. The consumer side
-    /// uploads this into a D3D11 NV12 texture on the viewer thread.
+    /// CPU-side NV12 frame (test / opt-in feature only). Production callers
+    /// use `take_latest_dual_plane`.
+    #[cfg(any(test, feature = "cpu-nv12"))]
     pub fn take_latest_frame(&self) -> Option<DecodedFrame> {
         self.state.latest.lock().unwrap().take()
+    }
+
+    /// GPU-side dual-plane frame: a (R8 Y, R8G8 UV) D3D11 texture pair already
+    /// populated by the display callback via CUDA-D3D11 device-to-device copy.
+    pub fn take_latest_dual_plane(&self) -> Option<DualPlaneFrame> {
+        self.state.latest_dual.lock().unwrap().take()
     }
 }
 
 impl Drop for CuvidDecoder {
     fn drop(&mut self) {
+        let _g = self.ctx.push();
+
+        // Explicitly drop dual_cache while the CUDA context is pushed.
+        // Without this, the implicit `Box<DecoderState>` drop runs after
+        // `_g` falls out of scope, causing cuGraphicsUnregisterResource to
+        // fail with CUDA_ERROR_INVALID_CONTEXT and silently leak the
+        // graphics resources until the primary context is destroyed.
+        *self.state.dual_cache.lock().unwrap() = None;
+
         if !self.parser.is_null() {
-            let _ = self.ctx.push();
             unsafe {
                 let r = ffi::cuvidDestroyVideoParser(self.parser);
                 if r != ffi::cudaError_enum::CUDA_SUCCESS {
@@ -185,7 +281,6 @@ impl Drop for CuvidDecoder {
             }
         }
         if let Some(dec) = self.state.decoder.take() {
-            let _ = self.ctx.push();
             unsafe {
                 let r = ffi::cuvidDestroyDecoder(dec);
                 if r != ffi::cudaError_enum::CUDA_SUCCESS {
@@ -373,56 +468,148 @@ unsafe extern "C" fn handle_picture_display(
             return 0;
         }
 
-        // Copy Y + UV planes from pitched device memory to a packed CPU
-        // NV12 buffer (Y rows then UV interleaved rows, tightly packed).
-        // The consumer side uploads this into a cached D3D11 NV12 texture
-        // via UpdateSubresource on the viewer's event-loop thread.
-        //
-        // Step 2c originally aimed at direct CUDA-D3D11 interop but NV12
-        // D3D11 textures don't expose the UV plane as a separate CUarray
-        // subresource (cuGraphicsSubResourceGetMappedArray returns
-        // INVALID_VALUE for plane=1). The CPU staging adds one ~450 KB
-        // memcpy per frame at 1080p — negligible vs MF decode's MFT
-        // pipeline overhead; a future optimization can revisit with
-        // dual R8 + R8G8 textures if a measurement shows the CPU bounce
-        // matters.
+        // Production path: cuMemcpy2D_v2 directly from cuvid's pitched device
+        // memory into CUDA-D3D11-mapped CUarrays for R8 (Y) and R8G8 (UV)
+        // textures. Builds the dual cache on the first call. Test / opt-in
+        // feature path additionally copies into a CPU NV12 buffer for
+        // pixel-level cross-checking.
         let w = state.width as usize;
         let h = state.height as usize;
-        let mut nv12 = vec![0u8; w * h * 3 / 2];
+
+        // Lazily build the dual cache if it doesn't exist or the resolution
+        // changed. The CUDA context is already pushed by the `_g` guard above.
+        {
+            let mut slot = state.dual_cache.lock().unwrap();
+            let needs_rebuild = match slot.as_ref() {
+                Some(c) => c.width != state.width || c.height != state.height,
+                None => true,
+            };
+            if needs_rebuild {
+                match DualCache::new(&state.dev, state.width, state.height) {
+                    Ok(c) => *slot = Some(c),
+                    Err(e) => {
+                        record_error(state, e);
+                        let _ = ffi::cuvidUnmapVideoFrame64(dec, dev_ptr);
+                        return 0;
+                    }
+                }
+            }
+        }
+
+        // GPU-side copy. Map both resources, fetch the two CUarrays, copy,
+        // then unmap. Keeping the lock for the whole copy is fine — the
+        // display callback is the only writer.
         let mut copy_ok = true;
-        let mut params_y: ffi::CUDA_MEMCPY2D = ffi::CUDA_MEMCPY2D::default();
-        params_y.srcMemoryType = ffi::CUmemorytype_enum::CU_MEMORYTYPE_DEVICE;
-        params_y.srcDevice = dev_ptr;
-        params_y.srcPitch = pitch as usize;
-        params_y.dstMemoryType = ffi::CUmemorytype_enum::CU_MEMORYTYPE_HOST;
-        params_y.dstHost = nv12.as_mut_ptr() as *mut c_void;
-        params_y.dstPitch = w;
-        params_y.WidthInBytes = w;
-        params_y.Height = h;
-        if ffi::cuMemcpy2D_v2(&mut params_y) != ffi::cudaError_enum::CUDA_SUCCESS {
+        let cache_guard = state.dual_cache.lock().unwrap();
+        let cache = cache_guard.as_ref().expect("dual_cache populated above");
+        let mut resources = [cache.y_cuda_res, cache.uv_cuda_res];
+        let map_r = ffi::cuGraphicsMapResources(2, resources.as_mut_ptr(), std::ptr::null_mut());
+        if map_r != ffi::cudaError_enum::CUDA_SUCCESS {
+            record_error(
+                state,
+                MediaError::Other(format!("cuGraphicsMapResources: CUresult={}", map_r as u32)),
+            );
+            let _ = ffi::cuvidUnmapVideoFrame64(dec, dev_ptr);
+            return 0;
+        }
+
+        let mut y_array: ffi::CUarray = std::ptr::null_mut();
+        let mut uv_array: ffi::CUarray = std::ptr::null_mut();
+        let ry = ffi::cuGraphicsSubResourceGetMappedArray(&mut y_array, cache.y_cuda_res, 0, 0);
+        let ruv = ffi::cuGraphicsSubResourceGetMappedArray(&mut uv_array, cache.uv_cuda_res, 0, 0);
+        if ry != ffi::cudaError_enum::CUDA_SUCCESS
+            || y_array.is_null()
+            || ruv != ffi::cudaError_enum::CUDA_SUCCESS
+            || uv_array.is_null()
+        {
             copy_ok = false;
         }
+
         if copy_ok {
+            // Y: device → R8 array. WidthInBytes = w (1 byte/pixel).
+            let mut params_y: ffi::CUDA_MEMCPY2D = ffi::CUDA_MEMCPY2D::default();
+            params_y.srcMemoryType = ffi::CUmemorytype_enum::CU_MEMORYTYPE_DEVICE;
+            params_y.srcDevice = dev_ptr;
+            params_y.srcPitch = pitch as usize;
+            params_y.dstMemoryType = ffi::CUmemorytype_enum::CU_MEMORYTYPE_ARRAY;
+            params_y.dstArray = y_array;
+            params_y.WidthInBytes = w;
+            params_y.Height = h;
+            if ffi::cuMemcpy2D_v2(&mut params_y) != ffi::cudaError_enum::CUDA_SUCCESS {
+                copy_ok = false;
+            }
+        }
+
+        if copy_ok {
+            // UV: device(+pitch*h) → R8G8 array. R8G8 is 2 bytes/pixel and
+            // the UV plane is half-resolution per dim, so the row width in
+            // bytes equals the Y plane row width: 2 * (w/2) = w.
             let mut params_uv: ffi::CUDA_MEMCPY2D = ffi::CUDA_MEMCPY2D::default();
             params_uv.srcMemoryType = ffi::CUmemorytype_enum::CU_MEMORYTYPE_DEVICE;
             params_uv.srcDevice = dev_ptr + (pitch as u64) * (h as u64);
             params_uv.srcPitch = pitch as usize;
-            params_uv.dstMemoryType = ffi::CUmemorytype_enum::CU_MEMORYTYPE_HOST;
-            params_uv.dstHost = nv12[w * h..].as_mut_ptr() as *mut c_void;
-            params_uv.dstPitch = w;
+            params_uv.dstMemoryType = ffi::CUmemorytype_enum::CU_MEMORYTYPE_ARRAY;
+            params_uv.dstArray = uv_array;
             params_uv.WidthInBytes = w;
             params_uv.Height = h / 2;
             if ffi::cuMemcpy2D_v2(&mut params_uv) != ffi::cudaError_enum::CUDA_SUCCESS {
                 copy_ok = false;
             }
         }
+
+        let _ = ffi::cuGraphicsUnmapResources(2, resources.as_mut_ptr(), std::ptr::null_mut());
+
         if copy_ok {
-            *state.latest.lock().unwrap() = Some(DecodedFrame {
+            *state.latest_dual.lock().unwrap() = Some(DualPlaneFrame {
+                y_tex: cache.y_tex.clone(),
+                uv_tex: cache.uv_tex.clone(),
                 width: state.width,
                 height: state.height,
                 timestamp_us: (*disp).timestamp,
-                nv12,
             });
+        }
+        drop(cache_guard);
+
+        // Test/feature path: also produce a CPU NV12 copy for pixel-level
+        // cross-checking against the dual-plane texture pair.
+        #[cfg(any(test, feature = "cpu-nv12"))]
+        if copy_ok {
+            let mut nv12 = vec![0u8; w * h * 3 / 2];
+            let mut cpu_ok = true;
+            let mut params_y_cpu: ffi::CUDA_MEMCPY2D = ffi::CUDA_MEMCPY2D::default();
+            params_y_cpu.srcMemoryType = ffi::CUmemorytype_enum::CU_MEMORYTYPE_DEVICE;
+            params_y_cpu.srcDevice = dev_ptr;
+            params_y_cpu.srcPitch = pitch as usize;
+            params_y_cpu.dstMemoryType = ffi::CUmemorytype_enum::CU_MEMORYTYPE_HOST;
+            params_y_cpu.dstHost = nv12.as_mut_ptr() as *mut c_void;
+            params_y_cpu.dstPitch = w;
+            params_y_cpu.WidthInBytes = w;
+            params_y_cpu.Height = h;
+            if ffi::cuMemcpy2D_v2(&mut params_y_cpu) != ffi::cudaError_enum::CUDA_SUCCESS {
+                cpu_ok = false;
+            }
+            if cpu_ok {
+                let mut params_uv_cpu: ffi::CUDA_MEMCPY2D = ffi::CUDA_MEMCPY2D::default();
+                params_uv_cpu.srcMemoryType = ffi::CUmemorytype_enum::CU_MEMORYTYPE_DEVICE;
+                params_uv_cpu.srcDevice = dev_ptr + (pitch as u64) * (h as u64);
+                params_uv_cpu.srcPitch = pitch as usize;
+                params_uv_cpu.dstMemoryType = ffi::CUmemorytype_enum::CU_MEMORYTYPE_HOST;
+                params_uv_cpu.dstHost = nv12[w * h..].as_mut_ptr() as *mut c_void;
+                params_uv_cpu.dstPitch = w;
+                params_uv_cpu.WidthInBytes = w;
+                params_uv_cpu.Height = h / 2;
+                if ffi::cuMemcpy2D_v2(&mut params_uv_cpu) != ffi::cudaError_enum::CUDA_SUCCESS {
+                    cpu_ok = false;
+                }
+            }
+            if cpu_ok {
+                *state.latest.lock().unwrap() = Some(DecodedFrame {
+                    width: state.width,
+                    height: state.height,
+                    timestamp_us: (*disp).timestamp,
+                    nv12,
+                });
+            }
         }
 
         let _ = ffi::cuvidUnmapVideoFrame64(dec, dev_ptr);

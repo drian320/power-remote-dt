@@ -13,14 +13,40 @@ use prdt_input_win::{
     clipboard_sequence_number, read_clipboard_text, write_clipboard_text, RawInputCapturer,
     MAX_CLIPBOARD_BYTES,
 };
-use prdt_media_win::{
-    pick_default_adapter, D3d11Device, D3d11Texture, MfD3d11Consumer, Nv12Renderer,
-    NvdecD3d11Consumer, SwapChain,
-};
+#[cfg(prdt_nvdec_bindings)]
+use prdt_media_win::NvdecD3d11Consumer;
+use prdt_media_win::{pick_default_adapter, D3d11Device, MfD3d11Consumer, Nv12Renderer, SwapChain};
 use prdt_protocol::{frame::Codec, ControlMessage, InputEvent, MonitorRect, VideoConsumer};
 
 mod latency;
 use latency::LatencyProbe;
+
+/// Per-decoder decoded frame. The viewer thread receives one of these per
+/// frame and dispatches to the matching renderer.
+enum LatestFrame {
+    /// Single NV12 D3D11 texture from `MfD3d11Consumer::take_latest_texture`.
+    Nv12(prdt_media_win::D3d11Texture),
+    /// Dual-plane (R8 Y, R8G8 UV) frame from
+    /// `NvdecD3d11Consumer::take_latest_dual_plane`. Only constructed when
+    /// `prdt_nvdec_bindings` cfg is set.
+    #[cfg(prdt_nvdec_bindings)]
+    DualPlane(prdt_media_win::DualPlaneFrame),
+}
+
+/// Decoder-selected consumer. Held behind the recv task's
+/// `Arc<tokio::sync::Mutex<...>>`.
+enum ViewerConsumer {
+    Mf(prdt_media_win::MfD3d11Consumer),
+    #[cfg(prdt_nvdec_bindings)]
+    Nvdec(prdt_media_win::NvdecD3d11Consumer),
+}
+
+/// Decoder-selected renderer. Held inside the event-loop's render code.
+enum ViewerRenderer {
+    Mf(prdt_media_win::Nv12Renderer),
+    #[cfg(prdt_nvdec_bindings)]
+    Nvdec(prdt_media_win::DualPlaneYuvRenderer),
+}
 use prdt_transport::{
     viewer_handshake, CustomUdpTransport, HelloRequest, ReceivedMessage, Transport,
     UdpTransportConfig, DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_HELLO_RETRIES, DEFAULT_HELLO_TIMEOUT,
@@ -152,11 +178,11 @@ fn parse_resolution(s: &str) -> Result<(u32, u32)> {
 
 /// Shared state between the winit main thread and the tokio worker thread.
 struct ViewerShared {
-    /// Latest decoded texture alongside the host capture timestamp (in the
+    /// Latest decoded frame alongside the host capture timestamp (in the
     /// shared monotonic clock). The render thread pops this, presents, and
     /// feeds `host_ts_us` into the LatencyProbe to close the glass-to-glass
     /// measurement loop.
-    latest_texture: Arc<Mutex<Option<(D3d11Texture, u64)>>>,
+    latest_texture: Arc<Mutex<Option<(LatestFrame, u64)>>>,
     /// Stream dimensions negotiated from HelloAck (and later refined by the
     /// decoder's reported texture size).
     stream_width: Mutex<u32>,
@@ -187,7 +213,7 @@ struct ViewerRender {
     #[allow(dead_code)]
     dev: D3d11Device,
     swap: SwapChain,
-    renderer: Option<Nv12Renderer>,
+    renderer: Option<ViewerRenderer>,
 }
 
 struct ViewerApp {
@@ -196,6 +222,7 @@ struct ViewerApp {
     shared: Arc<ViewerShared>,
     render: Option<ViewerRender>,
     dev: D3d11Device,
+    decoder: String,
     // The tokio runtime running the UDP / decode worker thread; kept alive
     // for the duration of the event loop.
     _runtime: tokio::runtime::Runtime,
@@ -284,7 +311,16 @@ impl ApplicationHandler for ViewerApp {
                         warn!(?e, "swapchain resize failed");
                     }
                     if let Some(rn) = r.renderer.as_mut() {
-                        rn.resize_output(width.max(1), height.max(1));
+                        match rn {
+                            ViewerRenderer::Mf(rmf) => {
+                                rmf.resize_output(width.max(1), height.max(1));
+                            }
+                            #[cfg(prdt_nvdec_bindings)]
+                            ViewerRenderer::Nvdec(_) => {
+                                // DualPlaneYuvRenderer is dimension-agnostic;
+                                // no resize needed.
+                            }
+                        }
                     }
                     r.window.request_redraw();
                 }
@@ -385,34 +421,90 @@ impl ViewerApp {
         let mut presented_host_ts: Option<u64> = None;
 
         if let Some((tex, host_ts_us)) = maybe_tex {
-            // Lazily build the renderer once we know the decoded frame size.
-            let (iw, ih) = (tex.width(), tex.height());
-            let needs_new = match render.renderer.as_ref() {
-                Some(r) => r.input_size() != (iw, ih),
-                None => true,
+            // Lazily build the renderer once we know the decoded frame size
+            // (for MF/NV12) or on first frame (for NVDEC dual-plane, which is
+            // dimension-agnostic).
+            let needs_new = match (&tex, render.renderer.as_ref()) {
+                (LatestFrame::Nv12(nv12), Some(ViewerRenderer::Mf(rmf))) => {
+                    rmf.input_size() != (nv12.width(), nv12.height())
+                }
+                (_, None) => true,
+                // Variant mismatch (e.g. DualPlane frame but Mf renderer still
+                // cached from a previous session) — treat as needs rebuild.
+                #[allow(unreachable_patterns)]
+                _ => true,
             };
             if needs_new {
-                match Nv12Renderer::new(
-                    &self.dev,
-                    iw,
-                    ih,
-                    render.swap.width(),
-                    render.swap.height(),
-                ) {
-                    Ok(r) => render.renderer = Some(r),
-                    Err(e) => {
-                        warn!(?e, "Nv12Renderer::new failed");
-                        return;
+                let (iw, ih) = match &tex {
+                    LatestFrame::Nv12(nv12) => (nv12.width(), nv12.height()),
+                    #[cfg(prdt_nvdec_bindings)]
+                    LatestFrame::DualPlane(dp) => (dp.width, dp.height),
+                };
+                let new_renderer = if self.decoder == "nvdec" {
+                    #[cfg(prdt_nvdec_bindings)]
+                    {
+                        match prdt_media_win::DualPlaneYuvRenderer::new(&self.dev) {
+                            Ok(r) => Some(ViewerRenderer::Nvdec(r)),
+                            Err(e) => {
+                                warn!(?e, "DualPlaneYuvRenderer::new failed");
+                                return;
+                            }
+                        }
                     }
-                }
+                    #[cfg(not(prdt_nvdec_bindings))]
+                    {
+                        match Nv12Renderer::new(
+                            &self.dev,
+                            iw,
+                            ih,
+                            render.swap.width(),
+                            render.swap.height(),
+                        ) {
+                            Ok(r) => Some(ViewerRenderer::Mf(r)),
+                            Err(e) => {
+                                warn!(?e, "Nv12Renderer::new failed");
+                                return;
+                            }
+                        }
+                    }
+                } else {
+                    match Nv12Renderer::new(
+                        &self.dev,
+                        iw,
+                        ih,
+                        render.swap.width(),
+                        render.swap.height(),
+                    ) {
+                        Ok(r) => Some(ViewerRenderer::Mf(r)),
+                        Err(e) => {
+                            warn!(?e, "Nv12Renderer::new failed");
+                            return;
+                        }
+                    }
+                };
+                render.renderer = new_renderer;
                 // Cache the observed stream size so input scaling remains sane.
                 *self.shared.stream_width.lock().unwrap() = iw;
                 *self.shared.stream_height.lock().unwrap() = ih;
             }
 
             if let Some(r) = render.renderer.as_ref() {
-                if let Err(e) = r.render(&tex, &render.swap) {
-                    warn!(?e, "Nv12Renderer::render failed");
+                #[allow(unreachable_patterns)]
+                match (r, &tex) {
+                    (ViewerRenderer::Mf(rmf), LatestFrame::Nv12(nv12_tex)) => {
+                        if let Err(e) = rmf.render(nv12_tex, &render.swap) {
+                            warn!(?e, "Nv12Renderer::render failed");
+                        }
+                    }
+                    #[cfg(prdt_nvdec_bindings)]
+                    (ViewerRenderer::Nvdec(rnv), LatestFrame::DualPlane(dpl)) => {
+                        if let Err(e) = rnv.render(dpl, &render.swap) {
+                            warn!(?e, "DualPlaneYuvRenderer::render failed");
+                        }
+                    }
+                    _ => {
+                        warn!("internal: renderer/frame variant mismatch");
+                    }
                 }
             }
             presented_host_ts = Some(host_ts_us);
@@ -650,6 +742,7 @@ fn main() -> Result<()> {
         shared,
         render: None,
         dev,
+        decoder: args.decoder.clone(),
         _runtime: runtime,
         should_exit: false,
     };
@@ -884,31 +977,29 @@ fn spawn_worker_tasks(
         *shared.host_monitor_rect.lock().unwrap() = ack.host_monitor_rect;
         *shared.host_virtual_desktop_rect.lock().unwrap() = ack.host_virtual_desktop_rect;
 
-        // Build consumer. --decoder nvdec tries the Plan 2d path first;
-        // until the NVDEC FFI is wired up it always returns NotAvailable
-        // and we transparently fall back to MF with a warning.
-        let consumer = if decoder == "nvdec" {
-            match NvdecD3d11Consumer::new(&dev, ack.neg_width, ack.neg_height) {
-                Ok(_nv) => {
-                    // Once the FFI lands, we'll replace this with
-                    // Arc::new(Mutex::new(_nv)). For now bail to MF.
-                    warn!(
-                        "unreachable: NvdecD3d11Consumer::new returned Ok but \
-                         the VideoConsumer trait impl is a stub — falling back to MF",
-                    );
-                    None
+        // Build consumer — dispatch on --decoder flag.
+        let consumer: Arc<tokio::sync::Mutex<ViewerConsumer>> = if decoder == "nvdec" {
+            #[cfg(prdt_nvdec_bindings)]
+            {
+                match NvdecD3d11Consumer::new(&dev, ack.neg_width, ack.neg_height) {
+                    Ok(nv) => Some(Arc::new(tokio::sync::Mutex::new(ViewerConsumer::Nvdec(nv)))),
+                    Err(e) => {
+                        warn!(%e, "NVDEC unavailable; falling back to MF decoder");
+                        None
+                    }
                 }
-                Err(e) => {
-                    warn!(%e, "NVDEC unavailable; falling back to MF decoder");
-                    None
-                }
+            }
+            #[cfg(not(prdt_nvdec_bindings))]
+            {
+                warn!("--decoder nvdec specified but NVDEC bindings are not compiled in; falling back to MF");
+                None
             }
         } else {
             None
         }
         .unwrap_or_else(|| {
             // Fallback / default path.
-            Arc::new(tokio::sync::Mutex::new(
+            Arc::new(tokio::sync::Mutex::new(ViewerConsumer::Mf(
                 match MfD3d11Consumer::new(&dev, ack.neg_width, ack.neg_height) {
                     Ok(c) => c,
                     Err(e) => {
@@ -916,7 +1007,7 @@ fn spawn_worker_tasks(
                         panic!("no decoder could be initialized");
                     }
                 },
-            ))
+            )))
         });
         info!(backend = %decoder, "decoder ready; spawning worker tasks");
 
@@ -1016,14 +1107,29 @@ fn spawn_worker_tasks(
                         let nal_len = frame.nal_units.len();
                         recv_shared.latency.record_recv(seq, host_ts_us);
                         let mut c = recv_consumer.lock().await;
-                        if let Err(e) = c.submit(frame).await {
+                        let submit_result = match &mut *c {
+                            ViewerConsumer::Mf(m) => m.submit(frame).await,
+                            #[cfg(prdt_nvdec_bindings)]
+                            ViewerConsumer::Nvdec(n) => n.submit(frame).await,
+                        };
+                        if let Err(e) = submit_result {
                             warn!(?e, seq, is_kf, nal_len, "consumer.submit error");
                             continue;
                         }
-                        if let Some(tex) = c.take_latest_texture() {
+                        let frame_opt: Option<LatestFrame> = match &*c {
+                            ViewerConsumer::Mf(m) => {
+                                m.take_latest_texture().map(LatestFrame::Nv12)
+                            }
+                            #[cfg(prdt_nvdec_bindings)]
+                            ViewerConsumer::Nvdec(n) => {
+                                n.take_latest_dual_plane().map(LatestFrame::DualPlane)
+                            }
+                        };
+                        if let Some(frame) = frame_opt {
                             tex_count += 1;
                             recv_shared.latency.record_decoded(seq);
-                            *recv_shared.latest_texture.lock().unwrap() = Some((tex, host_ts_us));
+                            *recv_shared.latest_texture.lock().unwrap() =
+                                Some((frame, host_ts_us));
                         }
                     }
                     Ok(ReceivedMessage::Control(ControlMessage::Bye)) => {

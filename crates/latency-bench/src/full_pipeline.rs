@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use prdt_media_win::synthetic::make_counter_texture;
 use prdt_media_win::{
-    pick_default_adapter, D3d11Device, D3d11Texture, MfD3d11Consumer, NvdecD3d11Consumer,
-    NvencEncoder, NvencEncoderConfig,
+    pick_default_adapter, D3d11Device, MfD3d11Consumer, NvdecD3d11Consumer, NvencEncoder,
+    NvencEncoderConfig,
 };
 use prdt_protocol::{now_monotonic_us, ConsumerError, EncodedFrame, VideoConsumer};
 use prdt_transport::{InProcTransport, LoopbackOptions, ReceivedMessage, Transport};
@@ -54,10 +54,13 @@ impl BenchConsumer {
             Self::Nvdec(c) => c.submit(frame).await,
         }
     }
-    fn take_latest_texture(&mut self) -> Option<D3d11Texture> {
+    fn take_latest_texture(&mut self) -> bool {
         match self {
-            Self::Mf(c) => c.take_latest_texture(),
-            Self::Nvdec(c) => c.take_latest_texture(),
+            Self::Mf(c) => c.take_latest_texture().is_some(),
+            #[cfg(prdt_nvdec_bindings)]
+            Self::Nvdec(c) => c.take_latest_dual_plane().is_some(),
+            #[cfg(not(prdt_nvdec_bindings))]
+            Self::Nvdec(_) => false,
         }
     }
 }
@@ -180,7 +183,7 @@ pub async fn run(cfg: FullPipelineConfig) -> anyhow::Result<()> {
                             continue;
                         }
                     }
-                    if consumer.take_latest_texture().is_some() {
+                    if consumer.take_latest_texture() {
                         let decode_done_us = now_monotonic_us();
                         decoded += 1;
                         samples.push(StageTimes {
@@ -215,7 +218,7 @@ pub async fn run(cfg: FullPipelineConfig) -> anyhow::Result<()> {
                 let rx_seq = rx_frame.seq;
                 let rx_capture_us = rx_frame.timestamp_host_us;
                 let _ = consumer.submit(rx_frame).await;
-                if consumer.take_latest_texture().is_some() {
+                if consumer.take_latest_texture() {
                     let decode_done_us = now_monotonic_us();
                     decoded += 1;
                     samples.push(StageTimes {

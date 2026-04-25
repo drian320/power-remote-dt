@@ -17,6 +17,7 @@ windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D_Fxc",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
@@ -32,3 +33,10 @@ bindgen = "0.69"
 
 [target.'cfg(windows)'.dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+
+[features]
+default = []
+# Enables the legacy CPU NV12 readback path on the NVDEC decoder. Used by
+# regression tests that compare CPU and GPU output pixel-by-pixel; off by
+# default in production where it would slow the decode loop by 2 PCIe copies.
+cpu-nv12 = []

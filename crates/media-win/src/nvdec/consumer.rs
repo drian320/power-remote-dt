@@ -11,15 +11,15 @@
 use prdt_protocol::{ConsumerError, EncodedFrame, VideoConsumer};
 
 #[cfg(prdt_nvdec_bindings)]
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 #[cfg(prdt_nvdec_bindings)]
 use super::cuda::CudaContext;
+#[cfg(all(prdt_nvdec_bindings, any(test, feature = "cpu-nv12")))]
+use super::decoder::DecodedFrame;
 #[cfg(prdt_nvdec_bindings)]
-use super::decoder::{CuvidDecoder, DecodedFrame};
-#[cfg(prdt_nvdec_bindings)]
-use crate::d3d11::TextureFormat;
-use crate::d3d11::{D3d11Device, D3d11Texture};
+use super::decoder::{CuvidDecoder, DualPlaneFrame};
+use crate::d3d11::D3d11Device;
 use crate::error::MediaError;
 
 /// Drop-in alternative to `MfD3d11Consumer` using nvcuvid.dll directly.
@@ -31,11 +31,6 @@ pub struct NvdecD3d11Consumer {
     _ctx: Arc<CudaContext>,
     #[cfg(prdt_nvdec_bindings)]
     decoder: CuvidDecoder,
-    /// Cached NV12 D3D11 texture we reuse across frames. Lazily created
-    /// on the first `take_latest_texture` call once the decoder's
-    /// actual output size is known.
-    #[cfg(prdt_nvdec_bindings)]
-    nv12_cache: Mutex<Option<D3d11Texture>>,
     _dev: D3d11Device,
     _width: u32,
     _height: u32,
@@ -55,7 +50,6 @@ impl NvdecD3d11Consumer {
             Ok(Self {
                 _ctx: ctx,
                 decoder,
-                nv12_cache: Mutex::new(None),
                 _dev: dev.clone(),
                 _width: width,
                 _height: height,
@@ -73,105 +67,22 @@ impl NvdecD3d11Consumer {
         }
     }
 
-    /// Pop the latest decoded NV12 frame as raw CPU bytes. Tests use
-    /// this to verify pixel-level correctness; the production viewer
-    /// uses `take_latest_texture` instead.
-    #[cfg(prdt_nvdec_bindings)]
+    /// Pop the latest decoded NV12 frame as raw CPU bytes. Test / opt-in
+    /// feature path only — production viewer uses `take_latest_dual_plane`.
+    #[cfg(all(prdt_nvdec_bindings, any(test, feature = "cpu-nv12")))]
     pub fn take_latest_nv12(&self) -> Option<DecodedFrame> {
         self.decoder.take_latest_frame()
     }
 
-    /// Drain the latest decoded GPU texture, if any. Mirrors
-    /// `MfD3d11Consumer::take_latest_texture` so viewer code can be
-    /// decoder-agnostic. Uploads the latest CPU NV12 bytes into a
-    /// cached NV12 D3D11 texture via UpdateSubresource and returns a
-    /// clone. Must be called on the thread that owns the D3D11
-    /// immediate context (i.e., the viewer's event-loop thread).
-    pub fn take_latest_texture(&self) -> Option<D3d11Texture> {
-        #[cfg(prdt_nvdec_bindings)]
-        {
-            let frame = self.decoder.take_latest_frame()?;
-            match self.upload_nv12_to_cache(&frame) {
-                Ok(tex) => Some(tex),
-                Err(e) => {
-                    tracing::warn!(%e, "NVDEC: D3D11 NV12 upload failed");
-                    None
-                }
-            }
-        }
-        #[cfg(not(prdt_nvdec_bindings))]
-        {
-            None
-        }
-    }
-
+    /// Drain the latest decoded GPU dual-plane frame: a (R8 Y, R8G8 UV)
+    /// D3D11 texture pair already populated via CUDA-D3D11 device-to-device
+    /// copy. Mirrors `MfD3d11Consumer::take_latest_texture` shape but the
+    /// downstream renderer is `DualPlaneYuvRenderer` rather than
+    /// `Nv12Renderer`. Must be called on the thread that owns the D3D11
+    /// immediate context (the viewer's event-loop thread).
     #[cfg(prdt_nvdec_bindings)]
-    fn upload_nv12_to_cache(&self, frame: &DecodedFrame) -> Result<D3d11Texture, MediaError> {
-        use windows::Win32::Graphics::Direct3D11::D3D11_BOX;
-
-        let mut slot = self.nv12_cache.lock().unwrap();
-        let cache_needs_rebuild = match slot.as_ref() {
-            Some(t) => t.width() != frame.width || t.height() != frame.height,
-            None => true,
-        };
-        if cache_needs_rebuild {
-            *slot = Some(D3d11Texture::new_default(
-                &self._dev,
-                frame.width,
-                frame.height,
-                TextureFormat::Nv12,
-            )?);
-        }
-        let tex = slot.as_ref().unwrap().clone();
-
-        // Upload Y (subresource 0, width x height) and UV (subresource 1,
-        // width x height/2) from the packed CPU NV12 buffer. For NV12
-        // textures D3D11 accepts two UpdateSubresource calls against
-        // subresource 0 and 1 with the appropriate row pitches.
-        let w = frame.width as usize;
-        let h = frame.height as usize;
-        let y_plane_ptr = frame.nv12.as_ptr();
-        let uv_plane_ptr = unsafe { y_plane_ptr.add(w * h) };
-        let y_box = D3D11_BOX {
-            left: 0,
-            top: 0,
-            front: 0,
-            right: frame.width,
-            bottom: frame.height,
-            back: 1,
-        };
-        let uv_box = D3D11_BOX {
-            left: 0,
-            top: 0,
-            front: 0,
-            right: frame.width,
-            bottom: frame.height / 2,
-            back: 1,
-        };
-        self._dev.with_context(|ctx| {
-            use windows::core::Interface;
-            let res: windows::Win32::Graphics::Direct3D11::ID3D11Resource =
-                tex.raw().cast().expect("NV12 tex is ID3D11Resource");
-            unsafe {
-                ctx.UpdateSubresource(
-                    &res,
-                    0,
-                    Some(&y_box),
-                    y_plane_ptr as *const _,
-                    frame.width,
-                    0,
-                );
-                ctx.UpdateSubresource(
-                    &res,
-                    1,
-                    Some(&uv_box),
-                    uv_plane_ptr as *const _,
-                    frame.width,
-                    0,
-                );
-            }
-        });
-        Ok(tex)
+    pub fn take_latest_dual_plane(&self) -> Option<DualPlaneFrame> {
+        self.decoder.take_latest_dual_plane()
     }
 }
 
@@ -204,6 +115,8 @@ impl VideoConsumer for NvdecD3d11Consumer {
 mod tests {
     use super::*;
     use crate::adapter::pick_default_adapter;
+    #[cfg(prdt_nvdec_bindings)]
+    use crate::d3d11::{D3d11Texture, TextureFormat};
 
     /// Probe: can we grab both Y and UV as separate CUarrays from an
     /// NV12 D3D11 texture registered with CUDA when the texture is
@@ -330,12 +243,99 @@ mod tests {
         }
     }
 
+    /// Probe: can we register R8 (Y) and R8G8 (UV) D3D11 textures with CUDA
+    /// and pull a non-null CUarray for each? This validates the dual-plane
+    /// zero-copy approach BEFORE we rewire the display callback. If this
+    /// FAILs on the host's driver, the entire Plan 2d zero-copy strategy
+    /// must be reconsidered — escalate rather than carrying on.
+    #[cfg(prdt_nvdec_bindings)]
+    #[test]
+    fn dual_plane_textures_register_with_cuda() {
+        use super::super::cuda::{check, CudaContext};
+        use super::super::ffi;
+        use windows::core::Interface;
+
+        let adapter = match pick_default_adapter() {
+            Ok(a) => a,
+            Err(_) => return,
+        };
+        if !adapter.is_nvidia() {
+            eprintln!("skipping: non-NVIDIA adapter");
+            return;
+        }
+        let dev = match D3d11Device::create(&adapter) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let ctx = match CudaContext::create_primary() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let _g = ctx.push().expect("push");
+
+        // Build the two textures: Y = R8 (W×H), UV = R8G8 (W/2 × H/2).
+        let (w, h) = (256u32, 256u32);
+        let y_tex = D3d11Texture::new_for_cuda_interop(&dev, w, h, TextureFormat::R8)
+            .expect("Y R8 interop tex");
+        let uv_tex = D3d11Texture::new_for_cuda_interop(&dev, w / 2, h / 2, TextureFormat::R8G8)
+            .expect("UV R8G8 interop tex");
+
+        // Register both with CUDA.
+        let mut y_res: ffi::CUgraphicsResource = std::ptr::null_mut();
+        let mut uv_res: ffi::CUgraphicsResource = std::ptr::null_mut();
+        unsafe {
+            let y_ptr: *mut std::ffi::c_void = y_tex.raw().as_raw() as *mut _;
+            let uv_ptr: *mut std::ffi::c_void = uv_tex.raw().as_raw() as *mut _;
+            check(
+                "cuGraphicsD3D11RegisterResource(Y R8)",
+                ffi::cuGraphicsD3D11RegisterResource(&mut y_res, y_ptr as *mut _, 0),
+            )
+            .expect("Y R8 register must succeed (Plan 2d hard requirement)");
+            check(
+                "cuGraphicsD3D11RegisterResource(UV R8G8)",
+                ffi::cuGraphicsD3D11RegisterResource(&mut uv_res, uv_ptr as *mut _, 0),
+            )
+            .expect("UV R8G8 register must succeed (Plan 2d hard requirement)");
+
+            // Map them, fetch CUarrays, confirm non-null.
+            let mut resources = [y_res, uv_res];
+            let map_r =
+                ffi::cuGraphicsMapResources(2, resources.as_mut_ptr(), std::ptr::null_mut());
+            assert!(
+                map_r == ffi::cudaError_enum::CUDA_SUCCESS,
+                "cuGraphicsMapResources failed: {}",
+                map_r as u32
+            );
+
+            let mut y_array: ffi::CUarray = std::ptr::null_mut();
+            let ry = ffi::cuGraphicsSubResourceGetMappedArray(&mut y_array, y_res, 0, 0);
+            let mut uv_array: ffi::CUarray = std::ptr::null_mut();
+            let ruv = ffi::cuGraphicsSubResourceGetMappedArray(&mut uv_array, uv_res, 0, 0);
+
+            let _ = ffi::cuGraphicsUnmapResources(2, resources.as_mut_ptr(), std::ptr::null_mut());
+            let _ = ffi::cuGraphicsUnregisterResource(y_res);
+            let _ = ffi::cuGraphicsUnregisterResource(uv_res);
+
+            assert!(
+                ry == ffi::cudaError_enum::CUDA_SUCCESS,
+                "Y array fetch CUresult={}",
+                ry as u32
+            );
+            assert!(!y_array.is_null(), "Y CUarray was null");
+            assert!(
+                ruv == ffi::cudaError_enum::CUDA_SUCCESS,
+                "UV array fetch CUresult={}",
+                ruv as u32
+            );
+            assert!(!uv_array.is_null(), "UV CUarray was null");
+        }
+    }
+
     /// End-to-end: encode a synthetic frame with NVENC, feed the resulting
-    /// HEVC NAL stream into the NVDEC consumer, and confirm that a
-    /// decoded NV12 buffer of the expected dimensions comes out. This is
-    /// the narrowest useful test for Plan 2d step 2b — it proves the
-    /// parser + decoder + CPU-copy path works end-to-end against a real
-    /// NVIDIA driver.
+    /// HEVC NAL stream into the NVDEC consumer, and confirm that a decoded
+    /// dual-plane GPU frame of the expected dimensions and formats comes out.
+    /// Proves the parser + decoder + CUDA-D3D11 zero-copy path works
+    /// end-to-end against a real NVIDIA driver.
     #[cfg(prdt_nvdec_bindings)]
     #[test]
     fn decode_single_nvenc_frame_round_trip() {
@@ -385,12 +385,12 @@ mod tests {
                 .unwrap_or_else(|e| panic!("submit frame {i} failed: {e}"));
         }
 
-        // take_latest_texture returns a fully populated D3D11 NV12
-        // texture — the path the viewer actually exercises.
-        let gpu = consumer
-            .take_latest_texture()
-            .expect("NVDEC should have produced at least one NV12 texture");
-        assert_eq!(gpu.width(), w);
-        assert_eq!(gpu.height(), h);
+        let dual = consumer
+            .take_latest_dual_plane()
+            .expect("NVDEC should have produced at least one dual-plane frame");
+        assert_eq!(dual.width, w);
+        assert_eq!(dual.height, h);
+        assert_eq!(dual.y_tex.format(), crate::d3d11::TextureFormat::R8);
+        assert_eq!(dual.uv_tex.format(), crate::d3d11::TextureFormat::R8G8);
     }
 }
