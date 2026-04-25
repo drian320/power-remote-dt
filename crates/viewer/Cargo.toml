@@ -30,6 +30,7 @@ raw-window-handle = "0.6"
 [target.'cfg(windows)'.dependencies]
 prdt-media-win = { path = "../media-win" }
 prdt-input-win = { path = "../input-win" }
+prdt-gui-viewer = { path = "../gui-viewer" }
 windows = { version = "0.58", features = [
     "Win32_Foundation",
 ] }
