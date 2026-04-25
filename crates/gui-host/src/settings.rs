@@ -40,6 +40,10 @@ pub fn render(
             ui.label(t!("host-settings-signaling-optional"));
             ui.text_edit_singleline(&mut local.host.signaling_url);
 
+            // Phase 4 G3: Auto-start on login.
+            ui.separator();
+            ui.checkbox(&mut local.host.auto_start, t!("settings-autostart-label"));
+
             // Language row (G6).
             ui.separator();
             ui.label(t!("settings-language"));
@@ -52,9 +56,13 @@ pub fn render(
                 }
                 if ui.button(t!("common-button-save")).clicked() {
                     let new_locale = local.gui.locale.clone();
+                    let auto_start = local.host.auto_start;
                     *config.lock().unwrap() = local.clone();
                     if let Err(e) = local.save(config_path) {
                         *error = Some(t!("host-error-config-save", error => e.to_string()));
+                    }
+                    if let Err(e) = crate::autostart::set_enabled(auto_start) {
+                        *error = Some(t!("host-error-autostart", error => e.to_string()));
                     }
                     apply_locale(&new_locale);
                     close = true;

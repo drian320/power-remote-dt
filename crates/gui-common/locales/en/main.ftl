@@ -20,6 +20,7 @@ host-recent-activity = Recent activity:
 host-error-key-load = key load failed: { $error }
 host-error-qr = qr generation failed: { $error }
 host-error-config-save = config save failed: { $error }
+host-error-autostart = autostart toggle failed: { $error }
 
 # Host settings
 host-settings-bind = Bind:
@@ -27,6 +28,7 @@ host-settings-monitor = Monitor:
 host-settings-bitrate = Bitrate (Mbps):
 host-settings-outgoing = Outgoing dir:
 host-settings-signaling-optional = Signaling URL (optional):
+settings-autostart-label = Auto-start on login
 
 # Viewer launcher
 viewer-window-title = Power Remote Desktop — Viewer

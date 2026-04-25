@@ -30,6 +30,13 @@ pub struct HostApp {
     join: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
     run_host: crate::RunHostFn,
     settings_open: bool,
+    tray: Option<crate::tray::TrayController>,
+    notifier: crate::notif::Notifier,
+    /// Cached state for tray icon updates (avoid re-setting the same icon
+    /// every frame).
+    last_tray_state: Option<crate::tray::HostState>,
+    /// Sticky exit flag set by tray Quit menu. Checked in update().
+    quit_requested: bool,
 }
 
 impl HostApp {
@@ -39,6 +46,7 @@ impl HostApp {
         tail: TailHandle,
         rt_handle: Handle,
         run_host: crate::RunHostFn,
+        tray: Option<crate::tray::TrayController>,
     ) -> Self {
         let key_path = config.lock().unwrap().host.key_file.clone();
         let mut app = Self {
@@ -58,6 +66,10 @@ impl HostApp {
             join: None,
             run_host,
             settings_open: false,
+            tray,
+            notifier: crate::notif::Notifier::new(),
+            last_tray_state: None,
+            quit_requested: false,
         };
         if app.stage == Stage::Idle {
             app.try_load_key(&key_path);
@@ -109,12 +121,109 @@ impl HostApp {
         self.join = None;
         self.stage = Stage::Idle;
     }
+
+    fn current_tray_state(&self) -> crate::tray::HostState {
+        if self.error.is_some() {
+            crate::tray::HostState::Error
+        } else {
+            match self.stage {
+                Stage::Listening => crate::tray::HostState::Listening,
+                _ => crate::tray::HostState::Idle,
+            }
+        }
+    }
+
+    fn dispatch_tray_action(&mut self, action: crate::tray::TrayAction) {
+        match action {
+            crate::tray::TrayAction::OpenSettings => {
+                self.settings_open = true;
+            }
+            crate::tray::TrayAction::StopListening => {
+                if self.stage == Stage::Listening {
+                    self.stop_listening();
+                }
+            }
+            crate::tray::TrayAction::ShowLogs => {
+                if let Some(root) = prdt_gui_common::config_root() {
+                    let _ = open_in_explorer(&root);
+                }
+            }
+            crate::tray::TrayAction::Quit => {
+                self.quit_requested = true;
+            }
+        }
+    }
+
+    fn check_log_for_notifications(&mut self) {
+        let lines = self.tail.snapshot();
+        if let Some(last) = lines.last() {
+            if last.contains("viewer connected from") {
+                self.notifier.fire(crate::notif::NotifKind::Connected, last);
+            } else if last.contains("viewer disconnected") {
+                self.notifier
+                    .fire(crate::notif::NotifKind::Disconnected, last);
+            } else if last.contains("ERROR")
+                || last.contains("encoder failed")
+                || last.contains("DXGI_ERROR")
+            {
+                self.notifier.fire(crate::notif::NotifKind::Error, last);
+            }
+        }
+    }
+}
+
+fn open_in_explorer(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        std::process::Command::new("explorer")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+    }
 }
 
 impl eframe::App for HostApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Re-paint at 4 Hz so log tail flows even without input events.
         ctx.request_repaint_after(std::time::Duration::from_millis(250));
+
+        // Tray: update icon when state changes; drain menu events.
+        if let Some(tray) = &self.tray {
+            let s = self.current_tray_state();
+            if Some(s) != self.last_tray_state {
+                tray.set_state(s);
+                self.last_tray_state = Some(s);
+            }
+            if let Some(action) = tray.poll_menu() {
+                self.dispatch_tray_action(action);
+            }
+        }
+
+        // Hide-to-tray: intercept the user pressing the window 'x' button.
+        // Only hide if a tray icon is alive (otherwise the window is the
+        // only way back to the app).
+        if self.tray.is_some() && ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+
+        // True quit (from tray): close the viewport for real.
+        if self.quit_requested {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
 
         if self.settings_open {
             crate::settings::render(
@@ -176,6 +285,7 @@ impl HostApp {
     }
 
     fn show_listening(&mut self, ui: &mut egui::Ui) {
+        self.check_log_for_notifications();
         let bind = self.config.lock().unwrap().host.bind.clone();
         ui.heading(t!("host-status-listening", bind => bind.as_str()));
         ui.add_space(8.0);
