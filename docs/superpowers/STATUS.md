@@ -1,9 +1,9 @@
 # power-remote-dt — Project Status & Roadmap
 
 **Last updated:** 2026-04-25
-**Latest tag:** `phase4-g5-complete`
-**Branch state:** master (all phase work merged) — **Phase 4 完了**
-**Test count:** 276 automated tests across the workspace, all passing
+**Latest tag:** `phase4-g5-followup-complete`
+**Branch state:** master (all phase work merged) — **Phase 4 完了 + G5 fast-follow 適用済み**
+**Test count:** 277 automated tests across the workspace, all passing
 
 ---
 
