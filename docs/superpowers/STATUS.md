@@ -1,9 +1,9 @@
 # power-remote-dt — Project Status & Roadmap
 
 **Last updated:** 2026-04-25
-**Latest tag:** `phase4-g4-complete`
-**Branch state:** master (all phase work merged)
-**Test count:** 266 automated tests across the workspace, all passing
+**Latest tag:** `phase4-g5-complete`
+**Branch state:** master (all phase work merged) — **Phase 4 完了**
+**Test count:** 276 automated tests across the workspace, all passing
 
 ---
 
@@ -77,6 +77,7 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
 | `phase4-g2-complete` | viewer in-stream overlay(B1 別プロセス)。`prdt-viewer-overlay`(eframe)を ESC で spawn、ファイル IPC(stats.json 1Hz / control.json polling)で latency p50/p95/p99 表示 + Resume/Disconnect ボタン。`dirs::cache_dir()/prdt/overlay-ipc/<pid>/` で PID 隔離、Drop で child kill + dir 削除。`--headless` で無効。Win/Linux/macOS 同一実装。モバイルは Phase 5+ で viewer 全体再実装時。 |
 | `phase4-g3-complete` | tray + 通知 + auto-start(Win)。`tray-icon` 0.14、`notify-rust` 4.x(1s debounce)、`winreg` で HKCU\Run\PrdtHost = "<exe> --headless"。Hide-to-tray、4 項目メニュー(Settings/Stop/Logs/Quit)。プレースホルダ PNG(build.rs 生成、G5 で正式)。10 i18n ID。 |
 | `phase4-g4-complete` | MSI インストーラ + 自動アップデート。`wix/main.wxs`(perUser %LOCALAPPDATA%\prdt\bin\、UpgradeCode 固定、Start Menu ショートカット)、`cargo-wix` 0.3 + WiX 3.14。`gui-host::update`(`self_update` 0.41 + GitHub Releases、7 日間隔、Settings に banner + Install)。3 GUI binary に `winres` で マルチ解像度 ICO + version resource。`docs/build-msi.md`。コード署名は G5。 |
+| `phase4-g5-complete` | クラッシュレポータ + Authenticode 署名 scaffolding。`prdt_gui_common::crashlog`(`install_panic_hook` → `dirs::cache_dir()/prdt/crashes/<ts>-<bin>-<pid>.json`、`list_pending_crashes`(newest first)、`mark_acknowledged`(→ `acknowledged/`)、`register_tail` で TailHandle のログ行同梱、`truncate_for_display` で UTF-8 安全切詰)。3 GUI binary が `main()` で hook install。gui-host 起動時に pending 読込 → Settings の banner で表示 + Open folder + Acknowledge all。i18n 4 ID(crashlog-*)。`scripts/sign-msi.ps1`(signtool /tr RFC 3161 + SHA-256)、`docs/sign-and-release.md`(EV/OV cert 手順 + release checklist)。cert 購入は Phase 5 公開時。 |
 
 ---
 
@@ -106,11 +107,15 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
 
 ### **B. 中規模、優先度中**
 
-#### B1. Phase 4 GUI(本格) — **G1 完了 (2026-04-25, `phase4-g1-complete`)**
-- ~~spec~~ → `docs/superpowers/specs/2026-04-23-phase4-gui-design.md`(全体)+ `2026-04-25-phase4-g1-egui-foundation-design.md`(G1)
+#### ~~B1. Phase 4 GUI(本格)~~ — **完了 (2026-04-25, `phase4-g5-complete`)**
+- ~~spec~~ → `docs/superpowers/specs/2026-04-23-phase4-gui-design.md`(全体)+ G1〜G6 各 spec
 - ~~G1: egui 基盤 + host GUI + viewer launcher~~ ✅
-- 残: G5 crash reporter + Authenticode コード署名 (~1 週、cert 購入が必要)
-- 合計残: ~1 週(G1 + G2 + G3 + G4 + G6 で ~7 週分完了、Phase 4 ほぼ完了)
+- ~~G2: viewer in-stream overlay (B1 別プロセス)~~ ✅
+- ~~G3: tray + 通知 + auto-start~~ ✅
+- ~~G4: MSI インストーラ + 自動アップデート~~ ✅
+- ~~G5: crash reporter + Authenticode signing scaffolding~~ ✅(cert 購入は Phase 5)
+- ~~G6: i18n (英/日)~~ ✅
+- 合計 ~8 週分の作業を完了、Phase 4 完了
 
 #### B2. Phase 1 — Linux サポート
 - **状態**: 着手前。Windows-specific 部分(`media-win` / `input-win`)を Linux 等価実装に置換
