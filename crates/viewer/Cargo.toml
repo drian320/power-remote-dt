@@ -31,6 +31,7 @@ raw-window-handle = "0.6"
 prdt-media-win = { path = "../media-win" }
 prdt-input-win = { path = "../input-win" }
 prdt-gui-viewer = { path = "../gui-viewer" }
+prdt-gui-common = { path = "../gui-common" }
 windows = { version = "0.58", features = [
     "Win32_Foundation",
 ] }

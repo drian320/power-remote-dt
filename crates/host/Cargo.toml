@@ -31,3 +31,4 @@ prdt-media-win = { path = "../media-win" }
 prdt-input-win = { path = "../input-win" }
 tokio-util = { version = "0.7", features = ["rt"] }
 prdt-gui-host = { path = "../gui-host" }
+prdt-gui-common = { path = "../gui-common" }

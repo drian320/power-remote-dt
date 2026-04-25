@@ -772,10 +772,8 @@ fn main() -> Result<()> {
         )
         .init();
 
-    // Log panics via tracing so they appear in viewer.log even with panic=abort.
-    std::panic::set_hook(Box::new(|info| {
-        tracing::error!(panic = %info, "PANIC");
-    }));
+    // Phase 4 G5: install crash reporter (writes JSON dump + tracing error).
+    prdt_gui_common::install_panic_hook(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
 
     let mut args = Args::parse();
 
