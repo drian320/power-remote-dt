@@ -94,6 +94,9 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 self_update = { version = "0.41", default-features = false, features = ["archive-zip", "compression-zip-deflate", "rustls"] }
 semver = "1"
 
+# Phase 4 G5 (crash reporter timestamps)
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

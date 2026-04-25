@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
+use crate::app::open_in_explorer;
 use prdt_gui_common::t;
 use prdt_gui_common::Config;
 
@@ -16,6 +17,7 @@ pub struct UpdateUi {
     pub last_checked: Option<SystemTime>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     ctx: &egui::Context,
     config: &Arc<Mutex<Config>>,
@@ -24,6 +26,7 @@ pub fn render(
     error: &mut Option<String>,
     update_ui: &Arc<Mutex<UpdateUi>>,
     rt_handle: &tokio::runtime::Handle,
+    pending_crashes: &mut Vec<prdt_gui_common::CrashReport>,
 ) {
     let mut local: Config = config.lock().unwrap().clone();
     let mut close = false;
@@ -60,6 +63,43 @@ pub fn render(
                     }
                     crate::update::CheckStatus::Idle => {}
                 }
+            }
+
+            // Phase 4 G5: Pending crash reports from previous sessions.
+            if !pending_crashes.is_empty() {
+                ui.colored_label(
+                    egui::Color32::from_rgb(255, 220, 100),
+                    t!(
+                        "crashlog-pending-heading",
+                        n => pending_crashes.len() as i64,
+                    ),
+                );
+                for r in pending_crashes.iter().take(5) {
+                    let summary = prdt_gui_common::truncate_for_display(&r.panic_message, 80);
+                    ui.label(format!(
+                        "{}  {}  \"{}\"",
+                        r.timestamp_iso, r.binary, summary
+                    ));
+                }
+                ui.horizontal(|ui| {
+                    if ui.button(t!("crashlog-button-open-folder")).clicked() {
+                        if let Some(dir) = prdt_gui_common::crashlog::crashes_dir() {
+                            let _ = open_in_explorer(&dir);
+                        }
+                    }
+                    if ui.button(t!("crashlog-button-acknowledge")).clicked() {
+                        let snapshot = pending_crashes.clone();
+                        for r in &snapshot {
+                            if let Err(e) =
+                                prdt_gui_common::mark_acknowledged(&r.timestamp_iso, &r.binary)
+                            {
+                                tracing::warn!(?e, "mark_acknowledged failed");
+                            }
+                        }
+                        pending_crashes.clear();
+                    }
+                });
+                ui.separator();
             }
 
             ui.label(t!("host-settings-bind"));

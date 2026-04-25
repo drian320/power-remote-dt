@@ -26,6 +26,8 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    prdt_gui_common::install_panic_hook(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+
     let args = Args::parse();
 
     // Apply the user's locale preference (best-effort: read viewer's

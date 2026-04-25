@@ -588,6 +588,7 @@ fn main() -> Result<()> {
 #[tokio::main(flavor = "multi_thread")]
 async fn run_cli(args: Args) -> Result<()> {
     init_tracing();
+    prdt_gui_common::install_panic_hook(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
     run_host(args, None, tokio_util::sync::CancellationToken::new()).await
 }
 

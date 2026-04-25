@@ -32,6 +32,21 @@ Output: `target/wix/prdt-setup-vX.Y.Z.msi` (where `X.Y.Z` is the workspace versi
 
 `--no-build` tells `cargo-wix` to use the binaries we already produced in step 1. Without it, `cargo-wix` runs `cargo build --release` itself, which is fine but slower in CI loops.
 
+## Sign the MSI (optional, recommended for public release)
+
+Once a code-signing certificate is available, sign the generated MSI with:
+
+```powershell
+scripts/sign-msi.ps1 `
+    -CertPath "C:\path\to\prdt-codesign.pfx" `
+    -CertPassword "<password>" `
+    -MsiPath "target/wix/prdt-setup-vX.Y.Z.msi"
+```
+
+See [`docs/sign-and-release.md`](sign-and-release.md) for cert procurement, timestamp servers, and the full release checklist.
+
+Unsigned MSIs install fine but trigger Windows SmartScreen warnings on first run. Signing is recommended before public release.
+
 ## Smoke test on a clean Win10/11 VM
 
 1. Copy `target/wix/prdt-setup-vX.Y.Z.msi` to a Windows 10/11 VM.
