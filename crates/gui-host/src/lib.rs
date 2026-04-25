@@ -4,6 +4,8 @@ mod app;
 #[allow(dead_code)] // wired into Settings/HostApp in G3 Task 5
 mod autostart;
 mod keygen;
+#[allow(dead_code)] // wired into HostApp in G3 Task 5
+mod notif;
 mod settings;
 
 use std::path::PathBuf;
