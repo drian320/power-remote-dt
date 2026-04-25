@@ -29,6 +29,7 @@ use windows::Win32::Graphics::Dxgi::Common::{
 use crate::d3d11::swapchain::SwapChain;
 use crate::d3d11::D3d11Device;
 use crate::error::{MediaError, Result};
+#[cfg(prdt_nvdec_bindings)]
 use crate::nvdec::decoder::DualPlaneFrame;
 
 const VS_SOURCE: &str = r#"
@@ -136,6 +137,7 @@ impl DualPlaneYuvRenderer {
     /// Render the dual-plane `frame` into the `swap` back-buffer's BGRA
     /// surface using the YUV→RGB pixel shader. Must be called on the thread
     /// that owns the D3D11 immediate context.
+    #[cfg(prdt_nvdec_bindings)]
     pub fn render(&self, frame: &DualPlaneFrame, swap: &SwapChain) -> Result<()> {
         let backbuf = swap.backbuffer()?;
         let out_w = swap.width();
