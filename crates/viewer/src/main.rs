@@ -13,11 +13,9 @@ use prdt_input_win::{
     clipboard_sequence_number, read_clipboard_text, write_clipboard_text, RawInputCapturer,
     MAX_CLIPBOARD_BYTES,
 };
-use prdt_media_win::{
-    pick_default_adapter, D3d11Device, MfD3d11Consumer, Nv12Renderer, SwapChain,
-};
 #[cfg(prdt_nvdec_bindings)]
 use prdt_media_win::NvdecD3d11Consumer;
+use prdt_media_win::{pick_default_adapter, D3d11Device, MfD3d11Consumer, Nv12Renderer, SwapChain};
 use prdt_protocol::{frame::Codec, ControlMessage, InputEvent, MonitorRect, VideoConsumer};
 
 mod latency;

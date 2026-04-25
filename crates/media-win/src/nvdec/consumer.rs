@@ -15,10 +15,10 @@ use std::sync::Arc;
 
 #[cfg(prdt_nvdec_bindings)]
 use super::cuda::CudaContext;
-#[cfg(prdt_nvdec_bindings)]
-use super::decoder::{CuvidDecoder, DualPlaneFrame};
 #[cfg(all(prdt_nvdec_bindings, any(test, feature = "cpu-nv12")))]
 use super::decoder::DecodedFrame;
+#[cfg(prdt_nvdec_bindings)]
+use super::decoder::{CuvidDecoder, DualPlaneFrame};
 use crate::d3d11::D3d11Device;
 use crate::error::MediaError;
 
@@ -299,7 +299,8 @@ mod tests {
 
             // Map them, fetch CUarrays, confirm non-null.
             let mut resources = [y_res, uv_res];
-            let map_r = ffi::cuGraphicsMapResources(2, resources.as_mut_ptr(), std::ptr::null_mut());
+            let map_r =
+                ffi::cuGraphicsMapResources(2, resources.as_mut_ptr(), std::ptr::null_mut());
             assert!(
                 map_r == ffi::cudaError_enum::CUDA_SUCCESS,
                 "cuGraphicsMapResources failed: {}",
@@ -315,7 +316,11 @@ mod tests {
             let _ = ffi::cuGraphicsUnregisterResource(y_res);
             let _ = ffi::cuGraphicsUnregisterResource(uv_res);
 
-            assert!(ry == ffi::cudaError_enum::CUDA_SUCCESS, "Y array fetch CUresult={}", ry as u32);
+            assert!(
+                ry == ffi::cudaError_enum::CUDA_SUCCESS,
+                "Y array fetch CUresult={}",
+                ry as u32
+            );
             assert!(!y_array.is_null(), "Y CUarray was null");
             assert!(
                 ruv == ffi::cudaError_enum::CUDA_SUCCESS,

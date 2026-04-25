@@ -23,6 +23,10 @@ use crate::error::{MediaError, Result};
 // render() and the types it consumes are gated together with the NVDEC
 // bindings, since DualPlaneFrame lives under nvdec::decoder.
 #[cfg(prdt_nvdec_bindings)]
+use crate::d3d11::swapchain::SwapChain;
+#[cfg(prdt_nvdec_bindings)]
+use crate::nvdec::decoder::DualPlaneFrame;
+#[cfg(prdt_nvdec_bindings)]
 use windows::core::Interface;
 #[cfg(prdt_nvdec_bindings)]
 use windows::Win32::Graphics::Direct3D::D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
@@ -39,10 +43,6 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8_UNORM,
 };
-#[cfg(prdt_nvdec_bindings)]
-use crate::d3d11::swapchain::SwapChain;
-#[cfg(prdt_nvdec_bindings)]
-use crate::nvdec::decoder::DualPlaneFrame;
 
 const VS_SOURCE: &str = r#"
 struct VsOut {
@@ -135,8 +135,8 @@ impl DualPlaneYuvRenderer {
                 .CreateSamplerState(&sampler_desc, Some(&mut sampler))
                 .map_err(|e| MediaError::d3d11("CreateSamplerState", e))?;
         }
-        let sampler = sampler
-            .ok_or_else(|| MediaError::Other("CreateSamplerState returned null".into()))?;
+        let sampler =
+            sampler.ok_or_else(|| MediaError::Other("CreateSamplerState returned null".into()))?;
 
         Ok(Self {
             dev: dev.clone(),
@@ -173,39 +173,36 @@ impl DualPlaneYuvRenderer {
                 .CreateRenderTargetView(&backbuf_res, Some(&rtv_desc), Some(&mut rtv))
                 .map_err(|e| MediaError::d3d11("CreateRenderTargetView", e))?;
         }
-        let rtv = rtv
-            .ok_or_else(|| MediaError::Other("CreateRenderTargetView returned null".into()))?;
+        let rtv =
+            rtv.ok_or_else(|| MediaError::Other("CreateRenderTargetView returned null".into()))?;
 
         // SRVs on Y (R8) and UV (R8G8).
-        let make_srv =
-            |tex: &crate::d3d11::D3d11Texture,
-             fmt|
-             -> Result<ID3D11ShaderResourceView> {
-                let desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
-                    Format: fmt,
-                    ViewDimension: D3D_SRV_DIMENSION_TEXTURE2D,
-                    Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
-                        Texture2D: D3D11_TEX2D_SRV {
-                            MostDetailedMip: 0,
-                            MipLevels: 1,
-                        },
+        let make_srv = |tex: &crate::d3d11::D3d11Texture,
+                        fmt|
+         -> Result<ID3D11ShaderResourceView> {
+            let desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
+                Format: fmt,
+                ViewDimension: D3D_SRV_DIMENSION_TEXTURE2D,
+                Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
+                    Texture2D: D3D11_TEX2D_SRV {
+                        MostDetailedMip: 0,
+                        MipLevels: 1,
                     },
-                };
-                let res: ID3D11Resource = tex
-                    .raw()
-                    .cast()
-                    .map_err(|e| MediaError::d3d11("plane Texture2D -> Resource", e))?;
-                let mut srv: Option<ID3D11ShaderResourceView> = None;
-                unsafe {
-                    self.dev
-                        .device()
-                        .CreateShaderResourceView(&res, Some(&desc), Some(&mut srv))
-                        .map_err(|e| MediaError::d3d11("CreateShaderResourceView", e))?;
-                }
-                srv.ok_or_else(|| {
-                    MediaError::Other("CreateShaderResourceView returned null".into())
-                })
+                },
             };
+            let res: ID3D11Resource = tex
+                .raw()
+                .cast()
+                .map_err(|e| MediaError::d3d11("plane Texture2D -> Resource", e))?;
+            let mut srv: Option<ID3D11ShaderResourceView> = None;
+            unsafe {
+                self.dev
+                    .device()
+                    .CreateShaderResourceView(&res, Some(&desc), Some(&mut srv))
+                    .map_err(|e| MediaError::d3d11("CreateShaderResourceView", e))?;
+            }
+            srv.ok_or_else(|| MediaError::Other("CreateShaderResourceView returned null".into()))
+        };
         let y_srv = make_srv(&frame.y_tex, DXGI_FORMAT_R8_UNORM)?;
         let uv_srv = make_srv(&frame.uv_tex, DXGI_FORMAT_R8G8_UNORM)?;
 

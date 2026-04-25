@@ -79,11 +79,7 @@ impl DualCache {
     /// Build a fresh dual cache for `(width, height)`. `width` is the Y plane
     /// width in pixels; the UV texture is half that in each dimension.
     /// Caller must hold the CUDA context push BEFORE calling this.
-    fn new(
-        dev: &crate::d3d11::D3d11Device,
-        width: u32,
-        height: u32,
-    ) -> Result<Self, MediaError> {
+    fn new(dev: &crate::d3d11::D3d11Device, width: u32, height: u32) -> Result<Self, MediaError> {
         use crate::d3d11::{D3d11Texture, TextureFormat};
 
         let y_tex = D3d11Texture::new_for_cuda_interop(dev, width, height, TextureFormat::R8)?;
@@ -507,8 +503,7 @@ unsafe extern "C" fn handle_picture_display(
         let cache_guard = state.dual_cache.lock().unwrap();
         let cache = cache_guard.as_ref().expect("dual_cache populated above");
         let mut resources = [cache.y_cuda_res, cache.uv_cuda_res];
-        let map_r =
-            ffi::cuGraphicsMapResources(2, resources.as_mut_ptr(), std::ptr::null_mut());
+        let map_r = ffi::cuGraphicsMapResources(2, resources.as_mut_ptr(), std::ptr::null_mut());
         if map_r != ffi::cudaError_enum::CUDA_SUCCESS {
             record_error(
                 state,
@@ -520,14 +515,8 @@ unsafe extern "C" fn handle_picture_display(
 
         let mut y_array: ffi::CUarray = std::ptr::null_mut();
         let mut uv_array: ffi::CUarray = std::ptr::null_mut();
-        let ry =
-            ffi::cuGraphicsSubResourceGetMappedArray(&mut y_array, cache.y_cuda_res, 0, 0);
-        let ruv = ffi::cuGraphicsSubResourceGetMappedArray(
-            &mut uv_array,
-            cache.uv_cuda_res,
-            0,
-            0,
-        );
+        let ry = ffi::cuGraphicsSubResourceGetMappedArray(&mut y_array, cache.y_cuda_res, 0, 0);
+        let ruv = ffi::cuGraphicsSubResourceGetMappedArray(&mut uv_array, cache.uv_cuda_res, 0, 0);
         if ry != ffi::cudaError_enum::CUDA_SUCCESS
             || y_array.is_null()
             || ruv != ffi::cudaError_enum::CUDA_SUCCESS
@@ -568,8 +557,7 @@ unsafe extern "C" fn handle_picture_display(
             }
         }
 
-        let _ =
-            ffi::cuGraphicsUnmapResources(2, resources.as_mut_ptr(), std::ptr::null_mut());
+        let _ = ffi::cuGraphicsUnmapResources(2, resources.as_mut_ptr(), std::ptr::null_mut());
 
         if copy_ok {
             *state.latest_dual.lock().unwrap() = Some(DualPlaneFrame {
