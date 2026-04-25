@@ -78,6 +78,11 @@ rfd = "0.14"
 toml = "0.8"
 dirs = "5.0"
 
+# i18n (Phase 4 G6)
+fluent-templates = "0.9"
+sys-locale = "0.3"
+unic-langid = "0.9"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
