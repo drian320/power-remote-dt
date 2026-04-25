@@ -580,9 +580,7 @@ fn main() -> Result<()> {
     let args_arc = std::sync::Arc::new(args.clone());
     let run_host_fn: prdt_gui_host::RunHostFn = std::sync::Arc::new(move |cancel| {
         let args = args_arc.clone();
-        tokio::spawn(async move {
-            run_host((*args).clone(), None, cancel).await
-        })
+        tokio::spawn(async move { run_host((*args).clone(), None, cancel).await })
     });
     prdt_gui_host::run_host_gui(args.config.clone(), run_host_fn)
 }
