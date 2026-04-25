@@ -330,6 +330,89 @@ mod tests {
         }
     }
 
+    /// Probe: can we register R8 (Y) and R8G8 (UV) D3D11 textures with CUDA
+    /// and pull a non-null CUarray for each? This validates the dual-plane
+    /// zero-copy approach BEFORE we rewire the display callback. If this
+    /// FAILs on the host's driver, the entire Plan 2d zero-copy strategy
+    /// must be reconsidered — escalate rather than carrying on.
+    #[cfg(prdt_nvdec_bindings)]
+    #[test]
+    fn dual_plane_textures_register_with_cuda() {
+        use super::super::cuda::{check, CudaContext};
+        use super::super::ffi;
+        use windows::core::Interface;
+
+        let adapter = match pick_default_adapter() {
+            Ok(a) => a,
+            Err(_) => return,
+        };
+        if !adapter.is_nvidia() {
+            eprintln!("skipping: non-NVIDIA adapter");
+            return;
+        }
+        let dev = match D3d11Device::create(&adapter) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let ctx = match CudaContext::create_primary() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let _g = ctx.push().expect("push");
+
+        // Build the two textures: Y = R8 (W×H), UV = R8G8 (W/2 × H/2).
+        let (w, h) = (256u32, 256u32);
+        let y_tex = D3d11Texture::new_for_cuda_interop(&dev, w, h, TextureFormat::R8)
+            .expect("Y R8 interop tex");
+        let uv_tex = D3d11Texture::new_for_cuda_interop(&dev, w / 2, h / 2, TextureFormat::R8G8)
+            .expect("UV R8G8 interop tex");
+
+        // Register both with CUDA.
+        let mut y_res: ffi::CUgraphicsResource = std::ptr::null_mut();
+        let mut uv_res: ffi::CUgraphicsResource = std::ptr::null_mut();
+        unsafe {
+            let y_ptr: *mut std::ffi::c_void = y_tex.raw().as_raw() as *mut _;
+            let uv_ptr: *mut std::ffi::c_void = uv_tex.raw().as_raw() as *mut _;
+            check(
+                "cuGraphicsD3D11RegisterResource(Y R8)",
+                ffi::cuGraphicsD3D11RegisterResource(&mut y_res, y_ptr as *mut _, 0),
+            )
+            .expect("Y R8 register must succeed (Plan 2d hard requirement)");
+            check(
+                "cuGraphicsD3D11RegisterResource(UV R8G8)",
+                ffi::cuGraphicsD3D11RegisterResource(&mut uv_res, uv_ptr as *mut _, 0),
+            )
+            .expect("UV R8G8 register must succeed (Plan 2d hard requirement)");
+
+            // Map them, fetch CUarrays, confirm non-null.
+            let mut resources = [y_res, uv_res];
+            let map_r = ffi::cuGraphicsMapResources(2, resources.as_mut_ptr(), std::ptr::null_mut());
+            assert!(
+                map_r == ffi::cudaError_enum::CUDA_SUCCESS,
+                "cuGraphicsMapResources failed: {}",
+                map_r as u32
+            );
+
+            let mut y_array: ffi::CUarray = std::ptr::null_mut();
+            let ry = ffi::cuGraphicsSubResourceGetMappedArray(&mut y_array, y_res, 0, 0);
+            let mut uv_array: ffi::CUarray = std::ptr::null_mut();
+            let ruv = ffi::cuGraphicsSubResourceGetMappedArray(&mut uv_array, uv_res, 0, 0);
+
+            let _ = ffi::cuGraphicsUnmapResources(2, resources.as_mut_ptr(), std::ptr::null_mut());
+            let _ = ffi::cuGraphicsUnregisterResource(y_res);
+            let _ = ffi::cuGraphicsUnregisterResource(uv_res);
+
+            assert!(ry == ffi::cudaError_enum::CUDA_SUCCESS, "Y array fetch CUresult={}", ry as u32);
+            assert!(!y_array.is_null(), "Y CUarray was null");
+            assert!(
+                ruv == ffi::cudaError_enum::CUDA_SUCCESS,
+                "UV array fetch CUresult={}",
+                ruv as u32
+            );
+            assert!(!uv_array.is_null(), "UV CUarray was null");
+        }
+    }
+
     /// End-to-end: encode a synthetic frame with NVENC, feed the resulting
     /// HEVC NAL stream into the NVDEC consumer, and confirm that a
     /// decoded NV12 buffer of the expected dimensions comes out. This is
