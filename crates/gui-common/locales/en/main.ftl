@@ -86,3 +86,12 @@ tray-menu-quit = Quit
 notif-connected = Viewer connected: { $detail }
 notif-disconnected = Viewer disconnected
 notif-error = Host error: { $detail }
+
+# Auto-update (Phase 4 G4)
+update-section-heading = Updates
+update-button-check = Check for updates
+update-button-install = Install
+update-checking = Checking for updates…
+update-up-to-date = You are running the latest version.
+update-available = Update available: { $version }
+update-error = Update check failed: { $error }

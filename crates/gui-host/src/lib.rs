@@ -7,6 +7,7 @@ mod keygen;
 mod notif;
 mod settings;
 mod tray;
+pub mod update;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

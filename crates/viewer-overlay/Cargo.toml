@@ -4,6 +4,7 @@ version = "0.0.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+build = "build.rs"
 
 [dependencies]
 prdt-gui-common = { path = "../gui-common" }
@@ -16,6 +17,9 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 anyhow = "1"
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

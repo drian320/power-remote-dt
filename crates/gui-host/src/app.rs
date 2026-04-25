@@ -37,6 +37,7 @@ pub struct HostApp {
     last_tray_state: Option<crate::tray::HostState>,
     /// Sticky exit flag set by tray Quit menu. Checked in update().
     quit_requested: bool,
+    update_ui: Arc<Mutex<crate::settings::UpdateUi>>,
 }
 
 impl HostApp {
@@ -70,6 +71,7 @@ impl HostApp {
             notifier: crate::notif::Notifier::new(),
             last_tray_state: None,
             quit_requested: false,
+            update_ui: Arc::new(Mutex::new(crate::settings::UpdateUi::default())),
         };
         if app.stage == Stage::Idle {
             app.try_load_key(&key_path);
@@ -232,6 +234,8 @@ impl eframe::App for HostApp {
                 &self.config_path,
                 &mut self.settings_open,
                 &mut self.error,
+                &self.update_ui,
+                &self.rt_handle,
             );
         }
 

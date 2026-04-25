@@ -86,3 +86,12 @@ tray-menu-quit = 終了
 notif-connected = Viewer 接続: { $detail }
 notif-disconnected = Viewer が切断されました
 notif-error = ホストエラー: { $detail }
+
+# 自動アップデート (Phase 4 G4)
+update-section-heading = アップデート
+update-button-check = アップデートを確認
+update-button-install = インストール
+update-checking = アップデートを確認中…
+update-up-to-date = 最新版を利用中です。
+update-available = 新しいバージョン: { $version }
+update-error = アップデート確認に失敗: { $error }
