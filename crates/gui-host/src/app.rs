@@ -71,9 +71,7 @@ impl HostApp {
                 self.pubkey_b64 = out.pubkey_b64;
                 self.stage = Stage::Idle;
             }
-            Err(e) => {
-                self.error = Some(t!("host-error-key-load", error => e.to_string()))
-            }
+            Err(e) => self.error = Some(t!("host-error-key-load", error => e.to_string())),
         }
     }
 
@@ -83,8 +81,7 @@ impl HostApp {
         }
         match generate_qr(&self.pubkey_b64, 4) {
             Ok(image) => {
-                let handle =
-                    ctx.load_texture("host_qr", image, egui::TextureOptions::default());
+                let handle = ctx.load_texture("host_qr", image, egui::TextureOptions::default());
                 self.qr_handle = Some(handle);
             }
             Err(e) => self.error = Some(t!("host-error-qr", error => e.to_string())),

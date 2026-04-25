@@ -34,8 +34,16 @@ pub fn render(ctx: &egui::Context, app: &mut LauncherApp) {
             ui.add_space(4.0);
             ui.label(t!("viewer-form-mode"));
             ui.horizontal(|ui| {
-                ui.radio_value(&mut app.draft_host.mode, "direct".into(), t!("viewer-form-mode-direct"));
-                ui.radio_value(&mut app.draft_host.mode, "signaling".into(), t!("viewer-form-mode-signaling"));
+                ui.radio_value(
+                    &mut app.draft_host.mode,
+                    "direct".into(),
+                    t!("viewer-form-mode-direct"),
+                );
+                ui.radio_value(
+                    &mut app.draft_host.mode,
+                    "signaling".into(),
+                    t!("viewer-form-mode-signaling"),
+                );
             });
             if app.draft_host.mode == "direct" {
                 ui.label(t!("viewer-form-addr"));

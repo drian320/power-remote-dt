@@ -64,7 +64,10 @@ impl eframe::App for LauncherApp {
             let mut try_connect = false;
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(self.selected.is_some(), egui::Button::new(t!("viewer-button-connect")))
+                    .add_enabled(
+                        self.selected.is_some(),
+                        egui::Button::new(t!("viewer-button-connect")),
+                    )
                     .clicked()
                 {
                     try_connect = true;
@@ -92,7 +95,9 @@ impl LauncherApp {
     pub(crate) fn try_connect(&mut self) {
         let Some(idx) = self.selected else { return };
         let cfg = self.config.lock().unwrap();
-        let Some(entry) = cfg.viewer.hosts.get(idx) else { return };
+        let Some(entry) = cfg.viewer.hosts.get(idx) else {
+            return;
+        };
         let viewer = &cfg.viewer;
         let mode = if entry.mode == "signaling" {
             crate::ConnectMode::Signaling

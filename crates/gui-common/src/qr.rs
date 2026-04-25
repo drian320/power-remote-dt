@@ -16,7 +16,11 @@ pub fn generate(text: &str, scale: usize) -> Result<ColorImage, QrError> {
     let modules = code.width();
     let pixel_w = modules * scale;
     let mut pixels = vec![egui::Color32::WHITE; pixel_w * pixel_w];
-    let bools: Vec<bool> = code.to_colors().into_iter().map(|c| c == Color::Dark).collect();
+    let bools: Vec<bool> = code
+        .to_colors()
+        .into_iter()
+        .map(|c| c == Color::Dark)
+        .collect();
     for my in 0..modules {
         for mx in 0..modules {
             if bools[my * modules + mx] {

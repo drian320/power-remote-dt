@@ -13,8 +13,16 @@ pub fn render(ctx: &egui::Context, app: &mut LauncherApp) {
         .show(ctx, |ui| {
             ui.label(t!("viewer-decoder-label"));
             ui.horizontal(|ui| {
-                ui.radio_value(&mut local.viewer.decoder, "mf".into(), t!("viewer-settings-decoder-mf"));
-                ui.radio_value(&mut local.viewer.decoder, "nvdec".into(), t!("viewer-settings-decoder-nvdec"));
+                ui.radio_value(
+                    &mut local.viewer.decoder,
+                    "mf".into(),
+                    t!("viewer-settings-decoder-mf"),
+                );
+                ui.radio_value(
+                    &mut local.viewer.decoder,
+                    "nvdec".into(),
+                    t!("viewer-settings-decoder-nvdec"),
+                );
             });
 
             ui.label(t!("viewer-settings-resolution"));
