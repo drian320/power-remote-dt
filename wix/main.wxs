@@ -1,0 +1,113 @@
+<?xml version='1.0' encoding='windows-1252'?>
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+  <!--
+    Phase 4 G4 — power-remote-dt MSI installer.
+
+    UpgradeCode is FIXED. It identifies "power-remote-dt" across all
+    versions; never change it (changing it makes new installs treat old
+    versions as a different product, leaving them un-uninstallable).
+
+    Per-user install (InstallScope='perUser') under %LOCALAPPDATA%\prdt\
+    so the MSI requires no UAC prompt.
+  -->
+  <Product
+      Id='*'
+      Name='Power Remote Desktop'
+      UpgradeCode='8B2D6F40-3E5C-49B7-8E1A-9F4B1D6C73E2'
+      Language='1033'
+      Codepage='1252'
+      Version='$(var.Version)'
+      Manufacturer='power-remote-dt'>
+
+    <Package
+        Id='*'
+        Keywords='Installer'
+        Description='Power Remote Desktop'
+        Manufacturer='power-remote-dt'
+        InstallerVersion='450'
+        Languages='1033'
+        Compressed='yes'
+        SummaryCodepage='1252'
+        InstallScope='perUser' />
+
+    <MajorUpgrade
+        DowngradeErrorMessage='A newer version of Power Remote Desktop is already installed.'
+        Schedule='afterInstallInitialize' />
+
+    <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' />
+
+    <Directory Id='TARGETDIR' Name='SourceDir'>
+      <Directory Id='LocalAppDataFolder'>
+        <Directory Id='AppRoot' Name='prdt'>
+          <Directory Id='APPLICATIONFOLDER' Name='bin'>
+            <Component Id='HostExe' Guid='*'>
+              <File Id='HostExe' Source='target/release/prdt-host.exe' KeyPath='yes' Checksum='yes' />
+            </Component>
+            <Component Id='ViewerExe' Guid='*'>
+              <File Id='ViewerExe' Source='target/release/prdt-viewer.exe' KeyPath='yes' Checksum='yes' />
+            </Component>
+            <Component Id='OverlayExe' Guid='*'>
+              <File Id='OverlayExe' Source='target/release/prdt-viewer-overlay.exe' KeyPath='yes' Checksum='yes' />
+            </Component>
+          </Directory>
+        </Directory>
+      </Directory>
+
+      <Directory Id='ProgramMenuFolder'>
+        <Directory Id='AppShortcutFolder' Name='Power Remote Desktop'>
+          <Component Id='HostShortcut' Guid='*'>
+            <Shortcut
+                Id='HostShortcut'
+                Name='Host'
+                Description='Run as host'
+                Target='[APPLICATIONFOLDER]prdt-host.exe'
+                WorkingDirectory='APPLICATIONFOLDER'
+                Icon='AppIcon.ico'
+                IconIndex='0' />
+            <RemoveFolder Id='AppShortcutFolderRemove' On='uninstall' />
+            <RegistryValue
+                Root='HKCU'
+                Key='Software\prdt\Installed'
+                Name='HostShortcut'
+                Type='integer'
+                Value='1'
+                KeyPath='yes' />
+          </Component>
+          <Component Id='ViewerShortcut' Guid='*'>
+            <Shortcut
+                Id='ViewerShortcut'
+                Name='Viewer'
+                Target='[APPLICATIONFOLDER]prdt-viewer.exe'
+                WorkingDirectory='APPLICATIONFOLDER'
+                Icon='AppIcon.ico'
+                IconIndex='0' />
+            <RegistryValue
+                Root='HKCU'
+                Key='Software\prdt\Installed'
+                Name='ViewerShortcut'
+                Type='integer'
+                Value='1'
+                KeyPath='yes' />
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <Feature Id='Default' Title='Power Remote Desktop' Level='1'>
+      <ComponentRef Id='HostExe' />
+      <ComponentRef Id='ViewerExe' />
+      <ComponentRef Id='OverlayExe' />
+      <ComponentRef Id='HostShortcut' />
+      <ComponentRef Id='ViewerShortcut' />
+    </Feature>
+
+    <Icon Id='AppIcon.ico' SourceFile='crates/gui-host/resources/prdt-icon.ico' />
+    <Property Id='ARPPRODUCTICON' Value='AppIcon.ico' />
+
+    <UIRef Id='WixUI_InstallDir' />
+    <UIRef Id='WixUI_ErrorProgressText' />
+    <Property Id='WIXUI_INSTALLDIR' Value='APPLICATIONFOLDER' />
+
+    <WixVariable Id='WixUILicenseRtf' Value='wix/License.rtf' />
+  </Product>
+</Wix>

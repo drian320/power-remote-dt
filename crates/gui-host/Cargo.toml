@@ -26,6 +26,7 @@ self_update = { workspace = true }
 semver = { workspace = true }
 tempfile = "3"
 ureq = "2"
+ico = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 winreg = { workspace = true }
