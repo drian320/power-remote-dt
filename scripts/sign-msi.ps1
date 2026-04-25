@@ -26,7 +26,7 @@ Write-Host "Signing $MsiPath..."
 & $signtool sign `
     /f $CertPath `
     /p $CertPassword `
-    /t $TimestampUrl `
+    /tr $TimestampUrl `
     /td sha256 `
     /fd sha256 `
     /d $Description `

@@ -31,7 +31,7 @@ scripts/sign-msi.ps1 `
 What it does:
 
 1. Validates the cert file and MSI exist.
-2. Runs `signtool sign /f <cert> /p <pass> /t <timestamp_url> /td sha256 /fd sha256 /d "Power Remote Desktop" /v <msi>`.
+2. Runs `signtool sign /f <cert> /p <pass> /tr <timestamp_url> /td sha256 /fd sha256 /d "Power Remote Desktop" /v <msi>` (`/tr` is RFC 3161, required for the SHA-256 timestamp digest specified by `/td`; `/t` would silently force SHA-1).
 3. Runs `signtool verify /pa /v <msi>` to confirm the signature is valid and the timestamp is trusted.
 
 Pass a different `-TimestampUrl` if `timestamp.digicert.com` is unreachable. Backup options:
