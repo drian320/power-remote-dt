@@ -17,6 +17,7 @@ members = [
     "crates/nat-traversal",
     "crates/gui-common",
     "crates/gui-host",
+    "crates/gui-viewer",
 ]
 
 [workspace.package]
