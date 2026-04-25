@@ -76,3 +76,13 @@ overlay-stats-decoder = デコーダー: { $name }
 overlay-stats-connecting = 接続中…
 overlay-button-resume = 再開
 overlay-button-disconnect = 切断
+
+# トレイ + 通知 (Phase 4 G3)
+tray-tooltip = PrdtHost
+tray-menu-open = 設定を開く
+tray-menu-stop = 待ち受けを停止
+tray-menu-show-logs = ログを開く
+tray-menu-quit = 終了
+notif-connected = Viewer 接続: { $detail }
+notif-disconnected = Viewer が切断されました
+notif-error = ホストエラー: { $detail }

@@ -76,3 +76,13 @@ overlay-stats-decoder = Decoder: { $name }
 overlay-stats-connecting = Connecting…
 overlay-button-resume = Resume
 overlay-button-disconnect = Disconnect
+
+# Tray + notifications (Phase 4 G3)
+tray-tooltip = PrdtHost
+tray-menu-open = Open settings
+tray-menu-stop = Stop listening
+tray-menu-show-logs = Show logs
+tray-menu-quit = Quit
+notif-connected = Viewer connected: { $detail }
+notif-disconnected = Viewer disconnected
+notif-error = Host error: { $detail }
