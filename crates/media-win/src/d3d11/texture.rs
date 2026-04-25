@@ -7,7 +7,8 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC,
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8_UNORM,
+    DXGI_FORMAT_R8_UNORM, DXGI_SAMPLE_DESC,
 };
 
 use crate::d3d11::device::D3d11Device;
@@ -22,6 +23,13 @@ pub enum TextureFormat {
     Rgba8,
     /// NV12 (Y plane + interleaved UV half-res) — the NVDEC default output.
     Nv12,
+    /// 8-bit single-channel red. Used as the Y plane carrier for the
+    /// dual-plane CUDA-D3D11 interop path (Plan 2d zero-copy).
+    R8,
+    /// 8-bit two-channel red+green. Used as the UV plane carrier for the
+    /// dual-plane CUDA-D3D11 interop path (Plan 2d zero-copy). Half-resolution
+    /// in both dimensions vs the Y plane; each element holds (Cb, Cr).
+    R8G8,
 }
 
 impl TextureFormat {
@@ -30,6 +38,8 @@ impl TextureFormat {
             Self::Bgra8 => DXGI_FORMAT_B8G8R8A8_UNORM,
             Self::Rgba8 => DXGI_FORMAT_R8G8B8A8_UNORM,
             Self::Nv12 => DXGI_FORMAT_NV12,
+            Self::R8 => DXGI_FORMAT_R8_UNORM,
+            Self::R8G8 => DXGI_FORMAT_R8G8_UNORM,
         }
     }
 
@@ -39,7 +49,8 @@ impl TextureFormat {
     pub fn bytes_per_pixel_y(self) -> usize {
         match self {
             Self::Bgra8 | Self::Rgba8 => 4,
-            Self::Nv12 => 1, // Y plane; UV is interleaved at half-res per dim
+            Self::Nv12 | Self::R8 => 1,
+            Self::R8G8 => 2,
         }
     }
 }
@@ -291,5 +302,23 @@ mod tests {
         let tex = D3d11Texture::new_staging(&dev, 64, 64, TextureFormat::Bgra8)
             .expect("create staging texture");
         assert_eq!(tex.width(), 64);
+    }
+
+    #[test]
+    fn r8_format_dxgi_mapping() {
+        assert_eq!(
+            TextureFormat::R8.to_dxgi(),
+            windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R8_UNORM
+        );
+        assert_eq!(TextureFormat::R8.bytes_per_pixel_y(), 1);
+    }
+
+    #[test]
+    fn r8g8_format_dxgi_mapping() {
+        assert_eq!(
+            TextureFormat::R8G8.to_dxgi(),
+            windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R8G8_UNORM
+        );
+        assert_eq!(TextureFormat::R8G8.bytes_per_pixel_y(), 2);
     }
 }
