@@ -15,7 +15,7 @@ pub mod platform;
 pub mod synthetic;
 
 pub use adapter::{enumerate_adapters, pick_adapter_by_index, pick_default_adapter, AdapterInfo};
-pub use d3d11::{D3d11Device, D3d11Texture, Nv12Renderer, SwapChain, TextureFormat};
+pub use d3d11::{D3d11Device, D3d11Texture, DualPlaneYuvRenderer, Nv12Renderer, SwapChain, TextureFormat};
 pub use dxgi::{enumerate_outputs_for_adapter, AcquiredFrame, DesktopDuplication, OutputInfo};
 pub use error::{MediaError, Result};
 pub use mf::H265Decoder;
