@@ -9,16 +9,27 @@
 
 use std::ffi::CString;
 
-use windows::core::PCSTR;
+use windows::core::{Interface, PCSTR};
 use windows::Win32::Graphics::Direct3D::Fxc::{D3DCompile, D3DCOMPILE_ENABLE_STRICTNESS};
 use windows::Win32::Graphics::Direct3D::ID3DBlob;
+use windows::Win32::Graphics::Direct3D::D3D_SRV_DIMENSION_TEXTURE2D;
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11PixelShader, ID3D11SamplerState, ID3D11VertexShader, D3D11_COMPARISON_NEVER,
-    D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_SAMPLER_DESC, D3D11_TEXTURE_ADDRESS_CLAMP,
+    ID3D11PixelShader, ID3D11RenderTargetView, ID3D11Resource, ID3D11SamplerState,
+    ID3D11ShaderResourceView, ID3D11VertexShader, D3D11_COMPARISON_NEVER,
+    D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_RENDER_TARGET_VIEW_DESC,
+    D3D11_RENDER_TARGET_VIEW_DESC_0, D3D11_RTV_DIMENSION_TEXTURE2D, D3D11_SAMPLER_DESC,
+    D3D11_SHADER_RESOURCE_VIEW_DESC, D3D11_SHADER_RESOURCE_VIEW_DESC_0, D3D11_TEX2D_RTV,
+    D3D11_TEX2D_SRV, D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_VIEWPORT,
+};
+use windows::Win32::Graphics::Direct3D::D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8_UNORM,
 };
 
+use crate::d3d11::swapchain::SwapChain;
 use crate::d3d11::D3d11Device;
 use crate::error::{MediaError, Result};
+use crate::nvdec::decoder::DualPlaneFrame;
 
 const VS_SOURCE: &str = r#"
 struct VsOut {
@@ -63,13 +74,9 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
 
 /// YUV→BGRA renderer for the NVDEC zero-copy dual-plane path.
 pub struct DualPlaneYuvRenderer {
-    #[allow(dead_code)] // used in Task 6 render()
     dev: D3d11Device,
-    #[allow(dead_code)] // used in Task 6 render()
     vs: ID3D11VertexShader,
-    #[allow(dead_code)] // used in Task 6 render()
     ps: ID3D11PixelShader,
-    #[allow(dead_code)] // used in Task 6 render()
     sampler: ID3D11SamplerState,
 }
 
@@ -124,6 +131,95 @@ impl DualPlaneYuvRenderer {
             ps,
             sampler,
         })
+    }
+
+    /// Render the dual-plane `frame` into the `swap` back-buffer's BGRA
+    /// surface using the YUV→RGB pixel shader. Must be called on the thread
+    /// that owns the D3D11 immediate context.
+    pub fn render(&self, frame: &DualPlaneFrame, swap: &SwapChain) -> Result<()> {
+        let backbuf = swap.backbuffer()?;
+        let out_w = swap.width();
+        let out_h = swap.height();
+
+        // RTV on the swapchain backbuffer.
+        let rtv_desc = D3D11_RENDER_TARGET_VIEW_DESC {
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            ViewDimension: D3D11_RTV_DIMENSION_TEXTURE2D,
+            Anonymous: D3D11_RENDER_TARGET_VIEW_DESC_0 {
+                Texture2D: D3D11_TEX2D_RTV { MipSlice: 0 },
+            },
+        };
+        let backbuf_res: ID3D11Resource = backbuf
+            .cast()
+            .map_err(|e| MediaError::d3d11("backbuffer -> ID3D11Resource", e))?;
+        let mut rtv: Option<ID3D11RenderTargetView> = None;
+        unsafe {
+            self.dev
+                .device()
+                .CreateRenderTargetView(&backbuf_res, Some(&rtv_desc), Some(&mut rtv))
+                .map_err(|e| MediaError::d3d11("CreateRenderTargetView", e))?;
+        }
+        let rtv = rtv
+            .ok_or_else(|| MediaError::Other("CreateRenderTargetView returned null".into()))?;
+
+        // SRVs on Y (R8) and UV (R8G8).
+        let make_srv =
+            |tex: &crate::d3d11::D3d11Texture,
+             fmt|
+             -> Result<ID3D11ShaderResourceView> {
+                let desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
+                    Format: fmt,
+                    ViewDimension: D3D_SRV_DIMENSION_TEXTURE2D,
+                    Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
+                        Texture2D: D3D11_TEX2D_SRV {
+                            MostDetailedMip: 0,
+                            MipLevels: 1,
+                        },
+                    },
+                };
+                let res: ID3D11Resource = tex
+                    .raw()
+                    .cast()
+                    .map_err(|e| MediaError::d3d11("plane Texture2D -> Resource", e))?;
+                let mut srv: Option<ID3D11ShaderResourceView> = None;
+                unsafe {
+                    self.dev
+                        .device()
+                        .CreateShaderResourceView(&res, Some(&desc), Some(&mut srv))
+                        .map_err(|e| MediaError::d3d11("CreateShaderResourceView", e))?;
+                }
+                srv.ok_or_else(|| {
+                    MediaError::Other("CreateShaderResourceView returned null".into())
+                })
+            };
+        let y_srv = make_srv(&frame.y_tex, DXGI_FORMAT_R8_UNORM)?;
+        let uv_srv = make_srv(&frame.uv_tex, DXGI_FORMAT_R8G8_UNORM)?;
+
+        let viewport = D3D11_VIEWPORT {
+            TopLeftX: 0.0,
+            TopLeftY: 0.0,
+            Width: out_w as f32,
+            Height: out_h as f32,
+            MinDepth: 0.0,
+            MaxDepth: 1.0,
+        };
+
+        self.dev.with_context(|ctx| unsafe {
+            ctx.OMSetRenderTargets(Some(&[Some(rtv.clone())]), None);
+            ctx.RSSetViewports(Some(&[viewport]));
+            ctx.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            ctx.IASetInputLayout(None);
+            ctx.VSSetShader(&self.vs, None);
+            ctx.PSSetShader(&self.ps, None);
+            ctx.PSSetShaderResources(0, Some(&[Some(y_srv.clone()), Some(uv_srv.clone())]));
+            ctx.PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
+            ctx.Draw(3, 0);
+            // Unbind shader resources so the textures can be written next
+            // frame without driver complaints.
+            ctx.PSSetShaderResources(0, Some(&[None, None]));
+            ctx.OMSetRenderTargets(Some(&[None]), None);
+        });
+        Ok(())
     }
 }
 

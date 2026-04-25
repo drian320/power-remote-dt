@@ -20,6 +20,8 @@ pub use dxgi::{enumerate_outputs_for_adapter, AcquiredFrame, DesktopDuplication,
 pub use error::{MediaError, Result};
 pub use mf::H265Decoder;
 pub use nvdec::NvdecD3d11Consumer;
+#[cfg(prdt_nvdec_bindings)]
+pub use crate::nvdec::decoder::DualPlaneFrame;
 pub use nvenc::{EncodedH265Frame, NvEncLibrary, NvencEncoder, NvencEncoderConfig};
 pub use pipeline::{DxgiNvencProducer, MfD3d11Consumer};
 pub use platform::MmcssScope;
