@@ -582,7 +582,7 @@ fn main() -> Result<()> {
         let args = args_arc.clone();
         tokio::spawn(async move { run_host((*args).clone(), None, cancel).await })
     });
-    prdt_gui_host::run_host_gui(args.config.clone(), run_host_fn)
+    prdt_gui_host::run_host_gui(env!("CARGO_PKG_NAME"), args.config.clone(), run_host_fn)
 }
 
 #[tokio::main(flavor = "multi_thread")]
