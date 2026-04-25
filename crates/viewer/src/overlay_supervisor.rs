@@ -20,9 +20,7 @@ impl OverlaySupervisor {
     /// as the IPC directory. Creates the directory on disk.
     pub fn new() -> std::io::Result<Self> {
         let root = dirs::cache_dir()
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::NotFound, "no cache dir")
-            })?
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no cache dir"))?
             .join("prdt")
             .join("overlay-ipc");
         let ipc_dir = root.join(std::process::id().to_string());
@@ -54,7 +52,10 @@ impl OverlaySupervisor {
         let dir = exe.parent().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::NotFound, "current_exe has no parent")
         })?;
-        Ok(dir.join(format!("prdt-viewer-overlay{}", std::env::consts::EXE_SUFFIX)))
+        Ok(dir.join(format!(
+            "prdt-viewer-overlay{}",
+            std::env::consts::EXE_SUFFIX
+        )))
     }
 
     /// Spawn the overlay child if not already alive. Idempotent: if a child
