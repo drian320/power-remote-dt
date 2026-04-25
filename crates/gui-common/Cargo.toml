@@ -14,6 +14,9 @@ qrcode = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+fluent-templates = { workspace = true }
+sys-locale = { workspace = true }
+unic-langid = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

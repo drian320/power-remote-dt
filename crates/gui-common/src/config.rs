@@ -7,8 +7,17 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct GuiConfig {
+    /// Locale: "" = auto-detect from OS, "en" / "ja" = forced.
+    #[serde(default)]
+    pub locale: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
+    #[serde(default)]
+    pub gui: GuiConfig,
     #[serde(default)]
     pub host: HostConfig,
     #[serde(default)]
@@ -91,6 +100,7 @@ pub struct HostEntry {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            gui: GuiConfig::default(),
             host: HostConfig::default(),
             viewer: ViewerConfig::default(),
         }
@@ -171,6 +181,34 @@ mod tests {
         let path = dir.path().join("nested/dir/config.toml");
         Config::default().save(&path).unwrap();
         assert!(path.exists());
+    }
+
+    #[test]
+    fn legacy_config_without_gui_section_loads() {
+        // Older config files (G1) had no [gui] section. serde defaults must
+        // populate it without erroring.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let legacy = r#"
+[host]
+bind = "0.0.0.0:9000"
+monitor = 0
+bitrate_mbps = 30
+outgoing_dir = "prdt-outgoing"
+host_id_file = "host-id.txt"
+key_file = "host-key.bin"
+
+[viewer]
+recv_dir = "prdt-received"
+decoder = "mf"
+default_resolution = "1920x1080"
+default_fps = 60
+known_hosts = "known-hosts"
+known_host_ids = "known-host-ids"
+"#;
+        std::fs::write(&path, legacy).unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.gui.locale, "");
     }
 
     #[test]

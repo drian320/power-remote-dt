@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use prdt_gui_common::t;
 use prdt_gui_common::{generate_qr, Config, TailHandle};
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
@@ -70,7 +71,7 @@ impl HostApp {
                 self.pubkey_b64 = out.pubkey_b64;
                 self.stage = Stage::Idle;
             }
-            Err(e) => self.error = Some(format!("key load failed: {e}")),
+            Err(e) => self.error = Some(t!("host-error-key-load", error => e.to_string())),
         }
     }
 
@@ -80,11 +81,10 @@ impl HostApp {
         }
         match generate_qr(&self.pubkey_b64, 4) {
             Ok(image) => {
-                let handle =
-                    ctx.load_texture("host_qr", image, egui::TextureOptions::default());
+                let handle = ctx.load_texture("host_qr", image, egui::TextureOptions::default());
                 self.qr_handle = Some(handle);
             }
-            Err(e) => self.error = Some(format!("qr generation failed: {e}")),
+            Err(e) => self.error = Some(t!("host-error-qr", error => e.to_string())),
         }
     }
 
@@ -142,14 +142,14 @@ impl eframe::App for HostApp {
 
 impl HostApp {
     fn show_needs_key(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Welcome");
+        ui.heading(t!("host-welcome-heading"));
         ui.add_space(12.0);
-        ui.label("Generate a host key to start. The key uniquely identifies this machine to viewers.");
+        ui.label(t!("host-welcome-body"));
         ui.add_space(8.0);
         let key_path = self.config.lock().unwrap().host.key_file.clone();
-        ui.label(format!("Key file: {}", key_path.display()));
+        ui.label(t!("host-key-file-label", path => key_path.display().to_string()));
         ui.add_space(20.0);
-        if ui.button("Generate host key").clicked() {
+        if ui.button(t!("host-button-generate-key")).clicked() {
             self.try_load_key(&key_path);
         }
         if let Some(err) = &self.error {
@@ -158,15 +158,15 @@ impl HostApp {
     }
 
     fn show_idle(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Status: Idle");
+        ui.heading(t!("host-status-idle"));
         ui.add_space(8.0);
         self.draw_pubkey_with_qr(ui);
         ui.add_space(16.0);
         ui.horizontal(|ui| {
-            if ui.button("Start listening").clicked() {
+            if ui.button(t!("host-button-start-listening")).clicked() {
                 self.start_listening();
             }
-            if ui.button("Settings…").clicked() {
+            if ui.button(t!("host-button-settings")).clicked() {
                 self.settings_open = true;
             }
         });
@@ -177,11 +177,11 @@ impl HostApp {
 
     fn show_listening(&mut self, ui: &mut egui::Ui) {
         let bind = self.config.lock().unwrap().host.bind.clone();
-        ui.heading(format!("Status: ● Listening on {bind}"));
+        ui.heading(t!("host-status-listening", bind => bind.as_str()));
         ui.add_space(8.0);
         self.draw_pubkey_with_qr(ui);
         ui.add_space(12.0);
-        ui.label("Recent activity:");
+        ui.label(t!("host-recent-activity"));
         let lines = self.tail.snapshot();
         egui::ScrollArea::vertical()
             .max_height(160.0)
@@ -193,20 +193,20 @@ impl HostApp {
             });
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if ui.button("Stop").clicked() {
+            if ui.button(t!("host-button-stop")).clicked() {
                 self.stop_listening();
             }
-            if ui.button("Settings…").clicked() {
+            if ui.button(t!("host-button-settings")).clicked() {
                 self.settings_open = true;
             }
         });
     }
 
     fn draw_pubkey_with_qr(&mut self, ui: &mut egui::Ui) {
-        ui.label("Public key:");
+        ui.label(t!("host-pubkey-label"));
         ui.horizontal(|ui| {
             ui.code(&self.pubkey_b64);
-            if ui.button("Copy").clicked() {
+            if ui.button(t!("common-button-copy")).clicked() {
                 ui.output_mut(|o| o.copied_text = self.pubkey_b64.clone());
             }
         });

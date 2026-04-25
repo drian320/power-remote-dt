@@ -1,4 +1,4 @@
-use prdt_gui_common::HostEntry;
+use prdt_gui_common::{t, HostEntry};
 
 use crate::app::LauncherApp;
 
@@ -25,31 +25,39 @@ impl Default for DraftHost {
 pub fn render(ctx: &egui::Context, app: &mut LauncherApp) {
     let mut close = false;
     let mut save = false;
-    egui::Window::new("Add Connection")
+    egui::Window::new(t!("viewer-form-title"))
         .open(&mut app.add_form_open)
         .resizable(false)
         .show(ctx, |ui| {
-            ui.label("Label:");
+            ui.label(t!("viewer-form-label"));
             ui.text_edit_singleline(&mut app.draft_host.label);
             ui.add_space(4.0);
-            ui.label("Mode:");
+            ui.label(t!("viewer-form-mode"));
             ui.horizontal(|ui| {
-                ui.radio_value(&mut app.draft_host.mode, "direct".into(), "Direct");
-                ui.radio_value(&mut app.draft_host.mode, "signaling".into(), "Signaling");
+                ui.radio_value(
+                    &mut app.draft_host.mode,
+                    "direct".into(),
+                    t!("viewer-form-mode-direct"),
+                );
+                ui.radio_value(
+                    &mut app.draft_host.mode,
+                    "signaling".into(),
+                    t!("viewer-form-mode-signaling"),
+                );
             });
             if app.draft_host.mode == "direct" {
-                ui.label("Address (host:port):");
+                ui.label(t!("viewer-form-addr"));
                 ui.text_edit_singleline(&mut app.draft_host.addr);
             } else {
-                ui.label("Host ID (e.g. 123-456-789):");
+                ui.label(t!("viewer-form-host-id"));
                 ui.text_edit_singleline(&mut app.draft_host.host_id);
             }
-            ui.label("Public key (base64; leave empty for TOFU):");
+            ui.label(t!("viewer-form-pubkey"));
             ui.text_edit_singleline(&mut app.draft_host.pubkey);
 
             ui.separator();
             ui.horizontal(|ui| {
-                if ui.button("Cancel").clicked() {
+                if ui.button(t!("common-button-cancel")).clicked() {
                     close = true;
                 }
                 let valid = !app.draft_host.label.is_empty()
@@ -57,7 +65,7 @@ pub fn render(ctx: &egui::Context, app: &mut LauncherApp) {
                         || app.draft_host.mode == "signaling"
                             && !app.draft_host.host_id.is_empty());
                 if ui
-                    .add_enabled(valid, egui::Button::new("Save"))
+                    .add_enabled(valid, egui::Button::new(t!("common-button-save")))
                     .clicked()
                 {
                     save = true;
@@ -77,7 +85,7 @@ pub fn render(ctx: &egui::Context, app: &mut LauncherApp) {
         let mut cfg = app.config.lock().unwrap();
         cfg.viewer.hosts.push(entry);
         if let Err(e) = cfg.save(&app.config_path) {
-            app.error = Some(format!("config save failed: {e}"));
+            app.error = Some(t!("viewer-error-config-save", error => e.to_string()));
         }
         drop(cfg);
         app.draft_host = DraftHost::default();

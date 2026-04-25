@@ -46,6 +46,7 @@ pub fn run_viewer_launcher(config_path: Option<PathBuf>) -> anyhow::Result<Launc
         .ok_or_else(|| anyhow::anyhow!("could not resolve config path"))?;
 
     let config = Config::load(&config_path)?;
+    prdt_gui_common::init_locale(&config.gui.locale);
     let shared_cfg = Arc::new(Mutex::new(config));
     let outcome: Arc<Mutex<Option<LaunchOutcome>>> = Arc::new(Mutex::new(None));
 
@@ -60,8 +61,9 @@ pub fn run_viewer_launcher(config_path: Option<PathBuf>) -> anyhow::Result<Launc
         ..Default::default()
     };
 
+    let title = prdt_gui_common::tr("viewer-window-title");
     eframe::run_native(
-        "Power Remote Desktop — Viewer",
+        &title,
         options,
         Box::new(move |cc| {
             install_jp_font(&cc.egui_ctx);
@@ -70,6 +72,10 @@ pub fn run_viewer_launcher(config_path: Option<PathBuf>) -> anyhow::Result<Launc
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))?;
 
-    let outcome = outcome.lock().unwrap().take().unwrap_or(LaunchOutcome::Quit);
+    let outcome = outcome
+        .lock()
+        .unwrap()
+        .take()
+        .unwrap_or(LaunchOutcome::Quit);
     Ok(outcome)
 }

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use prdt_gui_common::Config;
+use prdt_gui_common::{t, Config};
 
 use crate::LaunchOutcome;
 
@@ -45,16 +45,16 @@ impl eframe::App for LauncherApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Saved connections");
+            ui.heading(t!("viewer-launcher-heading"));
             ui.add_space(8.0);
             crate::hosts_list::render(ui, self);
 
             ui.add_space(12.0);
             let decoder = self.config.lock().unwrap().viewer.decoder.clone();
             ui.horizontal(|ui| {
-                ui.label("Decoder:");
+                ui.label(t!("viewer-decoder-label"));
                 ui.label(&decoder);
-                if ui.button("Settings…").clicked() {
+                if ui.button(t!("host-button-settings")).clicked() {
                     self.settings_open = true;
                 }
             });
@@ -64,12 +64,15 @@ impl eframe::App for LauncherApp {
             let mut try_connect = false;
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(self.selected.is_some(), egui::Button::new("Connect"))
+                    .add_enabled(
+                        self.selected.is_some(),
+                        egui::Button::new(t!("viewer-button-connect")),
+                    )
                     .clicked()
                 {
                     try_connect = true;
                 }
-                if ui.button("Quit").clicked() {
+                if ui.button(t!("viewer-button-quit")).clicked() {
                     quit = true;
                 }
             });
@@ -92,7 +95,9 @@ impl LauncherApp {
     pub(crate) fn try_connect(&mut self) {
         let Some(idx) = self.selected else { return };
         let cfg = self.config.lock().unwrap();
-        let Some(entry) = cfg.viewer.hosts.get(idx) else { return };
+        let Some(entry) = cfg.viewer.hosts.get(idx) else {
+            return;
+        };
         let viewer = &cfg.viewer;
         let mode = if entry.mode == "signaling" {
             crate::ConnectMode::Signaling
