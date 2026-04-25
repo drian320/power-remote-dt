@@ -68,7 +68,10 @@ mod tests {
             return;
         }
         let _ = set_enabled(false);
-        assert!(!is_enabled(), "precondition: registry value should be absent");
+        assert!(
+            !is_enabled(),
+            "precondition: registry value should be absent"
+        );
         set_enabled(true).expect("set_enabled(true)");
         assert!(is_enabled(), "after enable, value should exist");
         set_enabled(false).expect("set_enabled(false)");

@@ -47,8 +47,7 @@ pub struct TrayController {
 impl TrayController {
     pub fn new(asset_dir: &Path) -> Result<Self, TrayError> {
         let icon_idle = load_icon(&asset_dir.join(icon_path_for_state(HostState::Idle)))?;
-        let icon_listening =
-            load_icon(&asset_dir.join(icon_path_for_state(HostState::Listening)))?;
+        let icon_listening = load_icon(&asset_dir.join(icon_path_for_state(HostState::Listening)))?;
         let icon_error = load_icon(&asset_dir.join(icon_path_for_state(HostState::Error)))?;
 
         let menu = Menu::new();
@@ -139,7 +138,10 @@ mod tests {
     #[test]
     fn host_state_maps_to_distinct_filenames() {
         assert_eq!(icon_path_for_state(HostState::Idle), "tray-idle.png");
-        assert_eq!(icon_path_for_state(HostState::Listening), "tray-listening.png");
+        assert_eq!(
+            icon_path_for_state(HostState::Listening),
+            "tray-listening.png"
+        );
         assert_eq!(icon_path_for_state(HostState::Error), "tray-error.png");
     }
 
