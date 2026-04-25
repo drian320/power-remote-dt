@@ -1,6 +1,7 @@
 //! Phase 4 G1 host GUI.
 
 mod app;
+#[allow(dead_code)] // wired into Settings/HostApp in G3 Task 5
 mod autostart;
 mod keygen;
 mod settings;
