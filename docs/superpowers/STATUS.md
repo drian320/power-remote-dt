@@ -1,9 +1,9 @@
 # power-remote-dt — Project Status & Roadmap
 
 **Last updated:** 2026-04-25
-**Latest tag:** `plan2d-zerocopy-complete`
+**Latest tag:** `phase4-g1-complete`
 **Branch state:** master (all phase work merged)
-**Test count:** 218 automated tests across the workspace, all passing
+**Test count:** 229 automated tests across the workspace, all passing
 
 ---
 
@@ -72,6 +72,7 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
 | タグ | 内容 |
 |---|---|
 | `phase4-title-status-complete` | viewer ウィンドウタイトル動的更新(接続状態反映) |
+| `phase4-g1-complete` | egui ベース GUI 基盤(gui-common / gui-host / gui-viewer)。host: 鍵生成 → pubkey/QR 表示 → Start/Stop で tokio task 制御。viewer: 保存接続先一覧 → 接続フォーム → 既存 winit/D3D11 にフォールスルー。`%APPDATA%\prdt\config.toml` 永続化。両 binary とも `--headless` で従来 CLI 互換。 |
 
 ---
 
@@ -101,11 +102,11 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
 
 ### **B. 中規模、優先度中**
 
-#### B1. Phase 4 GUI(本格)
-- **状態**: spec が `docs/superpowers/specs/2026-04-23-phase4-gui-design.md` に存在(2026-04-23 作成)、`phase4-title-status-complete` で part 1 のみ完了
-- **未実装**: 接続ダイアログ(host_id 入力、known_hosts 一覧、pubkey 検証 UI)、設定パネル(ビットレート / FPS / 解像度 / 音声 ON-OFF / 入力 ON-OFF)、QR コード host_id 共有
-- **技術選択**: egui(spec 推奨) / iced / Tauri など要再検討
-- **見積もり**: 1-2 週
+#### B1. Phase 4 GUI(本格) — **G1 完了 (2026-04-25, `phase4-g1-complete`)**
+- ~~spec~~ → `docs/superpowers/specs/2026-04-23-phase4-gui-design.md`(全体)+ `2026-04-25-phase4-g1-egui-foundation-design.md`(G1)
+- ~~G1: egui 基盤 + host GUI + viewer launcher~~ ✅
+- 残: G2 in-stream overlay (latency p50/p95、ESC menu、~1 週)、G3 tray + auto-start (~1 週)、G4 MSI installer + 自動更新 (~2 週)、G5 crash reporter + コード署名 (~1 週)、G6 多言語化 (~1 週)
+- 合計残: ~6 週(parent spec は元々 8 週見積もり、G1 で ~2 週分が完了)
 
 #### B2. Phase 1 — Linux サポート
 - **状態**: 着手前。Windows-specific 部分(`media-win` / `input-win`)を Linux 等価実装に置換
