@@ -267,8 +267,16 @@ impl CuvidDecoder {
 
 impl Drop for CuvidDecoder {
     fn drop(&mut self) {
+        let _g = self.ctx.push();
+
+        // Explicitly drop dual_cache while the CUDA context is pushed.
+        // Without this, the implicit `Box<DecoderState>` drop runs after
+        // `_g` falls out of scope, causing cuGraphicsUnregisterResource to
+        // fail with CUDA_ERROR_INVALID_CONTEXT and silently leak the
+        // graphics resources until the primary context is destroyed.
+        *self.state.dual_cache.lock().unwrap() = None;
+
         if !self.parser.is_null() {
-            let _ = self.ctx.push();
             unsafe {
                 let r = ffi::cuvidDestroyVideoParser(self.parser);
                 if r != ffi::cudaError_enum::CUDA_SUCCESS {
@@ -277,7 +285,6 @@ impl Drop for CuvidDecoder {
             }
         }
         if let Some(dec) = self.state.decoder.take() {
-            let _ = self.ctx.push();
             unsafe {
                 let r = ffi::cuvidDestroyDecoder(dec);
                 if r != ffi::cudaError_enum::CUDA_SUCCESS {

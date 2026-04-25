@@ -34,7 +34,9 @@ pub struct NvdecD3d11Consumer {
     /// Cached NV12 D3D11 texture we reuse across frames. Lazily created
     /// on the first `take_latest_texture` call once the decoder's
     /// actual output size is known.
+    /// `dead_code` allow: removed in Task 4 of plan2d-zerocopy.
     #[cfg(prdt_nvdec_bindings)]
+    #[allow(dead_code)]
     nv12_cache: Mutex<Option<D3d11Texture>>,
     _dev: D3d11Device,
     _width: u32,
@@ -108,6 +110,7 @@ impl NvdecD3d11Consumer {
     }
 
     #[cfg(prdt_nvdec_bindings)]
+    #[allow(dead_code)] // removed in Task 4 of plan2d-zerocopy
     fn upload_nv12_to_cache(&self, frame: &DecodedFrame) -> Result<D3d11Texture, MediaError> {
         use windows::Win32::Graphics::Direct3D11::D3D11_BOX;
 
