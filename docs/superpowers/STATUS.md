@@ -1,9 +1,9 @@
 # power-remote-dt — Project Status & Roadmap
 
 **Last updated:** 2026-04-25
-**Latest tag:** `phase2-w6-polish-complete`
+**Latest tag:** `plan2d-zerocopy-complete`
 **Branch state:** master (all phase work merged)
-**Test count:** 214 automated tests across the workspace, all passing
+**Test count:** 218 automated tests across the workspace, all passing
 
 ---
 
@@ -55,6 +55,7 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
 | `plan2d-step2b-complete` | CUvideoparser + CUvideodecoder E2E(CPU NV12 出力) |
 | `plan2d-complete` | D3D11 NV12 テクスチャ出力 via UpdateSubresource、viewer 統合可 |
 | `plan2d-bench-complete` | NVDEC 経路ベンチ(MF との比較) |
+| `plan2d-zerocopy-complete` | dual R8 + R8G8 D3D11 textures + CUDA-D3D11 device-to-device cuMemcpy2D。`DualPlaneFrame` / `DualPlaneYuvRenderer`(自前 HLSL VS+PS、BT.709 limited-range YUV→BGRA)。viewer の `--decoder nvdec` 経路で zero-copy。`cpu-nv12` feature でテスト用 CPU readback パス保持。218 tests pass |
 
 ### Phase 2 — WAN + NAT 越え + シグナリング
 | タグ | 内容 |
@@ -93,10 +94,10 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
 - **ブロッカー**: Plan 4 M3(カメラ実測)が未着手なので、glass-to-glass の客観値はまだ取れない。CPU タイムスタンプベースで代替する手はある
 - **見積もり**: spec(0.5d)+ plan(0.5d)+ 実装 + 実測(2-3d)
 
-#### A2. Plan 2d optimization — NVDEC 真ゼロコピー
-- **状態**: `plan2d-complete` で NVDEC は動くが CPU バウンス経由(`UpdateSubresource`)で遅い。viewer 側 `--decoder nvdec` は MF より体感遅い、と memory `known_limitations.md` §2d 記載済み
-- **やること**: NV12 を luma(R8) / chroma(R8G8)の 2 枚テクスチャとして CUDA→D3D11 直接共有(`cudaGraphicsD3D11RegisterResource` 経由)
-- **見積もり**: spec(1d)+ 実装(2-3d)、bindgen と CUDA-D3D11 interop の罠次第
+#### ~~A2. Plan 2d optimization — NVDEC 真ゼロコピー~~ — **完了 (2026-04-25, `plan2d-zerocopy-complete`)**
+- ~~CPU バウンス排除~~ → dual R8 + R8G8 D3D11 textures + CUDA-D3D11 interop 経由で達成
+- ~~色変換~~ → 自前 HLSL pixel shader (BT.709 limited-range YUV→BGRA)
+- 残り(将来 Plan 4 等で): DualCache のダブルバッファ化、HDR/10bit (P010)、BT.601 自動切替
 
 ### **B. 中規模、優先度中**
 
