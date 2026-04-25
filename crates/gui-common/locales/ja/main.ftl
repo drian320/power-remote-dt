@@ -64,3 +64,13 @@ settings-language = 言語:
 settings-language-auto = 自動
 settings-language-english = English
 settings-language-japanese = 日本語
+
+# Viewer overlay (Phase 4 G2)
+overlay-window-title = Power Remote Desktop — オーバーレイ
+overlay-host-label = 接続先: { $host }
+overlay-stats-latency = レイテンシ
+overlay-stats-samples = サンプル: { $n }
+overlay-stats-decoder = デコーダー: { $name }
+overlay-stats-connecting = 接続中…
+overlay-button-resume = 再開
+overlay-button-disconnect = 切断
