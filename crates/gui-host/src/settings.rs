@@ -99,10 +99,7 @@ pub fn render(
                 let ui_state = update_ui.lock().unwrap();
                 if let Some(last) = ui_state.last_checked {
                     if let Ok(d) = SystemTime::now().duration_since(last) {
-                        ui.label(format!(
-                            "Last checked: {} hours ago",
-                            d.as_secs() / 3600
-                        ));
+                        ui.label(format!("Last checked: {} hours ago", d.as_secs() / 3600));
                     }
                 }
             }
@@ -122,8 +119,7 @@ pub fn render(
             // Install button only appears in Available state.
             {
                 let ui_state = update_ui.lock().unwrap();
-                if let crate::update::CheckStatus::Available { download_url, .. } =
-                    &ui_state.status
+                if let crate::update::CheckStatus::Available { download_url, .. } = &ui_state.status
                 {
                     let download_url = download_url.clone();
                     drop(ui_state);

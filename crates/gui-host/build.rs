@@ -9,9 +9,9 @@ fn main() {
         std::fs::create_dir_all(assets_dir).expect("create assets dir");
     }
 
-    write_solid_color(assets_dir, "tray-idle.png", [128, 128, 128, 255]);     // gray
-    write_solid_color(assets_dir, "tray-listening.png", [40, 180, 80, 255]);   // green
-    write_solid_color(assets_dir, "tray-error.png", [200, 60, 60, 255]);       // red
+    write_solid_color(assets_dir, "tray-idle.png", [128, 128, 128, 255]); // gray
+    write_solid_color(assets_dir, "tray-listening.png", [40, 180, 80, 255]); // green
+    write_solid_color(assets_dir, "tray-error.png", [200, 60, 60, 255]); // red
 
     println!("cargo:rerun-if-changed=build.rs");
 

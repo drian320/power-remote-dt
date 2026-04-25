@@ -18,12 +18,8 @@ fn main() {
     let sizes = [16u32, 32, 48, 64, 128, 256];
     let mut icon_dir = ico::IconDir::new(ico::ResourceType::Icon);
     for &size in &sizes {
-        let resized = image::imageops::resize(
-            &rgba,
-            size,
-            size,
-            image::imageops::FilterType::Lanczos3,
-        );
+        let resized =
+            image::imageops::resize(&rgba, size, size, image::imageops::FilterType::Lanczos3);
         let entry = ico::IconImage::from_rgba_data(size, size, resized.into_raw());
         let encoded = ico::IconDirEntry::encode(&entry).expect("ICO encode");
         icon_dir.add_entry(encoded);

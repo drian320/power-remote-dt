@@ -16,7 +16,10 @@ pub enum CheckStatus {
     Idle,
     Checking,
     UpToDate,
-    Available { version: String, download_url: String },
+    Available {
+        version: String,
+        download_url: String,
+    },
     Error(String),
 }
 
