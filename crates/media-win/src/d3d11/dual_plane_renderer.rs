@@ -9,26 +9,38 @@
 
 use std::ffi::CString;
 
-use windows::core::{Interface, PCSTR};
+use windows::core::PCSTR;
 use windows::Win32::Graphics::Direct3D::Fxc::{D3DCompile, D3DCOMPILE_ENABLE_STRICTNESS};
 use windows::Win32::Graphics::Direct3D::ID3DBlob;
-use windows::Win32::Graphics::Direct3D::D3D_SRV_DIMENSION_TEXTURE2D;
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11PixelShader, ID3D11RenderTargetView, ID3D11Resource, ID3D11SamplerState,
-    ID3D11ShaderResourceView, ID3D11VertexShader, D3D11_COMPARISON_NEVER,
-    D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_RENDER_TARGET_VIEW_DESC,
-    D3D11_RENDER_TARGET_VIEW_DESC_0, D3D11_RTV_DIMENSION_TEXTURE2D, D3D11_SAMPLER_DESC,
-    D3D11_SHADER_RESOURCE_VIEW_DESC, D3D11_SHADER_RESOURCE_VIEW_DESC_0, D3D11_TEX2D_RTV,
-    D3D11_TEX2D_SRV, D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_VIEWPORT,
+    ID3D11PixelShader, ID3D11SamplerState, ID3D11VertexShader, D3D11_COMPARISON_NEVER,
+    D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_SAMPLER_DESC, D3D11_TEXTURE_ADDRESS_CLAMP,
 };
+
+use crate::d3d11::D3d11Device;
+use crate::error::{MediaError, Result};
+
+// render() and the types it consumes are gated together with the NVDEC
+// bindings, since DualPlaneFrame lives under nvdec::decoder.
+#[cfg(prdt_nvdec_bindings)]
+use windows::core::Interface;
+#[cfg(prdt_nvdec_bindings)]
 use windows::Win32::Graphics::Direct3D::D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+#[cfg(prdt_nvdec_bindings)]
+use windows::Win32::Graphics::Direct3D::D3D_SRV_DIMENSION_TEXTURE2D;
+#[cfg(prdt_nvdec_bindings)]
+use windows::Win32::Graphics::Direct3D11::{
+    ID3D11RenderTargetView, ID3D11Resource, ID3D11ShaderResourceView,
+    D3D11_RENDER_TARGET_VIEW_DESC, D3D11_RENDER_TARGET_VIEW_DESC_0, D3D11_RTV_DIMENSION_TEXTURE2D,
+    D3D11_SHADER_RESOURCE_VIEW_DESC, D3D11_SHADER_RESOURCE_VIEW_DESC_0, D3D11_TEX2D_RTV,
+    D3D11_TEX2D_SRV, D3D11_VIEWPORT,
+};
+#[cfg(prdt_nvdec_bindings)]
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8_UNORM,
 };
-
+#[cfg(prdt_nvdec_bindings)]
 use crate::d3d11::swapchain::SwapChain;
-use crate::d3d11::D3d11Device;
-use crate::error::{MediaError, Result};
 #[cfg(prdt_nvdec_bindings)]
 use crate::nvdec::decoder::DualPlaneFrame;
 
