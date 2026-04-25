@@ -90,6 +90,10 @@ notify-rust = "4"
 winreg = "0.52"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+# Phase 4 G4 (MSI + auto-update)
+self_update = { version = "0.41", default-features = false, features = ["archive-zip", "compression-zip-deflate", "rustls"] }
+semver = "1"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
@@ -100,3 +104,7 @@ strip = "none"
 [profile.dev]
 opt-level = 1       # テストが 4K60 相当のバッファ処理で時間かかりすぎないように
 # panic is left default (unwind) so proptest shrinking and #[should_panic] work
+
+[workspace.metadata.wix]
+# cargo-wix produces MSI artifacts under target/wix.
+# Configuration lives in wix/main.wxs.

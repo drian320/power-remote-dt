@@ -14,6 +14,26 @@ fn main() {
     write_solid_color(assets_dir, "tray-error.png", [200, 60, 60, 255]);       // red
 
     println!("cargo:rerun-if-changed=build.rs");
+
+    // Phase 4 G4: embed Windows version resource + icon into prdt-host.exe.
+    #[cfg(target_os = "windows")]
+    {
+        let icon = std::path::Path::new("resources/prdt-icon.ico");
+        let mut res = winres::WindowsResource::new();
+        res.set("FileDescription", "Power Remote Desktop (Host)");
+        res.set("ProductName", "Power Remote Desktop");
+        if icon.exists() {
+            res.set_icon(icon.to_str().expect("ascii icon path"));
+        } else {
+            println!(
+                "cargo:warning=prdt-host: {} missing; building without icon (Task 5 generates it)",
+                icon.display()
+            );
+        }
+        if let Err(e) = res.compile() {
+            println!("cargo:warning=winres compile failed: {e}");
+        }
+    }
 }
 
 /// Write a 32×32 RGBA PNG of the given color to `assets/<name>`.
