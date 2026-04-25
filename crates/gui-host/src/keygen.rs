@@ -6,6 +6,13 @@ use prdt_crypto::KeyPair;
 
 /// Result of `try_load_or_generate`: either the existing key was loaded
 /// or a fresh one was generated and persisted.
+///
+/// `keypair` and `generated` are exposed so future GUI flows can show
+/// "newly generated, copy this!" prompts and pass the keypair to a Noise
+/// handshake without re-reading the file. They're not consumed in G1
+/// (the host server loads its own copy from `key_file`); the
+/// `#[allow(dead_code)]` suppresses the warning until G2+ uses them.
+#[allow(dead_code)]
 pub struct KeyOutcome {
     pub keypair: KeyPair,
     pub pubkey_b64: String,
