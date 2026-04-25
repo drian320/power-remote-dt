@@ -236,6 +236,8 @@ struct ViewerApp {
     render: Option<ViewerRender>,
     dev: D3d11Device,
     decoder: String,
+    /// True when invoked with --headless; overlay is suppressed in that mode.
+    headless: bool,
     // The tokio runtime running the UDP / decode worker thread; kept alive
     // for the duration of the event loop.
     _runtime: tokio::runtime::Runtime,
@@ -243,6 +245,13 @@ struct ViewerApp {
     /// D3D11 device removed). `about_to_wait` sees it and calls
     /// `event_loop.exit()` so the next iteration tears down cleanly.
     should_exit: bool,
+    /// Phase 4 G2: overlay supervisor. None when --headless or when init failed.
+    overlay: Option<overlay_supervisor::OverlaySupervisor>,
+    /// Last time we wrote stats.json. Throttled to 1 Hz in about_to_wait.
+    last_overlay_tick: std::time::Instant,
+    /// Set by overlay control polling when the user clicked Disconnect.
+    /// Checked in about_to_wait to call event_loop.exit().
+    disconnect_requested: bool,
 }
 
 impl ApplicationHandler for ViewerApp {
@@ -305,6 +314,17 @@ impl ApplicationHandler for ViewerApp {
         });
         window.request_redraw();
         info!("resumed done, first redraw requested");
+
+        // Phase 4 G2: spawn overlay supervisor (skipped in --headless mode).
+        if !self.headless {
+            match overlay_supervisor::OverlaySupervisor::new() {
+                Ok(s) => {
+                    info!(ipc_dir = %s.ipc_dir().display(), "overlay supervisor ready");
+                    self.overlay = Some(s);
+                }
+                Err(e) => warn!(?e, "overlay supervisor disabled (cache dir error)"),
+            }
+        }
     }
 
     fn window_event(
@@ -366,6 +386,18 @@ impl ApplicationHandler for ViewerApp {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                // Phase 4 G2: ESC spawns the overlay (and is NOT forwarded to host).
+                if event.physical_key
+                    == winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Escape)
+                    && event.state == ElementState::Pressed
+                {
+                    if let Some(s) = self.overlay.as_mut() {
+                        if let Err(e) = s.spawn_if_idle() {
+                            warn!(?e, "overlay spawn failed");
+                        }
+                    }
+                    return;
+                }
                 if event.repeat {
                     return;
                 }
@@ -393,6 +425,30 @@ impl ApplicationHandler for ViewerApp {
             event_loop.exit();
             return;
         }
+
+        // Phase 4 G2: 1 Hz overlay tick — write stats.json + poll control.json.
+        if self.last_overlay_tick.elapsed() >= std::time::Duration::from_secs(1) {
+            self.last_overlay_tick = std::time::Instant::now();
+            if let Some(ref s) = self.overlay {
+                let payload = build_stats_payload(self);
+                if let Err(e) = s.write_stats(&payload) {
+                    warn!(?e, "write_stats failed");
+                }
+                match s.read_control() {
+                    Ok(Some(action)) if action == "disconnect" => {
+                        info!("overlay requested disconnect; shutting down");
+                        self.disconnect_requested = true;
+                    }
+                    Ok(_) => {}
+                    Err(e) => warn!(?e, "read_control failed"),
+                }
+            }
+        }
+
+        if self.disconnect_requested {
+            event_loop.exit();
+        }
+
         // Apply any pending window-title refresh from the latency task.
         // set_title on winit 0.30 is cheap when the string hasn't changed,
         // and the latency task only touches this slot every ~1s.
@@ -547,6 +603,35 @@ impl ViewerApp {
             Err(e) => warn!(?e, "Present failed"),
         }
     }
+
+    // Phase 4 G2: label helpers used by build_stats_payload.
+
+    fn host_label_for_overlay(&self) -> String {
+        if let Some(id) = self.host_id_for_label() {
+            return id;
+        }
+        if let Some(addr) = self.host_addr_for_label() {
+            return addr;
+        }
+        "(unknown)".to_string()
+    }
+
+    fn overlay_decoder_label(&self) -> String {
+        self.decoder.clone()
+    }
+
+    /// Returns the signaling host_id stored on the struct, if any.
+    /// ViewerApp does not carry args directly; host_id was passed into
+    /// spawn_worker_tasks and is not retained on the struct. Fall back None.
+    fn host_id_for_label(&self) -> Option<String> {
+        None // host_id not retained on struct; host_label falls through to addr
+    }
+
+    /// Returns the direct-connect host address stored on the struct, if any.
+    /// Same situation: not retained. Fall back None.
+    fn host_addr_for_label(&self) -> Option<String> {
+        None // direct_host not retained on struct; reported as "(unknown)"
+    }
 }
 
 /// Saturating cast u64 → u32 for telemetry fields. A latency beyond ~71
@@ -573,6 +658,39 @@ fn format_status_title(snap: &latency::LatencySnapshot) -> String {
             ),
             None => "prdt-viewer · connecting…".to_string(),
         },
+    }
+}
+
+/// Build the IPC stats payload from current viewer state.
+fn build_stats_payload(app: &ViewerApp) -> overlay_ipc::StatsPayload {
+    let snap = app.shared.latency.snapshot();
+    let present = snap.present;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let connection_state = if present.as_ref().map(|p| p.samples).unwrap_or(0) > 0 {
+        "connected".to_string()
+    } else {
+        "connecting".to_string()
+    };
+    let host_label = app.host_label_for_overlay();
+    let decoder = app.overlay_decoder_label();
+    let latency_us = present.as_ref().map(|p| overlay_ipc::LatencyUs {
+        p50: p.p50_us,
+        p95: p.p95_us,
+        p99: p.p99_us,
+        samples: p.samples,
+    });
+    overlay_ipc::StatsPayload {
+        version: 1,
+        viewer_pid: std::process::id(),
+        updated_at_unix_ms: now_ms,
+        connection_state,
+        host_label,
+        decoder,
+        latency_us,
+        fps_observed: 0.0, // approximated; refined in G3+
     }
 }
 
@@ -789,8 +907,12 @@ fn main() -> Result<()> {
         render: None,
         dev,
         decoder: args.decoder.clone(),
+        headless: args.headless,
         _runtime: runtime,
         should_exit: false,
+        overlay: None,
+        last_overlay_tick: std::time::Instant::now(),
+        disconnect_requested: false,
     };
 
     info!("event_loop.run_app starting");
