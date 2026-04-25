@@ -4,6 +4,9 @@
 #[cfg(windows)]
 pub mod full_pipeline;
 
+#[cfg(windows)]
+pub use full_pipeline::{ConsumerBackend, FullPipelineConfig, RunStats, StageTimes};
+
 /// Compute (p50, p90, p95, p99, p100) by sorting in place. Sorts the input.
 pub fn percentiles(lags_us: &mut [u64]) -> (u64, u64, u64, u64, u64) {
     lags_us.sort_unstable();

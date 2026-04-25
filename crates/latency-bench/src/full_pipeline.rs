@@ -18,8 +18,6 @@ use prdt_protocol::{now_monotonic_us, ConsumerError, EncodedFrame, VideoConsumer
 use prdt_transport::{InProcTransport, LoopbackOptions, ReceivedMessage, Transport};
 use tracing::{info, warn};
 
-use crate::percentiles;
-
 /// Which decoder backend the bench exercises for the "decode" stage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsumerBackend {
@@ -77,15 +75,102 @@ pub struct FullPipelineConfig {
     pub consumer: ConsumerBackend,
 }
 
-struct StageTimes {
-    seq: u64,
-    capture_us: u64,
-    encode_done_us: u64,
-    recv_us: u64,
-    decode_done_us: u64,
+pub struct StageTimes {
+    pub seq: u64,
+    pub capture_us: u64,
+    pub encode_done_us: u64,
+    pub recv_us: u64,
+    pub decode_done_us: u64,
+}
+
+/// Result of a single bench config run. `frames` is the per-frame raw
+/// data; `sent` is the sender's seq counter; `received` is the count
+/// of frames that made it through both transport and decode.
+pub struct RunStats {
+    pub sent: u64,
+    pub received: u64,
+    pub frames: Vec<StageTimes>,
 }
 
 pub async fn run(cfg: FullPipelineConfig) -> anyhow::Result<()> {
+    let csv_path = cfg.csv.clone();
+    let stats = run_for_matrix(&cfg).await?;
+
+    if stats.frames.is_empty() {
+        info!(sent = stats.sent, decoded = stats.received, "bench done but decoded 0 frames");
+        return Ok(());
+    }
+
+    // Per-stage latency arrays (computed from frames).
+    let mut encode: Vec<u64> = stats
+        .frames
+        .iter()
+        .map(|s| s.encode_done_us.saturating_sub(s.capture_us))
+        .collect();
+    let mut transport: Vec<u64> = stats
+        .frames
+        .iter()
+        .map(|s| s.recv_us.saturating_sub(s.encode_done_us))
+        .collect();
+    let mut decode: Vec<u64> = stats
+        .frames
+        .iter()
+        .map(|s| s.decode_done_us.saturating_sub(s.recv_us))
+        .collect();
+    let mut e2e: Vec<u64> = stats
+        .frames
+        .iter()
+        .map(|s| s.decode_done_us.saturating_sub(s.capture_us))
+        .collect();
+
+    let (e50, _, e95, e99, _) = crate::percentiles(&mut encode);
+    let (t50, _, t95, t99, _) = crate::percentiles(&mut transport);
+    let (d50, _, d95, d99, _) = crate::percentiles(&mut decode);
+    let (w50, _, w95, w99, wmax) = crate::percentiles(&mut e2e);
+
+    info!(
+        sent = stats.sent,
+        decoded = stats.received,
+        encode_p50_us = e50,
+        encode_p95_us = e95,
+        encode_p99_us = e99,
+        transport_p50_us = t50,
+        transport_p95_us = t95,
+        transport_p99_us = t99,
+        decode_p50_us = d50,
+        decode_p95_us = d95,
+        decode_p99_us = d99,
+        e2e_p50_us = w50,
+        e2e_p95_us = w95,
+        e2e_p99_us = w99,
+        e2e_max_us = wmax,
+        "full-pipeline bench done",
+    );
+
+    if let Some(path) = csv_path {
+        use std::io::Write;
+        let mut wtr = std::fs::File::create(&path)?;
+        writeln!(wtr, "seq,capture_us,encode_done_us,recv_us,decode_done_us,e2e_us")?;
+        for s in &stats.frames {
+            let e = s.decode_done_us.saturating_sub(s.capture_us);
+            writeln!(
+                wtr,
+                "{},{},{},{},{},{}",
+                s.seq, s.capture_us, s.encode_done_us, s.recv_us, s.decode_done_us, e
+            )?;
+        }
+        info!(path = %path.display(), "wrote CSV");
+    }
+
+    Ok(())
+}
+
+/// Core bench loop without any I/O. Returns the raw per-frame samples
+/// and counters; the caller decides how to log/aggregate/write CSV.
+///
+/// Used by both the single-config `run()` (which logs + writes one CSV)
+/// and the matrix bin (which writes per-frame + summary CSVs).
+pub async fn run_for_matrix(cfg: &FullPipelineConfig) -> anyhow::Result<RunStats> {
     let adapter = pick_default_adapter().map_err(|e| anyhow::anyhow!("no GPU adapter: {e}"))?;
     if !adapter.is_nvidia() {
         anyhow::bail!(
@@ -101,16 +186,10 @@ pub async fn run(cfg: FullPipelineConfig) -> anyhow::Result<()> {
         fps_numerator: cfg.fps,
         fps_denominator: 1,
         bitrate_bps: cfg.bitrate_bps,
-        gop_length: cfg.fps * 2, // 2-second keyframe interval
+        gop_length: cfg.fps * 2,
     };
-    let encoder =
-        NvencEncoder::new(&dev, &enc_cfg).map_err(|e| anyhow::anyhow!("NvencEncoder::new: {e}"))?;
-    info!(
-        resolution = format!("{}x{}", cfg.width, cfg.height),
-        fps = cfg.fps,
-        bitrate_mbps = cfg.bitrate_bps / 1_000_000,
-        "NVENC encoder ready",
-    );
+    let encoder = NvencEncoder::new(&dev, &enc_cfg)
+        .map_err(|e| anyhow::anyhow!("NvencEncoder::new: {e}"))?;
 
     let mut consumer = match cfg.consumer {
         ConsumerBackend::Mf => BenchConsumer::Mf(
@@ -122,7 +201,6 @@ pub async fn run(cfg: FullPipelineConfig) -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("NvdecD3d11Consumer::new: {e}"))?,
         ),
     };
-    info!(backend = ?cfg.consumer, "decoder ready");
 
     let (host_side, viewer_side) = InProcTransport::pair(LoopbackOptions {
         drop_ppm: cfg.drop_ppm,
@@ -141,7 +219,6 @@ pub async fn run(cfg: FullPipelineConfig) -> anyhow::Result<()> {
     let mut decoded: u64 = 0;
 
     while Instant::now() < deadline {
-        // Encode side.
         let capture_us = now_monotonic_us();
         let tex = make_counter_texture(&dev, cfg.width, cfg.height, seq as u32)
             .map_err(|e| anyhow::anyhow!("synthetic texture: {e}"))?;
@@ -151,7 +228,6 @@ pub async fn run(cfg: FullPipelineConfig) -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("encode: {e}"))?;
         let encode_done_us = now_monotonic_us();
 
-        // Wrap in an EncodedFrame and send through the transport.
         let frame = EncodedFrame::new_h265(
             seq,
             capture_us,
@@ -165,7 +241,6 @@ pub async fn run(cfg: FullPipelineConfig) -> anyhow::Result<()> {
             break;
         }
 
-        // Drain whatever arrived on the viewer side.
         loop {
             match tokio::time::timeout(Duration::from_millis(1), viewer_side.recv()).await {
                 Ok(Ok(ReceivedMessage::Video(rx_frame))) => {
@@ -189,7 +264,7 @@ pub async fn run(cfg: FullPipelineConfig) -> anyhow::Result<()> {
                         samples.push(StageTimes {
                             seq: rx_seq,
                             capture_us: rx_capture_us,
-                            encode_done_us, // approximate: last encode completion
+                            encode_done_us,
                             recv_us,
                             decode_done_us,
                         });
@@ -209,7 +284,7 @@ pub async fn run(cfg: FullPipelineConfig) -> anyhow::Result<()> {
         }
     }
 
-    // Drain any remaining decoded frames for a beat in case of pipeline lag.
+    // Drain remaining decoded frames.
     let drain_deadline = Instant::now() + Duration::from_millis(500);
     while Instant::now() < drain_deadline {
         match tokio::time::timeout(Duration::from_millis(50), viewer_side.recv()).await {
@@ -224,7 +299,7 @@ pub async fn run(cfg: FullPipelineConfig) -> anyhow::Result<()> {
                     samples.push(StageTimes {
                         seq: rx_seq,
                         capture_us: rx_capture_us,
-                        encode_done_us: recv_us, // no fresh encode; use recv as upper bound
+                        encode_done_us: recv_us,
                         recv_us,
                         decode_done_us,
                     });
@@ -235,75 +310,9 @@ pub async fn run(cfg: FullPipelineConfig) -> anyhow::Result<()> {
         }
     }
 
-    if samples.is_empty() {
-        info!(sent = seq, decoded, "bench done but decoded 0 frames");
-        return Ok(());
-    }
-
-    // Per-stage latencies (all in the same monotonic epoch):
-    //   encode_lat = encode_done - capture
-    //   transport_lat = recv - encode_done     (approximate; encode_done is
-    //                                           the sender-local "done" stamp)
-    //   decode_lat = decode_done - recv
-    //   e2e_lat = decode_done - capture
-    let mut encode: Vec<u64> = samples
-        .iter()
-        .map(|s| s.encode_done_us.saturating_sub(s.capture_us))
-        .collect();
-    let mut transport: Vec<u64> = samples
-        .iter()
-        .map(|s| s.recv_us.saturating_sub(s.encode_done_us))
-        .collect();
-    let mut decode: Vec<u64> = samples
-        .iter()
-        .map(|s| s.decode_done_us.saturating_sub(s.recv_us))
-        .collect();
-    let mut e2e: Vec<u64> = samples
-        .iter()
-        .map(|s| s.decode_done_us.saturating_sub(s.capture_us))
-        .collect();
-
-    let (e50, _, e95, e99, _) = percentiles(&mut encode);
-    let (t50, _, t95, t99, _) = percentiles(&mut transport);
-    let (d50, _, d95, d99, _) = percentiles(&mut decode);
-    let (w50, _, w95, w99, wmax) = percentiles(&mut e2e);
-
-    info!(
-        sent = seq,
-        decoded,
-        encode_p50_us = e50,
-        encode_p95_us = e95,
-        encode_p99_us = e99,
-        transport_p50_us = t50,
-        transport_p95_us = t95,
-        transport_p99_us = t99,
-        decode_p50_us = d50,
-        decode_p95_us = d95,
-        decode_p99_us = d99,
-        e2e_p50_us = w50,
-        e2e_p95_us = w95,
-        e2e_p99_us = w99,
-        e2e_max_us = wmax,
-        "full-pipeline bench done",
-    );
-
-    if let Some(path) = cfg.csv {
-        use std::io::Write;
-        let mut wtr = std::fs::File::create(&path)?;
-        writeln!(
-            wtr,
-            "seq,capture_us,encode_done_us,recv_us,decode_done_us,e2e_us"
-        )?;
-        for s in &samples {
-            let e = s.decode_done_us.saturating_sub(s.capture_us);
-            writeln!(
-                wtr,
-                "{},{},{},{},{},{}",
-                s.seq, s.capture_us, s.encode_done_us, s.recv_us, s.decode_done_us, e
-            )?;
-        }
-        info!(path = %path.display(), "wrote CSV");
-    }
-
-    Ok(())
+    Ok(RunStats {
+        sent: seq,
+        received: decoded,
+        frames: samples,
+    })
 }
