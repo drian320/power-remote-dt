@@ -7,6 +7,8 @@ mod keygen;
 #[allow(dead_code)] // wired into HostApp in G3 Task 5
 mod notif;
 mod settings;
+#[allow(dead_code)] // wired into HostApp in G3 Task 5
+mod tray;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
