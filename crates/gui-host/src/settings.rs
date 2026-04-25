@@ -76,9 +76,11 @@ pub fn render(
                 );
                 for r in pending_crashes.iter().take(5) {
                     let summary = prdt_gui_common::truncate_for_display(&r.panic_message, 80);
-                    ui.label(format!(
-                        "{}  {}  \"{}\"",
-                        r.timestamp_iso, r.binary, summary
+                    ui.label(t!(
+                        "crashlog-row-format",
+                        timestamp => r.timestamp_iso.as_str(),
+                        binary => r.binary.as_str(),
+                        message => summary.as_str(),
                     ));
                 }
                 ui.horizontal(|ui| {

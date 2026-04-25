@@ -114,13 +114,18 @@ fn write_report(report: &CrashReport) -> std::io::Result<PathBuf> {
 fn write_report_to(report: &CrashReport, dir: &Path) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     // Use the timestamp already in the report so the filename and the
-    // JSON content can never disagree.
-    let stamp = chrono::DateTime::parse_from_rfc3339(&report.timestamp_iso)
-        .map(|dt| dt.format("%Y%m%d-%H%M%S").to_string())
-        .unwrap_or_else(|_| "unknown".to_string());
+    // JSON content can never disagree. Include milliseconds to avoid
+    // same-second same-PID collisions (e.g. eframe catch_unwind double-panic).
+    let (stamp, millis) = chrono::DateTime::parse_from_rfc3339(&report.timestamp_iso)
+        .map(|dt| (
+            dt.format("%Y%m%d-%H%M%S").to_string(),
+            dt.timestamp_subsec_millis(),
+        ))
+        .unwrap_or_else(|_| ("unknown".to_string(), 0));
     let path = dir.join(format!(
-        "{}-{}-{}.json",
+        "{}-{:03}-{}-{}.json",
         stamp,
+        millis,
         report.binary,
         std::process::id()
     ));
@@ -151,9 +156,15 @@ fn list_pending_in(dir: &Path) -> std::io::Result<Vec<CrashReport>> {
     paths.reverse();
     let mut out = Vec::new();
     for p in paths {
-        if let Ok(s) = std::fs::read_to_string(&p) {
-            if let Ok(r) = serde_json::from_str::<CrashReport>(&s) {
-                out.push(r);
+        match std::fs::read_to_string(&p) {
+            Ok(s) => match serde_json::from_str::<CrashReport>(&s) {
+                Ok(r) => out.push(r),
+                Err(e) => {
+                    tracing::warn!(?e, path = %p.display(), "failed to parse crash report");
+                }
+            },
+            Err(e) => {
+                tracing::warn!(?e, path = %p.display(), "failed to read crash report");
             }
         }
     }
@@ -294,12 +305,25 @@ mod tests {
         let r = sample_report("prdt-host", "2026-04-25T12:00:00+00:00");
         let path = write_report_to(&r, dir.path()).unwrap();
         let name = path.file_name().unwrap().to_string_lossy().to_string();
-        // Expect "20260425-120000-prdt-host-<pid>.json"
+        // Expect "20260425-120000-000-prdt-host-<pid>.json"
         assert!(
-            name.starts_with("20260425-120000-prdt-host-"),
-            "filename stamp must match timestamp_iso, got: {name}"
+            name.starts_with("20260425-120000-000-prdt-host-"),
+            "filename stamp must match timestamp_iso (with millis), got: {name}"
         );
         assert!(name.ends_with(".json"));
+    }
+
+    #[test]
+    fn write_two_reports_same_second_different_millis_no_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        let r1 = sample_report("prdt-host", "2026-04-25T12:00:00.100+00:00");
+        let r2 = sample_report("prdt-host", "2026-04-25T12:00:00.500+00:00");
+        let p1 = write_report_to(&r1, dir.path()).unwrap();
+        let p2 = write_report_to(&r2, dir.path()).unwrap();
+        assert_ne!(p1, p2, "different millis must yield different filenames");
+        // Both files should still exist (no overwrite)
+        assert!(p1.exists());
+        assert!(p2.exists());
     }
 
     #[test]

@@ -26,7 +26,14 @@ pub type RunHostFn =
 
 /// Run the host GUI as the main blocking call. Returns when the user
 /// closes the window.
-pub fn run_host_gui(config_path: Option<PathBuf>, run_host: RunHostFn) -> anyhow::Result<()> {
+///
+/// `binary_name` should be `env!("CARGO_PKG_NAME")` from the calling binary
+/// so that `CrashReport.binary` is consistent regardless of launch mode.
+pub fn run_host_gui(
+    binary_name: &'static str,
+    config_path: Option<PathBuf>,
+    run_host: RunHostFn,
+) -> anyhow::Result<()> {
     let config_path = config_path
         .or_else(prdt_gui_common::default_config_path)
         .ok_or_else(|| anyhow::anyhow!("could not resolve config path"))?;
@@ -45,7 +52,7 @@ pub fn run_host_gui(config_path: Option<PathBuf>, run_host: RunHostFn) -> anyhow
 
     // Phase 4 G5: feed the panic hook so crash dumps include recent log lines.
     prdt_gui_common::register_tail(tail_handle.clone());
-    prdt_gui_common::install_panic_hook(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+    prdt_gui_common::install_panic_hook(binary_name, env!("CARGO_PKG_VERSION"));
 
     // Read any unacknowledged crash reports from previous runs.
     let pending_crashes = match prdt_gui_common::list_pending_crashes() {

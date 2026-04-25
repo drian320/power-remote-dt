@@ -101,3 +101,4 @@ crashlog-pending-heading = Last session crashed ({ $n } reports):
 crashlog-button-open-folder = Open crashes folder
 crashlog-button-acknowledge = Acknowledge all
 crashlog-no-pending = No pending crash reports.
+crashlog-row-format = { $timestamp }  { $binary }  "{ $message }"
