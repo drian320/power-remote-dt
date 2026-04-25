@@ -5,9 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lib]
+name = "prdt_latency_bench"
+path = "src/lib.rs"
+
 [[bin]]
 name = "prdt-latency-bench"
 path = "src/main.rs"
+
+[[bin]]
+name = "prdt-bench-matrix"
+path = "src/bin/bench-matrix.rs"
 
 [dependencies]
 prdt-protocol = { path = "../protocol" }
@@ -22,3 +30,6 @@ humantime = "2"
 
 [target.'cfg(windows)'.dependencies]
 prdt-media-win = { path = "../media-win" }
+
+[dev-dependencies]
+tempfile = "3"

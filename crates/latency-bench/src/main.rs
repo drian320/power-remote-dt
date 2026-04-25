@@ -15,12 +15,13 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use clap::Parser;
+use prdt_latency_bench::percentiles;
 use prdt_protocol::{frame::Codec, now_monotonic_us, EncodedFrame};
 use prdt_transport::{InProcTransport, LoopbackOptions, ReceivedMessage, Transport};
 use tracing::{info, warn};
 
 #[cfg(windows)]
-mod full_pipeline;
+use prdt_latency_bench::full_pipeline;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -84,21 +85,6 @@ struct Sample {
     seq: u64,
     host_ts_us: u64,
     recv_us: u64,
-}
-
-pub(crate) fn percentiles(lags_us: &mut [u64]) -> (u64, u64, u64, u64, u64) {
-    lags_us.sort_unstable();
-    let pick = |p: f64| -> u64 {
-        let idx = ((lags_us.len() as f64 - 1.0) * p).round() as usize;
-        lags_us[idx]
-    };
-    (
-        pick(0.50),
-        pick(0.90),
-        pick(0.95),
-        pick(0.99),
-        *lags_us.last().unwrap_or(&0),
-    )
 }
 
 #[tokio::main]
@@ -255,24 +241,6 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn percentiles_monotonic() {
-        let mut v: Vec<u64> = (1..=100).collect();
-        let (p50, p90, p95, p99, p100) = percentiles(&mut v);
-        assert!(p50 <= p90);
-        assert!(p90 <= p95);
-        assert!(p95 <= p99);
-        assert!(p99 <= p100);
-        assert_eq!(p100, 100);
-    }
-
-    #[test]
-    fn percentiles_single_sample() {
-        let mut v = vec![42u64];
-        let (p50, p90, p95, p99, p100) = percentiles(&mut v);
-        assert_eq!((p50, p90, p95, p99, p100), (42, 42, 42, 42, 42));
-    }
 
     #[test]
     fn parse_res_accepts_wxh() {
