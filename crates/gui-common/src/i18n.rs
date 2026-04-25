@@ -162,4 +162,101 @@ mod tests {
         let l = current_locale();
         assert!(matches!(l, Locale::En | Locale::Ja));
     }
+
+    fn parse_ftl_messages(src: &str) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let mut cur_id: Option<String> = None;
+        let mut cur_val = String::new();
+        for line in src.lines() {
+            let trimmed_left = line.trim_start();
+            if trimmed_left.is_empty() || trimmed_left.starts_with('#') {
+                if let Some(id) = cur_id.take() {
+                    out.push((id, std::mem::take(&mut cur_val)));
+                }
+                continue;
+            }
+            if line.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+                if let Some(eq) = line.find('=') {
+                    if let Some(id) = cur_id.take() {
+                        out.push((id, std::mem::take(&mut cur_val)));
+                    }
+                    let id = line[..eq].trim().to_string();
+                    let value = line[eq + 1..].trim_start().to_string();
+                    cur_id = Some(id);
+                    cur_val = value;
+                    continue;
+                }
+            }
+            if !cur_val.is_empty() {
+                cur_val.push('\n');
+            }
+            cur_val.push_str(trimmed_left);
+        }
+        if let Some(id) = cur_id.take() {
+            out.push((id, cur_val));
+        }
+        out
+    }
+
+    fn extract_placeholders(value: &str) -> std::collections::BTreeSet<String> {
+        let mut set = std::collections::BTreeSet::new();
+        let bytes = value.as_bytes();
+        let mut i = 0;
+        while i + 1 < bytes.len() {
+            if bytes[i] == b'{' {
+                if let Some(end) = value[i + 1..].find('}') {
+                    let inside = value[i + 1..i + 1 + end].trim();
+                    if let Some(name) = inside.strip_prefix('$') {
+                        set.insert(name.trim().to_string());
+                    }
+                    i += 1 + end + 1;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        set
+    }
+
+    const EN_FTL: &str = include_str!("../locales/en/main.ftl");
+    const JA_FTL: &str = include_str!("../locales/ja/main.ftl");
+
+    #[test]
+    fn locale_files_have_same_ids() {
+        let en = parse_ftl_messages(EN_FTL);
+        let ja = parse_ftl_messages(JA_FTL);
+        let en_ids: std::collections::HashSet<_> = en.iter().map(|(id, _)| id.clone()).collect();
+        let ja_ids: std::collections::HashSet<_> = ja.iter().map(|(id, _)| id.clone()).collect();
+        let only_en: Vec<_> = en_ids.difference(&ja_ids).collect();
+        let only_ja: Vec<_> = ja_ids.difference(&en_ids).collect();
+        assert!(
+            only_en.is_empty() && only_ja.is_empty(),
+            "Locale ID mismatch.\n  Only in en: {only_en:?}\n  Only in ja: {only_ja:?}",
+        );
+    }
+
+    #[test]
+    fn placeholders_match_across_locales() {
+        let en = parse_ftl_messages(EN_FTL);
+        let ja = parse_ftl_messages(JA_FTL);
+        let ja_map: std::collections::HashMap<_, _> = ja.into_iter().collect();
+        for (id, val_en) in &en {
+            let val_ja = ja_map
+                .get(id)
+                .unwrap_or_else(|| panic!("ja.ftl missing id {id}"));
+            let p_en = extract_placeholders(val_en);
+            let p_ja = extract_placeholders(val_ja);
+            assert_eq!(p_en, p_ja, "Placeholder mismatch for {id}");
+        }
+    }
+
+    #[test]
+    fn host_status_listening_substitutes_bind() {
+        set_locale(Locale::En);
+        let s = t!("host-status-listening", bind => "0.0.0.0:9000");
+        assert!(s.contains("0.0.0.0:9000"), "got {s:?}");
+        set_locale(Locale::Ja);
+        let s = t!("host-status-listening", bind => "0.0.0.0:9000");
+        assert!(s.contains("0.0.0.0:9000"), "got {s:?}");
+    }
 }
