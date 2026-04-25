@@ -1,9 +1,9 @@
 # power-remote-dt — Project Status & Roadmap
 
 **Last updated:** 2026-04-25
-**Latest tag:** `phase4-g6-complete`
+**Latest tag:** `phase4-g2-complete`
 **Branch state:** master (all phase work merged)
-**Test count:** 238 automated tests across the workspace, all passing
+**Test count:** 249 automated tests across the workspace, all passing
 
 ---
 
@@ -74,6 +74,7 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
 | `phase4-title-status-complete` | viewer ウィンドウタイトル動的更新(接続状態反映) |
 | `phase4-g1-complete` | egui ベース GUI 基盤(gui-common / gui-host / gui-viewer)。host: 鍵生成 → pubkey/QR 表示 → Start/Stop で tokio task 制御。viewer: 保存接続先一覧 → 接続フォーム → 既存 winit/D3D11 にフォールスルー。`%APPDATA%\prdt\config.toml` 永続化。両 binary とも `--headless` で従来 CLI 互換。 |
 | `phase4-g6-complete` | i18n(英/日)。`fluent_templates` で `en.ftl` + `ja.ftl` を crate に embed、OS ロケール自動検出(sys-locale)、`Config.gui.locale` で固定可、Settings に Language ドロップダウン。`tr()` / `t!()` マクロ。54 ID。`%APPDATA%\prdt\locale\<lang>\main.ftl` でユーザー override 可(将来拡張)。 |
+| `phase4-g2-complete` | viewer in-stream overlay(B1 別プロセス)。`prdt-viewer-overlay`(eframe)を ESC で spawn、ファイル IPC(stats.json 1Hz / control.json polling)で latency p50/p95/p99 表示 + Resume/Disconnect ボタン。`dirs::cache_dir()/prdt/overlay-ipc/<pid>/` で PID 隔離、Drop で child kill + dir 削除。`--headless` で無効。Win/Linux/macOS 同一実装。モバイルは Phase 5+ で viewer 全体再実装時。 |
 
 ---
 
@@ -106,8 +107,8 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
 #### B1. Phase 4 GUI(本格) — **G1 完了 (2026-04-25, `phase4-g1-complete`)**
 - ~~spec~~ → `docs/superpowers/specs/2026-04-23-phase4-gui-design.md`(全体)+ `2026-04-25-phase4-g1-egui-foundation-design.md`(G1)
 - ~~G1: egui 基盤 + host GUI + viewer launcher~~ ✅
-- 残: G2 in-stream overlay (latency p50/p95、ESC menu、~1 週)、G3 tray + auto-start (~1 週)、G4 MSI installer + 自動更新 (~2 週)、G5 crash reporter + コード署名 (~1 週)
-- 合計残: ~5 週(G1 + G6 で ~3 週分完了)
+- 残: G3 tray + auto-start (~1 週)、G4 MSI installer + 自動更新 (~2 週)、G5 crash reporter + コード署名 (~1 週)
+- 合計残: ~4 週(G1 + G2 + G6 で ~4 週分完了)
 
 #### B2. Phase 1 — Linux サポート
 - **状態**: 着手前。Windows-specific 部分(`media-win` / `input-win`)を Linux 等価実装に置換
