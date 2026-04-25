@@ -11,7 +11,7 @@ pub use full_pipeline::{ConsumerBackend, FullPipelineConfig, RunStats, StageTime
 pub fn percentiles(lags_us: &mut [u64]) -> (u64, u64, u64, u64, u64) {
     lags_us.sort_unstable();
     let pick = |p: f64| -> u64 {
-        let idx = ((lags_us.len() as f64 - 1.0) * p).ceil() as usize;
+        let idx = ((lags_us.len() as f64 - 1.0) * p).round() as usize;
         lags_us[idx]
     };
     (
@@ -279,12 +279,15 @@ mod tests {
         assert_eq!(stats.sent, 100);
         assert_eq!(stats.received, 100);
         assert_eq!(stats.loss_ppm, 0);
-        // arrival_lag = recv - capture = i; p50 of 1..=100 = 51 (round)
+        // arrival_lag = recv - capture = i (1..=100). With round-style
+        // percentile picking: p50 = round(99*0.5)=50 → v[50]=51,
+        // p95 = round(94.05)=94 → v[94]=95, p99 = round(98.01)=98 → v[98]=99.
         assert_eq!(stats.arrival_p50_us, 51);
-        assert_eq!(stats.arrival_p95_us, 96);
-        assert_eq!(stats.arrival_p99_us, 100);
-        // e2e_lag = decode_done - capture = 3i; p50 = 153, p95 = 288, p99 = 300
+        assert_eq!(stats.arrival_p95_us, 95);
+        assert_eq!(stats.arrival_p99_us, 99);
+        // e2e_lag = decode_done - capture = 3i. Same indices times 3:
+        // p50 = 3*51 = 153, p99 = 3*99 = 297.
         assert_eq!(stats.e2e_p50_us, 153);
-        assert_eq!(stats.e2e_p99_us, 300);
+        assert_eq!(stats.e2e_p99_us, 297);
     }
 }
