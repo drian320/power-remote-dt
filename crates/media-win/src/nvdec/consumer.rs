@@ -76,7 +76,8 @@ impl NvdecD3d11Consumer {
     /// Pop the latest decoded NV12 frame as raw CPU bytes. Tests use
     /// this to verify pixel-level correctness; the production viewer
     /// uses `take_latest_texture` instead.
-    #[cfg(prdt_nvdec_bindings)]
+    /// Only available under cfg(test) or with the `cpu-nv12` feature.
+    #[cfg(all(prdt_nvdec_bindings, any(test, feature = "cpu-nv12")))]
     pub fn take_latest_nv12(&self) -> Option<DecodedFrame> {
         self.decoder.take_latest_frame()
     }
@@ -87,8 +88,9 @@ impl NvdecD3d11Consumer {
     /// cached NV12 D3D11 texture via UpdateSubresource and returns a
     /// clone. Must be called on the thread that owns the D3D11
     /// immediate context (i.e., the viewer's event-loop thread).
+    /// Only available under cfg(test) or with the `cpu-nv12` feature.
     pub fn take_latest_texture(&self) -> Option<D3d11Texture> {
-        #[cfg(prdt_nvdec_bindings)]
+        #[cfg(all(prdt_nvdec_bindings, any(test, feature = "cpu-nv12")))]
         {
             let frame = self.decoder.take_latest_frame()?;
             match self.upload_nv12_to_cache(&frame) {
@@ -99,7 +101,7 @@ impl NvdecD3d11Consumer {
                 }
             }
         }
-        #[cfg(not(prdt_nvdec_bindings))]
+        #[cfg(not(all(prdt_nvdec_bindings, any(test, feature = "cpu-nv12"))))]
         {
             None
         }
@@ -411,6 +413,69 @@ mod tests {
             );
             assert!(!uv_array.is_null(), "UV CUarray was null");
         }
+    }
+
+    /// End-to-end with the new GPU dual-plane path: encode 5 frames, submit
+    /// them to NVDEC, take the latest dual-plane frame, and verify the
+    /// texture sizes/formats match expectation.
+    #[cfg(prdt_nvdec_bindings)]
+    #[test]
+    fn decode_emits_dual_plane_textures() {
+        use crate::d3d11::TextureFormat;
+        use crate::nvenc::{NvencEncoder, NvencEncoderConfig};
+        use crate::synthetic::make_counter_texture;
+
+        let adapter = match pick_default_adapter() {
+            Ok(a) => a,
+            Err(_) => return,
+        };
+        if !adapter.is_nvidia() {
+            eprintln!("skipping: non-NVIDIA adapter");
+            return;
+        }
+        let dev = match D3d11Device::create(&adapter) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let (w, h) = (256u32, 256u32);
+
+        let enc = NvencEncoder::new(
+            &dev,
+            &NvencEncoderConfig {
+                width: w,
+                height: h,
+                fps_numerator: 60,
+                fps_denominator: 1,
+                bitrate_bps: 5_000_000,
+                gop_length: 30,
+            },
+        )
+        .expect("NvencEncoder");
+        let mut consumer = NvdecD3d11Consumer::new(&dev, w, h).expect("NvdecD3d11Consumer");
+
+        for i in 0..5 {
+            let tex = make_counter_texture(&dev, w, h, i).expect("counter tex");
+            let ts = i as u64 * 16_666;
+            let force_idr = i == 0;
+            let frame = enc.encode(&tex, force_idr, ts).expect("encode");
+            consumer
+                .decoder
+                .submit(&frame.nal_bytes, ts as i64)
+                .unwrap_or_else(|e| panic!("submit frame {i} failed: {e}"));
+        }
+
+        let dual = consumer
+            .decoder
+            .take_latest_dual_plane()
+            .expect("NVDEC should have produced at least one dual-plane frame");
+        assert_eq!(dual.width, w);
+        assert_eq!(dual.height, h);
+        assert_eq!(dual.y_tex.format(), TextureFormat::R8);
+        assert_eq!(dual.uv_tex.format(), TextureFormat::R8G8);
+        assert_eq!(dual.y_tex.width(), w);
+        assert_eq!(dual.y_tex.height(), h);
+        assert_eq!(dual.uv_tex.width(), w / 2);
+        assert_eq!(dual.uv_tex.height(), h / 2);
     }
 
     /// End-to-end: encode a synthetic frame with NVENC, feed the resulting
