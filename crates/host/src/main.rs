@@ -1,5 +1,7 @@
 #![cfg(windows)]
 
+mod status;
+
 use std::fs;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -22,19 +24,22 @@ use prdt_transport::{
     host_handshake, now_monotonic_us, CustomUdpTransport, ReceivedMessage, Transport,
     UdpTransportConfig,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
+
+use status::SharedStatus;
 
 const FILE_RECV_DIR: &str = "prdt-received";
 const FILE_SEND_DIR: &str = "prdt-outgoing";
 const FILE_SEND_SENT_SUBDIR: &str = "sent";
 const OUTGOING_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(
     name = "prdt-host",
     about = "power-remote-dt host (capture + encode + input inject)"
 )]
-struct Args {
+pub struct Args {
     /// Local bind address, e.g. 0.0.0.0:9000.
     #[arg(long, default_value = "0.0.0.0:9000")]
     bind: SocketAddr,
@@ -90,16 +95,11 @@ struct Args {
     turn_url: Option<url::Url>,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
-
-    let args = Args::parse();
-
+pub async fn run_host(
+    args: Args,
+    _status: Option<SharedStatus>,
+    _cancel: CancellationToken,
+) -> Result<()> {
     // Load or generate the host keypair.
     let keypair = if args.key_file.exists() {
         let priv_bytes = fs::read(&args.key_file)
@@ -559,4 +559,19 @@ async fn main() -> Result<()> {
         _ = tokio::signal::ctrl_c() => info!("ctrl-c received"),
     }
     Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    init_tracing();
+    let args = Args::parse();
+    run_host(args, None, CancellationToken::new()).await
+}
+
+fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .init();
 }
