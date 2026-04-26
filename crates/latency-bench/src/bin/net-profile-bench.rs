@@ -56,7 +56,6 @@ struct Args {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // used in Tasks 2-4
 struct Cfg {
     latency_ms: u32,
     drop_ppm: u32,
@@ -100,7 +99,6 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Default)]
-#[allow(dead_code)] // used in Task 3
 struct RunStats {
     input_sent: u64,
     input_received: u64,
@@ -109,7 +107,6 @@ struct RunStats {
     video_received: u64,
 }
 
-#[allow(dead_code)] // wired in Task 4
 async fn run_one_config(cfg: &Cfg) -> RunStats {
     let opts = LoopbackOptions {
         drop_ppm: cfg.drop_ppm,
@@ -144,7 +141,11 @@ async fn run_one_config(cfg: &Cfg) -> RunStats {
                 if sent_ts_tx.send(now).is_err() {
                     break;
                 }
-                let ev = InputEvent::MouseMove { x: 0, y: 0, absolute: false };
+                let ev = InputEvent::MouseMove {
+                    x: 0,
+                    y: 0,
+                    absolute: false,
+                };
                 if viewer_side.send_input(ev).await.is_err() {
                     break;
                 }
@@ -263,7 +264,6 @@ async fn run_one_config(cfg: &Cfg) -> RunStats {
     }
 }
 
-#[allow(dead_code)] // wired in Task 4
 struct ConfigStats {
     config_id: String,
     latency_ms: u32,
@@ -282,7 +282,6 @@ struct ConfigStats {
     video_loss_ppm: u64,
 }
 
-#[allow(dead_code)] // wired in Task 4
 fn aggregate(cfg: &Cfg, stats: &RunStats) -> ConfigStats {
     let (input_p50_us, input_p95_us, input_p99_us) = if stats.input_lags.is_empty() {
         (0, 0, 0)
@@ -292,14 +291,12 @@ fn aggregate(cfg: &Cfg, stats: &RunStats) -> ConfigStats {
         (p50, p95, p99)
     };
     let input_loss_ppm = if stats.input_sent > 0 {
-        stats.input_sent.saturating_sub(stats.input_received) * 1_000_000
-            / stats.input_sent
+        stats.input_sent.saturating_sub(stats.input_received) * 1_000_000 / stats.input_sent
     } else {
         0
     };
     let video_loss_ppm = if stats.video_sent > 0 {
-        stats.video_sent.saturating_sub(stats.video_received) * 1_000_000
-            / stats.video_sent
+        stats.video_sent.saturating_sub(stats.video_received) * 1_000_000 / stats.video_sent
     } else {
         0
     };
@@ -322,11 +319,7 @@ fn aggregate(cfg: &Cfg, stats: &RunStats) -> ConfigStats {
     }
 }
 
-#[allow(dead_code)] // wired in Task 4
-fn write_summary_csv(
-    path: &std::path::Path,
-    stats: &[ConfigStats],
-) -> std::io::Result<()> {
+fn write_summary_csv(path: &std::path::Path, stats: &[ConfigStats]) -> std::io::Result<()> {
     use std::io::Write;
     let mut wtr = std::fs::File::create(path)?;
     writeln!(
@@ -375,8 +368,45 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&args.out_dir)
         .with_context(|| format!("create out_dir {}", args.out_dir.display()))?;
 
-    // Trial loop + summary CSV come in Tasks 2-4.
-    anyhow::bail!("trial loop not yet implemented (Tasks 2-4)");
+    let inter_delay = Duration::from_millis(args.inter_config_delay_ms);
+    let mut all_stats: Vec<ConfigStats> = Vec::with_capacity(configs.len());
+    for (i, cfg) in configs.iter().enumerate() {
+        if i > 0 {
+            tokio::time::sleep(inter_delay).await;
+        }
+        let id = config_id(cfg);
+        info!(
+            "[{:>3}/{}] running {} duration={:?}",
+            i + 1,
+            configs.len(),
+            id,
+            cfg.duration
+        );
+        let run = run_one_config(cfg).await;
+        let stats = aggregate(cfg, &run);
+        info!(
+            "[{:>3}/{}] done    {} input={}/{} video={}/{} input_p95_us={}",
+            i + 1,
+            configs.len(),
+            id,
+            stats.input_received,
+            stats.input_sent,
+            stats.video_received,
+            stats.video_sent,
+            stats.input_p95_us
+        );
+        all_stats.push(stats);
+    }
+
+    let summary_path = args.out_dir.join("summary.csv");
+    write_summary_csv(&summary_path, &all_stats)
+        .with_context(|| format!("write {}", summary_path.display()))?;
+    info!(
+        path = %summary_path.display(),
+        rows = all_stats.len(),
+        "summary written"
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -420,7 +450,7 @@ mod tests {
         };
         let cfgs = expand_matrix(&args);
         assert_eq!(cfgs.len(), 4); // 2 * 2
-        // Order: latency outer, drop inner
+                                   // Order: latency outer, drop inner
         assert_eq!((cfgs[0].latency_ms, cfgs[0].drop_ppm), (0, 0));
         assert_eq!((cfgs[1].latency_ms, cfgs[1].drop_ppm), (0, 1000));
         assert_eq!((cfgs[2].latency_ms, cfgs[2].drop_ppm), (10, 0));
@@ -439,10 +469,20 @@ mod tests {
             duration: Duration::from_millis(200),
         };
         let stats = run_one_config(&cfg).await;
-        assert!(stats.input_sent >= 100, "expected ~200, got {}", stats.input_sent);
-        assert_eq!(stats.input_received, stats.input_sent, "no drops at drop_ppm=0");
+        assert!(
+            stats.input_sent >= 100,
+            "expected ~200, got {}",
+            stats.input_sent
+        );
+        assert_eq!(
+            stats.input_received, stats.input_sent,
+            "no drops at drop_ppm=0"
+        );
         assert!(stats.video_sent >= 5);
-        assert_eq!(stats.video_received, stats.video_sent, "no drops at drop_ppm=0");
+        assert_eq!(
+            stats.video_received, stats.video_sent,
+            "no drops at drop_ppm=0"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
