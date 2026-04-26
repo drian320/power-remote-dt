@@ -104,3 +104,10 @@ zero-copy CUDA→D3D11 path (Plan 2d zerocopy).
 - **Resume not supported**: a run that crashes mid-sweep loses progress
   beyond what's already written under `per-frame/`. Re-run with a
   reduced axis subset to fill in.
+- **Inter-config delay (250 ms)** is inserted between configs so the
+  previous NVENC/NVDEC/CUDA context teardown completes before the next
+  config rebuilds them. Without this, an occasional config (observed:
+  `2160p60-30mbps-nvdec` after `2160p60-20mbps-nvdec`) initialises
+  with state still leaking from the previous run and produces
+  `sent=1 received=0`. Total sweep wall-time grows by `250 ms × (N-1)`
+  (15 s for the 60-config default) -- negligible.
