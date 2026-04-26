@@ -46,7 +46,10 @@ def percentile_round(values: np.ndarray, p: float) -> int:
     if values.size == 0:
         return 0
     sorted_values = np.sort(values)
-    idx = int(round((sorted_values.size - 1) * p))
+    # int(x + 0.5) replicates Rust's f64::round() (half-away-from-zero)
+    # rather than Python's banker's rounding (half-to-even). Required for
+    # exact agreement with prdt_latency_bench::percentiles output.
+    idx = int((sorted_values.size - 1) * p + 0.5)
     return int(sorted_values[idx])
 
 
@@ -70,7 +73,7 @@ def bucket_frames(frame_df: pd.DataFrame, bucket_seconds: int) -> pd.DataFrame:
     ).astype(int)
 
     rows = []
-    for idx, group in frame_df.groupby(bucket_idx):
+    for idx, group in frame_df.groupby(bucket_idx, sort=True):
         arrival = group["arrival_lag_us"].to_numpy()
         decode = group["decode_lag_us"].to_numpy()
         e2e = group["e2e_lag_us"].to_numpy()
@@ -109,6 +112,20 @@ class TestPercentileRound(unittest.TestCase):
 
     def test_percentile_round_empty(self):
         self.assertEqual(percentile_round(np.array([], dtype=np.uint64), 0.5), 0)
+
+    def test_percentile_round_half_away_from_zero(self):
+        # 2-element bucket, p=0.5 -> idx = round(1 * 0.5) = round(0.5).
+        # Rust's f64::round(0.5) = 1.0 (half-away-from-zero).
+        # Python's round(0.5) = 0 (banker's rounding).
+        # We want Rust behavior: return sorted[1] = 200.
+        v = np.array([100, 200], dtype=np.uint64)
+        self.assertEqual(percentile_round(v, 0.5), 200)
+
+        # 4-element, p=0.5 -> idx = round(3 * 0.5) = round(1.5).
+        # Rust: 2.0; Python's round: 2 (banker rounds half-to-even, which
+        # for 1.5 is 2). Agreement here is coincidental.
+        v = np.array([10, 20, 30, 40], dtype=np.uint64)
+        self.assertEqual(percentile_round(v, 0.5), 30)
 
 
 class TestBucketFrames(unittest.TestCase):
