@@ -71,7 +71,7 @@ impl Default for ViewerConfig {
     fn default() -> Self {
         Self {
             recv_dir: PathBuf::from("prdt-received"),
-            decoder: "mf".into(),
+            decoder: "nvdec".into(),
             default_resolution: "1920x1080".into(),
             default_fps: 60,
             signaling_url: String::new(),
