@@ -321,11 +321,75 @@ class TestDriftDetection(unittest.TestCase):
         self.assertEqual(len(outliers), 0)
 
 
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Bucket a prdt-bench-matrix per-frame CSV by minute "
+        "and emit per-bucket percentile stats + drift detection."
+    )
+    parser.add_argument("input_csv", type=Path, help="per-frame.csv path")
+    parser.add_argument(
+        "--bucket-seconds",
+        type=int,
+        default=60,
+        help="bucket width in seconds (default 60)",
+    )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="output CSV path (default: <input>.buckets.csv)",
+    )
+    args = parser.parse_args(argv)
+
+    if not args.input_csv.is_file():
+        print(f"input file not found: {args.input_csv}", file=sys.stderr)
+        return 2
+
+    try:
+        frames = pd.read_csv(args.input_csv)
+    except Exception as e:
+        print(f"failed to read {args.input_csv}: {e}", file=sys.stderr)
+        return 2
+
+    try:
+        buckets = bucket_frames(frames, args.bucket_seconds)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+
+    out_path = args.out or args.input_csv.with_suffix(".buckets.csv")
+    buckets.to_csv(out_path, index=False)
+
+    # Drift summary to stdout
+    total_frames = int(frames.shape[0]) if not frames.empty else 0
+    print(f"input: {args.input_csv}")
+    print(f"output: {out_path}")
+    print(f"total frames: {total_frames}")
+    print(f"buckets: {len(buckets)}")
+    if buckets.empty:
+        print("no frames; nothing to analyze")
+        return 0
+
+    slope = e2e_p50_slope_us_per_minute(buckets)
+    e2e_max = int(buckets["e2e_p50_us"].max())
+    e2e_min = int(buckets["e2e_p50_us"].min())
+    frames_var = float(buckets["frames_in_bucket"].var(ddof=0))
+    print(f"e2e_p50_us slope: {slope:.2f} us/min")
+    print(f"e2e_p50_us max-min: {e2e_max - e2e_min} us")
+    print(f"frames_in_bucket variance: {frames_var:.1f}")
+
+    outs = outlier_buckets(buckets, threshold_factor=2.0)
+    if outs.empty:
+        print("outlier buckets: none (e2e_p99 > 2x median)")
+    else:
+        print(f"outlier buckets ({len(outs)}): e2e_p99 > 2x median")
+        print(outs[["bucket_idx", "bucket_start_s", "e2e_p99_us"]].to_string(index=False))
+    return 0
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--unittest":
         sys.argv.pop(1)
         unittest.main()
     else:
-        # The CLI main() is wired in Task 3; this stub is replaced.
-        print("Use --unittest for tests; CLI not yet implemented (Task 3)", file=sys.stderr)
-        sys.exit(2)
+        sys.exit(main())
