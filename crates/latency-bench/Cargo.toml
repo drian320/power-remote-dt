@@ -25,6 +25,10 @@ path = "src/bin/fec-bench.rs"
 name = "prdt-input-load-bench"
 path = "src/bin/input-load-bench.rs"
 
+[[bin]]
+name = "prdt-net-profile-bench"
+path = "src/bin/net-profile-bench.rs"
+
 [dependencies]
 prdt-protocol = { path = "../protocol" }
 prdt-transport = { path = "../transport" }
