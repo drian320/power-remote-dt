@@ -24,6 +24,14 @@ const TICK_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Spawn the watchdog. Cancels `cancel` when no KeepAlive has been
 /// observed for `KEEPALIVE_TIMEOUT`.
+///
+/// # Ordering contract
+///
+/// Writers (the control task that handles `ControlMessage::KeepAlive`)
+/// MUST store with `Ordering::Relaxed` to match the watchdog's read
+/// ordering. There is no other shared state synchronized through this
+/// atomic, so `Relaxed` is sufficient — we only require that fresh
+/// stores eventually become visible to the polling watchdog.
 pub fn spawn_watchdog(cancel: CancellationToken, last_keepalive: Arc<AtomicU64>) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(TICK_INTERVAL);
@@ -74,6 +82,16 @@ mod tests {
         // task ran and cancelled before we assert.
         handle.await.unwrap();
 
+        // The test's last_keepalive=0 sentinel relies on the real
+        // monotonic clock having advanced past KEEPALIVE_TIMEOUT by the
+        // time the watchdog ticks. If the clock is ever replaced with a
+        // virtual one, this guard fails loudly instead of silently
+        // making the test vacuous.
+        assert!(
+            now_monotonic_us() > KEEPALIVE_TIMEOUT.as_micros() as u64,
+            "process epoch too young for last_keepalive=0 sentinel; \
+             switch to a deterministic clock injection if this fires",
+        );
         assert!(cancel.is_cancelled(), "watchdog should have cancelled");
     }
 
@@ -88,6 +106,11 @@ mod tests {
         for _ in 0..10 {
             tokio::time::advance(Duration::from_millis(900)).await;
             last_ka.store(now_monotonic_us(), Ordering::Relaxed);
+            // Yield so the watchdog task gets one scheduler turn to poll
+            // its ticker between our store + advance steps. Without this
+            // the watchdog might not observe the heartbeat refresh on
+            // time. (Single-threaded current_thread runtime — yield is
+            // sufficient.)
             tokio::task::yield_now().await;
         }
 
