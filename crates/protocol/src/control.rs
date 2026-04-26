@@ -111,6 +111,12 @@ pub enum ControlMessage {
         present_p95_us: u32,
         present_p99_us: u32,
     },
+    /// Viewer → Host periodic liveness heartbeat. The host's watchdog
+    /// uses the receive timestamp of these messages to decide whether
+    /// the viewer is still alive. Empty payload — `Ping`/`Pong` and
+    /// `LatencyReport` already carry timing data; this is purely a
+    /// liveness signal that fires unconditionally every 1s.
+    KeepAlive,
     /// Pre-Noise connectivity probe; both sides send these for each candidate
     /// and echo matching ProbeAck back. Used by
     /// `CustomUdpTransport::probe_and_commit_peer`.
@@ -138,6 +144,7 @@ impl ControlMessage {
             Self::FileChunk { .. } => 14,
             Self::FileTransferEnd { .. } => 15,
             Self::LatencyReport { .. } => 16,
+            Self::KeepAlive => 17,
             Self::Probe { .. } => 20,
             Self::ProbeAck { .. } => 21,
         }
@@ -216,6 +223,19 @@ mod tests {
     #[test]
     fn probe_roundtrip_bincode() {
         let msg = ControlMessage::Probe { nonce: [0x11; 16] };
+        let bytes = bincode::serialize(&msg).unwrap();
+        let back: ControlMessage = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(msg, back);
+    }
+
+    #[test]
+    fn keep_alive_kind_is_stable() {
+        assert_eq!(ControlMessage::KeepAlive.kind_u8(), 17);
+    }
+
+    #[test]
+    fn keep_alive_roundtrip_bincode() {
+        let msg = ControlMessage::KeepAlive;
         let bytes = bincode::serialize(&msg).unwrap();
         let back: ControlMessage = bincode::deserialize(&bytes).unwrap();
         assert_eq!(msg, back);
