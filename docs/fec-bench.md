@@ -80,3 +80,10 @@ arrived clean, 521 needed FEC reconstruction, 47 lost. Overall
   defaults, the largest frame is `8 * 1200 = 9600` bytes for
   k=8 configs. A frame larger than that would error in `packetize`
   and be reported as `lost`.
+- **Reproducibility scope**: `--seed` makes the per-packet drop
+  decisions and trial-frame contents bit-identical run-to-run, so
+  the count columns (`complete_no_fec`, `complete_with_fec`,
+  `lost`, `recovery_rate_ppm`) are reproducible. The
+  `reconstruct_p50_us` / `reconstruct_p95_us` columns are
+  `Instant::now()` wall-clock measurements and will jitter run-to-run
+  by tens of microseconds even with the same seed.
