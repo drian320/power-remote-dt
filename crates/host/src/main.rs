@@ -1,6 +1,7 @@
 #![cfg(windows)]
 
 mod status;
+mod watchdog;
 
 use std::fs;
 use std::net::SocketAddr;
@@ -626,7 +627,11 @@ fn pick_encoder(
     cfg: &NvencEncoderConfig,
 ) -> anyhow::Result<HwHevcEncoder> {
     let choice = if args_encoder == "auto" {
-        if adapter.is_nvidia() { "nvenc" } else { "mf" }
+        if adapter.is_nvidia() {
+            "nvenc"
+        } else {
+            "mf"
+        }
     } else {
         args_encoder
     };

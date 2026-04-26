@@ -18,13 +18,16 @@ prdt-protocol = { path = "../protocol" }
 prdt-signaling-client = { path = "../signaling-client" }
 prdt-signaling-proto = { path = "../signaling-proto" }
 prdt-transport = { path = "../transport" }
-tokio = { workspace = true, features = ["signal", "fs", "io-util"] }
+tokio = { workspace = true, features = ["signal", "fs", "io-util", "time"] }
 url = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = "1"
 rand_core = { version = "0.6", features = ["getrandom"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(windows)'.dependencies]
 prdt-media-win = { path = "../media-win" }
