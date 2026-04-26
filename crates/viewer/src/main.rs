@@ -100,19 +100,24 @@ struct Args {
     #[arg(long, default_value = "prdt-received")]
     recv_dir: std::path::PathBuf,
 
-    /// Decoder backend. `mf` (default) uses Media Foundation's H.265 MFT
-    /// via the HEVC Video Extensions store app — it has an internal
-    /// IMFDXGIBuffer zero-copy path and currently wins on this dev box
-    /// (decode p50 ≈ 0.2 ms at 1080p60).
+    /// Decoder backend. `nvdec` (default) uses the Plan 2d direct
+    /// nvcuvid.dll path with the dual R8/R8G8 zero-copy optimization
+    /// (`plan2d-zerocopy-complete`). The `prdt-bench-matrix` 60-config
+    /// sweep (2026-04-26) showed NVDEC wins e2e_p50 against MF in
+    /// every paired (resolution, bitrate, fps) cell -- median ratio
+    /// 0.83 (17% faster), with lower jitter (CV 0.286 vs 0.309) and
+    /// half the loss rate. The encode pipeline runs faster under the
+    /// NVDEC consumer because back-pressure from the host side is
+    /// lower; per-frame decode is actually slower than MF (~1.5 ms
+    /// vs 0.22 ms p50) but encode wins the e2e race.
     ///
-    /// `nvdec` uses the Plan 2d direct nvcuvid.dll path. Until the
-    /// dual-R8 / R8G8 zero-copy optimization lands, the NVDEC path
-    /// stages through CPU (cuMemcpy2D DtoH + UpdateSubresource), which
-    /// adds ~1.6 ms p50 — so `nvdec` is currently measurably slower
-    /// than `mf` and should be used only for benchmarking or for
-    /// driver-mix diagnostics. When CUDA Toolkit isn't installed at
-    /// build time, `nvdec` falls back to `mf` with a warning.
-    #[arg(long, default_value = "mf", value_parser = ["mf", "nvdec"])]
+    /// `mf` falls back to Media Foundation's H.265 MFT via the HEVC
+    /// Video Extensions store app. Per-frame decode is ~7x faster than
+    /// NVDEC (0.22 ms p50 at 1080p60) but encode-side back-pressure
+    /// makes overall e2e slower. Use `mf` for legacy reasons or when
+    /// the CUDA Toolkit isn't installed at build time -- in that case
+    /// `nvdec` falls back to `mf` with a warning.
+    #[arg(long, default_value = "nvdec", value_parser = ["mf", "nvdec"])]
     decoder: String,
 
     /// Rendezvous via a signaling server instead of direct host address.
