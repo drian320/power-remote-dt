@@ -1,9 +1,11 @@
 # power-remote-dt — Project Status & Roadmap
 
-**Last updated:** 2026-04-26
-**Latest tag:** `mf-encoder-fallback-complete`
-**Branch state:** master (all phase work merged) — **Phase 4 + Plan 4 B1 + B4 + B6 + B7 + B8 完了 + MF エンコーダ fallback 完了 (B3 のみ HW ブロック保留)**
-**Test count:** 312 automated Rust tests + 11 Python tests, all passing
+**Last updated:** 2026-04-27
+**Latest tag:** `host-session-liveness-complete`
+**Branch state:** master (all phase work merged) — **Phase 4 + Plan 4 B1 + B4 + B6 + B7 + B8 完了 + MF エンコーダ fallback 完了 + host session liveness (heartbeat + watchdog) 完了 (B3 のみ HW ブロック保留)**
+**Test count:** 315 automated Rust tests + 11 Python tests, all passing
+
+| `host-session-liveness-complete` | viewer 1Hz `KeepAlive` heartbeat、host 5s watchdog、`CancellationToken` 配下で全 worker tearing down → outer loop で `reset_session` + 再 handshake。viewer 異常終了でも host 再起動なしで 5-7 秒以内に新セッション受け入れ。`recv_raw_unencrypted` + encrypted recv で `WSAECONNRESET` (stale ICMP) フィルタ。3 cycle smoke ok、0 panic。 |
 
 ---
 
