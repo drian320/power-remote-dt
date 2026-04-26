@@ -17,17 +17,18 @@
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Media::MediaFoundation::{
-    IMFActivate, IMFDXGIDeviceManager, IMFTransform, MFCreateDXGIDeviceManager,
+    IMFActivate, IMFDXGIDeviceManager, IMFMediaEventGenerator, IMFTransform,
+    METransformHaveOutput, METransformNeedInput, MFCreateDXGIDeviceManager,
     MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
     MFMediaType_Video, MFTEnumEx, MFVideoFormat_HEVC, MFVideoFormat_NV12,
     MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
     MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
     MFT_MESSAGE_NOTIFY_END_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
     MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_REGISTER_TYPE_INFO,
-    MF_E_TRANSFORM_NEED_MORE_INPUT, MF_LOW_LATENCY, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE,
-    MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO,
-    MF_MT_SUBTYPE, MF_TRANSFORM_ASYNC_UNLOCK, MFSampleExtension_CleanPoint,
-    MFVideoInterlace_Progressive,
+    MF_EVENT_FLAG_NONE, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_LOW_LATENCY, MF_MT_AVG_BITRATE,
+    MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
+    MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_TRANSFORM_ASYNC_UNLOCK,
+    MFSampleExtension_CleanPoint, MFVideoInterlace_Progressive,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 
@@ -38,6 +39,7 @@ use crate::nvenc::NvencEncoderConfig;
 
 pub struct MfH265Encoder {
     transform: IMFTransform,
+    event_gen: IMFMediaEventGenerator,
     #[allow(dead_code)]
     device_manager: IMFDXGIDeviceManager,
     bgra_to_nv12: BgraToNv12,
@@ -91,8 +93,13 @@ impl MfH265Encoder {
                 .map_err(|e| MediaError::Other(format!("START_OF_STREAM: {e}")))?;
         }
 
+        let event_gen: IMFMediaEventGenerator = transform
+            .cast()
+            .map_err(|e| MediaError::Other(format!("cast IMFMediaEventGenerator: {e}")))?;
+
         Ok(Self {
             transform,
+            event_gen,
             device_manager,
             bgra_to_nv12,
             nv12_input,
@@ -142,22 +149,54 @@ impl Hevc265Encoder for MfH265Encoder {
             self.pending_idr = false;
         }
 
-        // 3. ProcessInput
-        unsafe {
-            self.transform
-                .ProcessInput(0, &sample, 0)
-                .map_err(|e| MediaError::Other(format!("ProcessInput: {e}")))?;
+        // 3. Phase 1 — wait for METransformNeedInput, then ProcessInput.
+        // Async MFTs gate ProcessInput on this event; calling it without the
+        // event yields MF_E_NOTACCEPTING.
+        loop {
+            let event = unsafe {
+                self.event_gen
+                    .GetEvent(MF_EVENT_FLAG_NONE)
+                    .map_err(|e| MediaError::Other(format!("GetEvent (input phase): {e}")))?
+            };
+            let et = unsafe {
+                event
+                    .GetType()
+                    .map_err(|e| MediaError::Other(format!("GetType (input): {e}")))?
+            };
+            if et == METransformNeedInput.0 as u32 {
+                unsafe {
+                    self.transform
+                        .ProcessInput(0, &sample, 0)
+                        .map_err(|e| MediaError::Other(format!("ProcessInput: {e}")))?;
+                }
+                break;
+            }
+            // Discard any other event (e.g. stale METransformHaveOutput from
+            // a previous iteration) and keep waiting.
         }
 
-        // 4. Drain one encoded sample (low-latency mode is 1:1).
-        let encoded = drain_one_output(&self.transform)?;
-
-        self.sample_seq += 1;
-        Ok(EncodedH265Frame {
-            nal_bytes: encoded.bytes,
-            is_keyframe: encoded.is_idr,
-            timestamp: timestamp_us,
-        })
+        // 4. Phase 2 — wait for METransformHaveOutput, then ProcessOutput.
+        loop {
+            let event = unsafe {
+                self.event_gen
+                    .GetEvent(MF_EVENT_FLAG_NONE)
+                    .map_err(|e| MediaError::Other(format!("GetEvent (output phase): {e}")))?
+            };
+            let et = unsafe {
+                event
+                    .GetType()
+                    .map_err(|e| MediaError::Other(format!("GetType (output): {e}")))?
+            };
+            if et == METransformHaveOutput.0 as u32 {
+                let encoded = drain_one_output(&self.transform)?;
+                self.sample_seq += 1;
+                return Ok(EncodedH265Frame {
+                    nal_bytes: encoded.bytes,
+                    is_keyframe: encoded.is_idr,
+                    timestamp: timestamp_us,
+                });
+            }
+        }
     }
 
     fn set_target_bitrate(&mut self, bps: u32) {
