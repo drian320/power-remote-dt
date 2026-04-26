@@ -54,7 +54,6 @@ struct Args {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // frame_bytes / chunk_payload_len / trials used in Tasks 2-4
 struct Cfg {
     k: usize,
     m: usize,
@@ -98,7 +97,6 @@ use prdt_transport::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // used in tests; Tasks 3-4 wire into main
 enum TrialOutcome {
     CompleteNoFec,
     CompleteWithFec,
@@ -106,7 +104,6 @@ enum TrialOutcome {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // used in tests; Tasks 3-4 wire into main
 struct TrialResult {
     outcome: TrialOutcome,
     reconstruct_us: Option<u64>,
@@ -115,7 +112,6 @@ struct TrialResult {
 /// xorshift64-based RNG. Pure function: takes a state, returns the next
 /// state. Cheap, deterministic. The caller threads state through repeated
 /// calls or seeds it from a per-call hash.
-#[allow(dead_code)] // used in tests; Tasks 3-4 wire into main
 fn xorshift64(mut x: u64) -> u64 {
     x ^= x << 13;
     x ^= x >> 7;
@@ -126,7 +122,6 @@ fn xorshift64(mut x: u64) -> u64 {
 /// Roll a per-packet drop decision. Mixes seed + trial_idx + packet_idx
 /// so each trial is reproducible and packet decisions within one trial
 /// are independent.
-#[allow(dead_code)] // used in tests; Tasks 3-4 wire into main
 fn should_drop(drop_ppm: u32, seed: u64, trial_idx: u64, packet_idx: u16) -> bool {
     if drop_ppm == 0 {
         return false;
@@ -147,7 +142,6 @@ fn should_drop(drop_ppm: u32, seed: u64, trial_idx: u64, packet_idx: u16) -> boo
 /// Build a synthetic frame of `frame_bytes` bytes, content varied
 /// deterministically by `seed + trial_idx`. The per-byte content varies
 /// so packetize doesn't accidentally collapse identical shards.
-#[allow(dead_code)] // used in tests; Tasks 3-4 wire into main
 fn make_frame(seed: u64, trial_idx: u64, frame_bytes: usize) -> EncodedFrame {
     let mut buf = Vec::with_capacity(frame_bytes);
     let base = seed.wrapping_add(trial_idx);
@@ -166,19 +160,24 @@ fn make_frame(seed: u64, trial_idx: u64, frame_bytes: usize) -> EncodedFrame {
 }
 
 /// Run one packetize -> drop -> assemble cycle.
-#[allow(dead_code)] // used in tests; Tasks 3-4 wire into main
 fn simulate_one_trial(cfg: &Cfg, trial_idx: u64, seed: u64) -> TrialResult {
     let fec = match FecCodec::new(cfg.k, cfg.m) {
         Ok(f) => f,
         Err(_) => {
-            return TrialResult { outcome: TrialOutcome::Lost, reconstruct_us: None };
+            return TrialResult {
+                outcome: TrialOutcome::Lost,
+                reconstruct_us: None,
+            };
         }
     };
     let frame = make_frame(seed, trial_idx, cfg.frame_bytes);
     let packets = match packetize(&frame, &fec, cfg.chunk_payload_len) {
         Ok(p) => p,
         Err(_) => {
-            return TrialResult { outcome: TrialOutcome::Lost, reconstruct_us: None };
+            return TrialResult {
+                outcome: TrialOutcome::Lost,
+                reconstruct_us: None,
+            };
         }
     };
 
@@ -226,16 +225,24 @@ fn simulate_one_trial(cfg: &Cfg, trial_idx: u64, seed: u64) -> TrialResult {
     let elapsed_us = start.elapsed().as_micros() as u64;
 
     if !completed {
-        return TrialResult { outcome: TrialOutcome::Lost, reconstruct_us: None };
+        return TrialResult {
+            outcome: TrialOutcome::Lost,
+            reconstruct_us: None,
+        };
     }
     if all_source_present {
-        TrialResult { outcome: TrialOutcome::CompleteNoFec, reconstruct_us: None }
+        TrialResult {
+            outcome: TrialOutcome::CompleteNoFec,
+            reconstruct_us: None,
+        }
     } else {
-        TrialResult { outcome: TrialOutcome::CompleteWithFec, reconstruct_us: Some(elapsed_us) }
+        TrialResult {
+            outcome: TrialOutcome::CompleteWithFec,
+            reconstruct_us: Some(elapsed_us),
+        }
     }
 }
 
-#[allow(dead_code)] // Tasks 3-4; wired in Task 4
 struct ConfigStats {
     config_id: String,
     cfg: Cfg,
@@ -247,7 +254,6 @@ struct ConfigStats {
     reconstruct_p95_us: u64,
 }
 
-#[allow(dead_code)] // Tasks 3-4; wired in Task 4
 fn aggregate(cfg: &Cfg, trials: &[TrialResult]) -> ConfigStats {
     let mut complete_no_fec = 0u64;
     let mut complete_with_fec = 0u64;
@@ -285,7 +291,6 @@ fn aggregate(cfg: &Cfg, trials: &[TrialResult]) -> ConfigStats {
     }
 }
 
-#[allow(dead_code)] // Tasks 3-4; wired in Task 4
 fn write_summary_csv(path: &std::path::Path, stats: &[ConfigStats]) -> std::io::Result<()> {
     use std::io::Write;
     let mut wtr = std::fs::File::create(path)?;
@@ -331,8 +336,41 @@ fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&args.out_dir)
         .with_context(|| format!("create out_dir {}", args.out_dir.display()))?;
 
-    // Trial loop + summary CSV come in Tasks 2-4.
-    anyhow::bail!("trial loop not yet implemented (Tasks 2-4)");
+    let mut all_stats: Vec<ConfigStats> = Vec::with_capacity(configs.len());
+    for (i, cfg) in configs.iter().enumerate() {
+        let id = config_id(cfg);
+        info!(
+            "[{:>3}/{}] running {} trials={}",
+            i + 1,
+            configs.len(),
+            id,
+            cfg.trials
+        );
+        let mut trials = Vec::with_capacity(cfg.trials as usize);
+        for trial_idx in 0..cfg.trials {
+            trials.push(simulate_one_trial(cfg, trial_idx, args.seed));
+        }
+        let stats = aggregate(cfg, &trials);
+        info!(
+            "[{:>3}/{}] done    {} recovery={}ppm reconstruct_p50_us={}",
+            i + 1,
+            configs.len(),
+            id,
+            stats.recovery_rate_ppm,
+            stats.reconstruct_p50_us
+        );
+        all_stats.push(stats);
+    }
+
+    let summary_path = args.out_dir.join("summary.csv");
+    write_summary_csv(&summary_path, &all_stats)
+        .with_context(|| format!("write {}", summary_path.display()))?;
+    info!(
+        path = %summary_path.display(),
+        rows = all_stats.len(),
+        "summary written"
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -341,9 +379,23 @@ mod tests {
 
     #[test]
     fn config_id_format_canonical() {
-        let c = Cfg { k: 8, m: 2, drop_ppm: 0, frame_bytes: 5000, chunk_payload_len: 1200, trials: 1000 };
+        let c = Cfg {
+            k: 8,
+            m: 2,
+            drop_ppm: 0,
+            frame_bytes: 5000,
+            chunk_payload_len: 1200,
+            trials: 1000,
+        };
         assert_eq!(config_id(&c), "k8m2-drop0");
-        let c = Cfg { k: 64, m: 6, drop_ppm: 200_000, frame_bytes: 5000, chunk_payload_len: 1200, trials: 1000 };
+        let c = Cfg {
+            k: 64,
+            m: 6,
+            drop_ppm: 200_000,
+            frame_bytes: 5000,
+            chunk_payload_len: 1200,
+            trials: 1000,
+        };
         assert_eq!(config_id(&c), "k64m6-drop200000");
     }
 
@@ -362,7 +414,7 @@ mod tests {
         };
         let cfgs = expand_matrix(&args);
         assert_eq!(cfgs.len(), 8); // 2 * 2 * 2
-        // outer-to-inner: k -> m -> drop
+                                   // outer-to-inner: k -> m -> drop
         assert_eq!((cfgs[0].k, cfgs[0].m, cfgs[0].drop_ppm), (8, 2, 0));
         assert_eq!((cfgs[1].k, cfgs[1].m, cfgs[1].drop_ppm), (8, 2, 100_000));
         assert_eq!((cfgs[2].k, cfgs[2].m, cfgs[2].drop_ppm), (8, 6, 0));
@@ -371,16 +423,30 @@ mod tests {
 
     #[test]
     fn trial_no_drop_completes_no_fec() {
-        let cfg = Cfg { k: 4, m: 2, drop_ppm: 0, frame_bytes: 2000, chunk_payload_len: 1200, trials: 1 };
-        let result = simulate_one_trial(&cfg, /*trial_idx=*/0, /*seed=*/123);
+        let cfg = Cfg {
+            k: 4,
+            m: 2,
+            drop_ppm: 0,
+            frame_bytes: 2000,
+            chunk_payload_len: 1200,
+            trials: 1,
+        };
+        let result = simulate_one_trial(&cfg, /*trial_idx=*/ 0, /*seed=*/ 123);
         assert_eq!(result.outcome, TrialOutcome::CompleteNoFec);
         assert_eq!(result.reconstruct_us, None);
     }
 
     #[test]
     fn trial_full_drop_lost() {
-        let cfg = Cfg { k: 4, m: 2, drop_ppm: 1_000_000, frame_bytes: 2000, chunk_payload_len: 1200, trials: 1 };
-        let result = simulate_one_trial(&cfg, /*trial_idx=*/0, /*seed=*/123);
+        let cfg = Cfg {
+            k: 4,
+            m: 2,
+            drop_ppm: 1_000_000,
+            frame_bytes: 2000,
+            chunk_payload_len: 1200,
+            trials: 1,
+        };
+        let result = simulate_one_trial(&cfg, /*trial_idx=*/ 0, /*seed=*/ 123);
         assert_eq!(result.outcome, TrialOutcome::Lost);
         assert_eq!(result.reconstruct_us, None);
     }
@@ -393,7 +459,14 @@ mod tests {
         //     FEC reconstruction is required)
         //   - Total surviving packets >= k (so FEC can succeed)
         // This proves the CompleteWithFec branch fires correctly.
-        let cfg = Cfg { k: 4, m: 2, drop_ppm: 200_000, frame_bytes: 2000, chunk_payload_len: 1200, trials: 1 };
+        let cfg = Cfg {
+            k: 4,
+            m: 2,
+            drop_ppm: 200_000,
+            frame_bytes: 2000,
+            chunk_payload_len: 1200,
+            trials: 1,
+        };
         let mut found = false;
         for seed in 1..=20u64 {
             let r = simulate_one_trial(&cfg, 0, seed);
@@ -408,13 +481,35 @@ mod tests {
     #[test]
     fn aggregate_collects_outcomes() {
         let trials: Vec<TrialResult> = vec![
-            TrialResult { outcome: TrialOutcome::CompleteNoFec, reconstruct_us: None },
-            TrialResult { outcome: TrialOutcome::CompleteNoFec, reconstruct_us: None },
-            TrialResult { outcome: TrialOutcome::CompleteWithFec, reconstruct_us: Some(20) },
-            TrialResult { outcome: TrialOutcome::CompleteWithFec, reconstruct_us: Some(60) },
-            TrialResult { outcome: TrialOutcome::Lost, reconstruct_us: None },
+            TrialResult {
+                outcome: TrialOutcome::CompleteNoFec,
+                reconstruct_us: None,
+            },
+            TrialResult {
+                outcome: TrialOutcome::CompleteNoFec,
+                reconstruct_us: None,
+            },
+            TrialResult {
+                outcome: TrialOutcome::CompleteWithFec,
+                reconstruct_us: Some(20),
+            },
+            TrialResult {
+                outcome: TrialOutcome::CompleteWithFec,
+                reconstruct_us: Some(60),
+            },
+            TrialResult {
+                outcome: TrialOutcome::Lost,
+                reconstruct_us: None,
+            },
         ];
-        let cfg = Cfg { k: 8, m: 2, drop_ppm: 100_000, frame_bytes: 5000, chunk_payload_len: 1200, trials: 5 };
+        let cfg = Cfg {
+            k: 8,
+            m: 2,
+            drop_ppm: 100_000,
+            frame_bytes: 5000,
+            chunk_payload_len: 1200,
+            trials: 5,
+        };
         let s = aggregate(&cfg, &trials);
         assert_eq!(s.complete_no_fec, 2);
         assert_eq!(s.complete_with_fec, 2);
@@ -430,10 +525,23 @@ mod tests {
     #[test]
     fn aggregate_empty_reconstruct_emits_zeros() {
         let trials: Vec<TrialResult> = vec![
-            TrialResult { outcome: TrialOutcome::CompleteNoFec, reconstruct_us: None },
-            TrialResult { outcome: TrialOutcome::CompleteNoFec, reconstruct_us: None },
+            TrialResult {
+                outcome: TrialOutcome::CompleteNoFec,
+                reconstruct_us: None,
+            },
+            TrialResult {
+                outcome: TrialOutcome::CompleteNoFec,
+                reconstruct_us: None,
+            },
         ];
-        let cfg = Cfg { k: 8, m: 2, drop_ppm: 0, frame_bytes: 5000, chunk_payload_len: 1200, trials: 2 };
+        let cfg = Cfg {
+            k: 8,
+            m: 2,
+            drop_ppm: 0,
+            frame_bytes: 5000,
+            chunk_payload_len: 1200,
+            trials: 2,
+        };
         let s = aggregate(&cfg, &trials);
         assert_eq!(s.recovery_rate_ppm, 1_000_000);
         assert_eq!(s.reconstruct_p50_us, 0);
@@ -442,7 +550,14 @@ mod tests {
 
     #[test]
     fn summary_csv_writer_emits_header_and_one_row() {
-        let cfg = Cfg { k: 8, m: 2, drop_ppm: 50_000, frame_bytes: 5000, chunk_payload_len: 1200, trials: 100 };
+        let cfg = Cfg {
+            k: 8,
+            m: 2,
+            drop_ppm: 50_000,
+            frame_bytes: 5000,
+            chunk_payload_len: 1200,
+            trials: 100,
+        };
         let s = ConfigStats {
             config_id: config_id(&cfg),
             cfg,
@@ -463,6 +578,9 @@ mod tests {
             lines[0],
             "config_id,k,m,drop_ppm,frame_bytes,trials,complete_no_fec,complete_with_fec,lost,recovery_rate_ppm,reconstruct_p50_us,reconstruct_p95_us"
         );
-        assert_eq!(lines[1], "k8m2-drop50000,8,2,50000,5000,100,90,9,1,990000,18,35");
+        assert_eq!(
+            lines[1],
+            "k8m2-drop50000,8,2,50000,5000,100,90,9,1,990000,18,35"
+        );
     }
 }
