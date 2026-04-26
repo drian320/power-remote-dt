@@ -1440,6 +1440,17 @@ fn spawn_worker_tasks(
             let mut ticks_since_report: u32 = 0;
             loop {
                 ticker.tick().await;
+
+                // Liveness heartbeat — host's watchdog needs this regardless of
+                // whether decode is healthy yet. Crucial for slow-init viewers
+                // that have not produced a present sample.
+                if let Err(e) = latency_transport
+                    .send_control(ControlMessage::KeepAlive)
+                    .await
+                {
+                    warn!(?e, "send KeepAlive failed");
+                }
+
                 let snap = latency_probe.snapshot();
 
                 // Window-title refresh: shown on every tick so users get
