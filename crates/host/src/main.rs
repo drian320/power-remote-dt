@@ -420,26 +420,29 @@ pub async fn run_host(
             loop {
                 tokio::select! {
                     _ = cancel_audio.cancelled() => break,
-                    _ = async {
-                        if let Some(frame) = pcm_async_rx.recv().await {
-                            let opus_bytes = match encoder.encode(&frame) {
-                                Ok(b) => b,
-                                Err(e) => {
-                                    warn!(?e, "opus encode");
-                                    return;
+                    msg = pcm_async_rx.recv() => {
+                        match msg {
+                            Some(frame) => {
+                                let opus_bytes = match encoder.encode(&frame) {
+                                    Ok(b) => b,
+                                    Err(e) => {
+                                        warn!(?e, "opus encode");
+                                        continue;
+                                    }
+                                };
+                                seq += 1;
+                                let pkt = AudioPacket {
+                                    seq,
+                                    timestamp_us: epoch.elapsed().as_micros() as u64,
+                                    opus_bytes,
+                                };
+                                if let Err(e) = audio_transport.send_audio(pkt).await {
+                                    warn!(?e, "send_audio");
                                 }
-                            };
-                            seq += 1;
-                            let pkt = AudioPacket {
-                                seq,
-                                timestamp_us: epoch.elapsed().as_micros() as u64,
-                                opus_bytes,
-                            };
-                            if let Err(e) = audio_transport.send_audio(pkt).await {
-                                warn!(?e, "send_audio");
                             }
+                            None => break, // channel closed, exit task
                         }
-                    } => {}
+                    }
                 }
             }
         });
@@ -606,7 +609,7 @@ pub async fn run_host(
                                 Ok(()) => {
                                     if let Err(e) = tokio::fs::create_dir_all(&sent_dir).await {
                                         warn!(?e, "create sent/ subdir failed");
-                                        return;
+                                        continue;
                                     }
                                     let dest = sent_dir.join(path.file_name().unwrap());
                                     let dest = prdt_filetransfer::unique_path(&dest);
