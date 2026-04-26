@@ -59,6 +59,16 @@ impl MfH265Encoder {
         let transform = enumerate_h265_encoder_mft()?;
         let device_manager = create_dxgi_device_manager(dev)?;
 
+        // Async MFTs (e.g. NVIDIA HEVC HW MFT) require MF_TRANSFORM_ASYNC_UNLOCK
+        // to be set BEFORE MFT_MESSAGE_SET_D3D_MANAGER; sending the D3D message
+        // first yields 0xC00D6D77 (MF_E_TRANSFORM_ASYNC_LOCKED).
+        unsafe {
+            let attrs = transform
+                .GetAttributes()
+                .map_err(|e| MediaError::Other(format!("GetAttributes (async-unlock): {e}")))?;
+            let _ = attrs.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1);
+        }
+
         unsafe {
             transform
                 .ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, device_manager.as_raw() as usize)
