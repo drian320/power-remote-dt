@@ -206,9 +206,17 @@ impl CustomUdpTransport {
     /// Reset session state so the next `handshake_as_server` accepts a
     /// fresh peer. Used by the host's outer session loop after a viewer
     /// disconnects or times out. Idempotent.
+    ///
+    /// # Preconditions
+    ///
+    /// All worker tasks that send or receive on this transport must have
+    /// been cancelled and joined before this method is called. The internal
+    /// state writes are not performed atomically; a concurrent `send` or
+    /// `recv` would observe inconsistent state.
     pub async fn reset_session(&self) {
         *self.peer.lock().await = None;
         *self.crypto.lock().await = None;
+        self.send_nonce.store(0, Ordering::Relaxed);
     }
 
     async fn current_peer(&self) -> Result<SocketAddr, TransportError> {
@@ -759,3 +767,32 @@ impl Transport for CustomUdpTransport {
 /// Re-export the shared process-wide monotonic clock from prdt_protocol so
 /// host, viewer, producer, and probes all emit timestamps on the same epoch.
 pub use prdt_protocol::now_monotonic_us;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::UdpTransportConfig;
+
+    #[tokio::test]
+    async fn reset_session_nulls_state() {
+        let cfg = UdpTransportConfig::default();
+        let bind: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let transport = CustomUdpTransport::bind(bind, cfg).await.unwrap();
+
+        *transport.peer.lock().await = Some("127.0.0.1:9999".parse().unwrap());
+        transport.send_nonce.store(42, Ordering::Relaxed);
+
+        transport.reset_session().await;
+
+        assert!(transport.peer.lock().await.is_none(), "peer should be None");
+        assert!(
+            transport.crypto.lock().await.is_none(),
+            "crypto should be None"
+        );
+        assert_eq!(
+            transport.send_nonce.load(Ordering::Relaxed),
+            0,
+            "send_nonce should be reset to 0"
+        );
+    }
+}
