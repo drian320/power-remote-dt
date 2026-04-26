@@ -68,17 +68,28 @@ config_id,latency_ms,drop_ppm,input_rate_hz,video_rate_fps,duration_ms,input_sen
 
 ## Sample interpretation
 
+A real row from the default sweep on a development machine (RTX 3070 Ti, Win11):
+
 ```
-lat50ms-drop10000ppm,50,10000,1000,60,5000,500,495,10000,50012,50034,50061,300,297,10000
+lat10ms-drop0ppm,10,0,1000,60,5000,320,320,0,15574,16156,16594,300,300,0
 ```
 
-means: 50 ms latency + 1% drop, 1000 Hz input + 60 fps video for
-5 s. The 50 ms latency blocks the sender, so 5000 events would
-take 250 s — only ~500 events fit in 5 s wall time. 1% of those
-were dropped (`input_loss_ppm = 10000`). Input p50/p95/p99 sit
-around 50 ms (the injected delay), with a few hundred µs of
-overhead. Video at 60 fps × 5 s = 300 frames, 1% lost = 297
-received.
+means: 10 ms latency + 0% drop, 1000 Hz input + 60 fps video for
+5 s. The 10 ms latency blocks the sender between sends, so the
+1000 Hz target collapses to ~64 events/s — 5 s × 64 ≈ 320 events
+fit in the window. All 320 are received (loss=0). Input p50 ≈
+15.6 ms, p95 ≈ 16.2 ms, p99 ≈ 16.6 ms — the 10 ms injected delay
+plus ~5–6 ms of scheduler/sleep overhead. Video at 60 fps for 5 s
+= 300 frames, all received.
+
+Compare baseline `lat0ms-drop0ppm`:
+
+```
+lat0ms-drop0ppm,0,0,1000,60,5000,4998,4998,0,11,23,62,301,301,0
+```
+
+— at no injected latency the sender hits its full 1000 Hz, all
+4998 events arrive, p50 is 11 µs (mpsc + tokio scheduler only).
 
 ## What this measures (and what it does NOT)
 
@@ -111,3 +122,25 @@ It does NOT measure:
 - **`Bytes::from(vec![0u8; N])` allocations** per video frame: at
   60 fps × 50_000 bytes × 5 s × 20 configs = 600 MB of allocation
   churn over a full sweep. Cheap on modern hardware.
+- **Lag percentiles are unreliable when `drop_ppm > 0`** (known
+  measurement artifact): the bench pairs sender→receiver via a
+  FIFO `mpsc<u64>` of timestamps. The sender pushes its `now_us`
+  BEFORE calling `send_*`, but the transport's drop happens
+  *inside* the send. Dropped events therefore leave orphan
+  timestamps at the front of the queue, and every later receive
+  pops a stale timestamp, inflating reported lag by
+  approximately `cumulative_drops × inter_send_interval_us`.
+
+  Example from a real default sweep:
+  - `lat0ms-drop0ppm`: p50=11 µs (correct baseline)
+  - `lat0ms-drop10000ppm` (1% drop): p50=30 ms (50× inflated; the
+    actual transport delivery cost is still sub-millisecond)
+  - `lat0ms-drop50000ppm` (5% drop): p50=141 ms
+
+  **Treat `input_p50_us` / `_p95_us` / `_p99_us` as reliable only
+  on rows where `drop_ppm == 0`.** Loss columns
+  (`input_loss_ppm`, `video_loss_ppm`, `*_sent`, `*_received`)
+  are correct on all rows. A future fix would encode the
+  sequence number into the `InputEvent::MouseMove` payload (e.g.
+  via `x: i32`) and have the receiver match by content rather
+  than FIFO position.
