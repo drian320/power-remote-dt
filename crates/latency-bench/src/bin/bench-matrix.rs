@@ -11,7 +11,7 @@ use anyhow::Context;
 use clap::Parser;
 use prdt_latency_bench::{
     aggregate, config_id, expand_matrix, full_pipeline, write_per_frame_csv, write_summary_csv,
-    ConfigStats, ConsumerBackend, MatrixAxes,
+    ConfigStats, ConsumerBackend, EncoderBackend, MatrixAxes,
 };
 use tracing::{info, warn};
 
@@ -38,6 +38,10 @@ struct Args {
     #[arg(long, value_delimiter = ',', default_values_t = vec!["mf".to_string(), "nvdec".to_string()])]
     decoders: Vec<String>,
 
+    /// Comma-separated encoders. Choices: nvenc, mf.
+    #[arg(long, value_delimiter = ',', default_values_t = vec!["nvenc".to_string()])]
+    encoders: Vec<String>,
+
     /// Comma-separated fps.
     #[arg(long, value_delimiter = ',', default_values_t = vec![60u32, 120u32])]
     fps: Vec<u32>,
@@ -63,6 +67,18 @@ fn parse_decoders(strs: &[String]) -> anyhow::Result<Vec<ConsumerBackend>> {
         .collect()
 }
 
+fn parse_encoders(strs: &[String]) -> anyhow::Result<Vec<EncoderBackend>> {
+    strs.iter()
+        .map(|s| match s.as_str() {
+            "nvenc" => Ok(EncoderBackend::Nvenc),
+            "mf" => Ok(EncoderBackend::Mf),
+            other => Err(anyhow::anyhow!(
+                "unknown encoder {other:?} (options: nvenc, mf)"
+            )),
+        })
+        .collect()
+}
+
 fn heights_to_resolutions(heights: &[u32]) -> Vec<(u32, u32)> {
     heights.iter().map(|h| (h * 16 / 9, *h)).collect()
 }
@@ -73,11 +89,13 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     let decoders = parse_decoders(&args.decoders)?;
+    let encoders = parse_encoders(&args.encoders)?;
     let resolutions = heights_to_resolutions(&args.resolutions);
     let axes = MatrixAxes {
         resolutions,
         bitrates_mbps: args.bitrates,
         decoders,
+        encoders,
         fps: args.fps,
         duration: Duration::from(args.duration),
     };
@@ -91,6 +109,7 @@ async fn main() -> anyhow::Result<()> {
                 c.fps,
                 c.bitrate_bps / 1_000_000,
                 c.consumer,
+                c.encoder,
             );
             println!("[{:>3}/{}] {}", i + 1, configs.len(), id);
         }
@@ -121,6 +140,7 @@ async fn main() -> anyhow::Result<()> {
             cfg.fps,
             cfg.bitrate_bps / 1_000_000,
             cfg.consumer,
+            cfg.encoder,
         );
         info!(
             "[{:>3}/{}] running {} duration={:?}",

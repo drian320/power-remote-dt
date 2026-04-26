@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use prdt_media_win::synthetic::make_counter_texture;
 use prdt_media_win::{
-    pick_default_adapter, D3d11Device, MfD3d11Consumer, NvdecD3d11Consumer, NvencEncoder,
-    NvencEncoderConfig,
+    pick_default_adapter, D3d11Device, Hevc265Encoder, HwHevcEncoder, MfD3d11Consumer,
+    MfH265Encoder, NvdecD3d11Consumer, NvencEncoder, NvencEncoderConfig,
 };
 use prdt_protocol::{now_monotonic_us, ConsumerError, EncodedFrame, VideoConsumer};
 use prdt_transport::{InProcTransport, LoopbackOptions, ReceivedMessage, Transport};
@@ -34,6 +34,26 @@ impl std::str::FromStr for ConsumerBackend {
             "mf" => Ok(Self::Mf),
             "nvdec" => Ok(Self::Nvdec),
             other => anyhow::bail!("unknown consumer backend {other:?} (options: mf, nvdec)"),
+        }
+    }
+}
+
+/// Which encoder backend the bench exercises for the "encode" stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncoderBackend {
+    /// NVIDIA NVENC hardware encoder.
+    Nvenc,
+    /// Media Foundation H.265 encoder MFT.
+    Mf,
+}
+
+impl std::str::FromStr for EncoderBackend {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> anyhow::Result<Self> {
+        match s {
+            "nvenc" => Ok(Self::Nvenc),
+            "mf" => Ok(Self::Mf),
+            other => anyhow::bail!("unknown encoder backend {other:?} (options: nvenc, mf)"),
         }
     }
 }
@@ -73,6 +93,7 @@ pub struct FullPipelineConfig {
     pub latency_ms: u64,
     pub csv: Option<std::path::PathBuf>,
     pub consumer: ConsumerBackend,
+    pub encoder: EncoderBackend,
 }
 
 pub struct StageTimes {
@@ -179,12 +200,6 @@ pub async fn run(cfg: FullPipelineConfig) -> anyhow::Result<()> {
 /// and the matrix bin (which writes per-frame + summary CSVs).
 pub async fn run_for_matrix(cfg: &FullPipelineConfig) -> anyhow::Result<RunStats> {
     let adapter = pick_default_adapter().map_err(|e| anyhow::anyhow!("no GPU adapter: {e}"))?;
-    if !adapter.is_nvidia() {
-        anyhow::bail!(
-            "full-pipeline mode requires an NVIDIA adapter; got {}",
-            adapter.name
-        );
-    }
     let dev = D3d11Device::create(&adapter).map_err(|e| anyhow::anyhow!("D3D11 device: {e}"))?;
 
     let enc_cfg = NvencEncoderConfig {
@@ -195,13 +210,20 @@ pub async fn run_for_matrix(cfg: &FullPipelineConfig) -> anyhow::Result<RunStats
         bitrate_bps: cfg.bitrate_bps,
         gop_length: cfg.fps * 2,
     };
-    let encoder =
-        NvencEncoder::new(&dev, &enc_cfg).map_err(|e| anyhow::anyhow!("NvencEncoder::new: {e}"))?;
+    let mut encoder: HwHevcEncoder = match cfg.encoder {
+        EncoderBackend::Nvenc => NvencEncoder::new(&dev, &enc_cfg)
+            .map_err(|e| anyhow::anyhow!("NvencEncoder::new: {e}"))?
+            .into(),
+        EncoderBackend::Mf => MfH265Encoder::new(&dev, &enc_cfg)
+            .map_err(|e| anyhow::anyhow!("MfH265Encoder::new: {e}"))?
+            .into(),
+    };
     info!(
         resolution = format!("{}x{}", cfg.width, cfg.height),
         fps = cfg.fps,
         bitrate_mbps = cfg.bitrate_bps / 1_000_000,
-        "NVENC encoder ready",
+        backend = encoder.backend_name(),
+        "encoder ready",
     );
 
     let mut consumer = match cfg.consumer {
@@ -237,8 +259,7 @@ pub async fn run_for_matrix(cfg: &FullPipelineConfig) -> anyhow::Result<RunStats
         let tex = make_counter_texture(&dev, cfg.width, cfg.height, seq as u32)
             .map_err(|e| anyhow::anyhow!("synthetic texture: {e}"))?;
         let force_idr = seq == 0;
-        let encoded = encoder
-            .encode(&tex, force_idr, capture_us)
+        let encoded = Hevc265Encoder::encode(&mut encoder, &tex, force_idr, capture_us)
             .map_err(|e| anyhow::anyhow!("encode: {e}"))?;
         let encode_done_us = now_monotonic_us();
 

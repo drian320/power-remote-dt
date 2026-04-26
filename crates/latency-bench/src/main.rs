@@ -65,6 +65,12 @@ struct Args {
     /// nvcuvid path. Ignored in `--mode in-process`.
     #[arg(long, default_value = "mf", value_parser = ["mf", "nvdec"])]
     consumer: String,
+
+    /// Encoder backend for `--mode full-pipeline-win`. `nvenc` (default)
+    /// uses NVIDIA NVENC; `mf` uses Media Foundation MFT.
+    /// Ignored in `--mode in-process`.
+    #[arg(long, default_value = "nvenc", value_parser = ["nvenc", "mf"])]
+    encoder: String,
 }
 
 fn parse_res(s: &str) -> anyhow::Result<(u32, u32)> {
@@ -96,6 +102,7 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(windows)]
     if args.mode == "full-pipeline-win" {
         let consumer: full_pipeline::ConsumerBackend = args.consumer.parse()?;
+        let encoder: full_pipeline::EncoderBackend = args.encoder.parse()?;
         return full_pipeline::run(full_pipeline::FullPipelineConfig {
             width: w,
             height: h,
@@ -106,6 +113,7 @@ async fn main() -> anyhow::Result<()> {
             latency_ms: args.latency_ms,
             csv: args.csv.clone(),
             consumer,
+            encoder,
         })
         .await;
     }

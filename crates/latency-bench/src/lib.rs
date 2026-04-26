@@ -5,7 +5,7 @@
 pub mod full_pipeline;
 
 #[cfg(windows)]
-pub use full_pipeline::{ConsumerBackend, FullPipelineConfig, RunStats, StageTimes};
+pub use full_pipeline::{ConsumerBackend, EncoderBackend, FullPipelineConfig, RunStats, StageTimes};
 
 /// Compute (p50, p90, p95, p99, p100) by sorting in place. Sorts the input.
 pub fn percentiles(lags_us: &mut [u64]) -> (u64, u64, u64, u64, u64) {
@@ -25,13 +25,14 @@ pub fn percentiles(lags_us: &mut [u64]) -> (u64, u64, u64, u64, u64) {
 
 #[cfg(windows)]
 mod matrix {
-    use super::{percentiles, ConsumerBackend, FullPipelineConfig, RunStats};
+    use super::{percentiles, ConsumerBackend, EncoderBackend, FullPipelineConfig, RunStats};
 
     /// CLI-supplied axes for the matrix bin.
     pub struct MatrixAxes {
         pub resolutions: Vec<(u32, u32)>,
         pub bitrates_mbps: Vec<u32>,
         pub decoders: Vec<ConsumerBackend>,
+        pub encoders: Vec<EncoderBackend>,
         pub fps: Vec<u32>,
         pub duration: std::time::Duration,
     }
@@ -42,6 +43,7 @@ mod matrix {
         pub resolution: (u32, u32),
         pub bitrate_mbps: u32,
         pub decoder: ConsumerBackend,
+        pub encoder: EncoderBackend,
         pub fps: u32,
         pub sent: u64,
         pub received: u64,
@@ -58,44 +60,56 @@ mod matrix {
     }
 
     /// Stable, filesystem-safe identifier for a config:
-    /// `{height}p{fps}-{bitrate}mbps-{decoder}`.
+    /// `{height}p{fps}-{bitrate}mbps-enc{encoder}-dec{decoder}`.
     pub fn config_id(
         resolution: (u32, u32),
         fps: u32,
         bitrate_mbps: u32,
         decoder: ConsumerBackend,
+        encoder: EncoderBackend,
     ) -> String {
         let dec = match decoder {
-            ConsumerBackend::Mf => "mf",
+            ConsumerBackend::Mf => "mfdec",
             ConsumerBackend::Nvdec => "nvdec",
         };
-        format!("{}p{}-{}mbps-{}", resolution.1, fps, bitrate_mbps, dec)
+        let enc = match encoder {
+            EncoderBackend::Nvenc => "nvenc",
+            EncoderBackend::Mf => "mfenc",
+        };
+        format!(
+            "{}p{}-{}mbps-enc{}-dec{}",
+            resolution.1, fps, bitrate_mbps, enc, dec
+        )
     }
 
     /// Expand axes into a `Vec<FullPipelineConfig>`. Order:
-    /// resolution outer → bitrate → decoder → fps inner.
+    /// resolution outer → bitrate → encoder → decoder → fps inner.
     pub fn expand_matrix(axes: &MatrixAxes) -> Vec<FullPipelineConfig> {
         let mut out = Vec::with_capacity(
             axes.resolutions.len()
                 * axes.bitrates_mbps.len()
+                * axes.encoders.len()
                 * axes.decoders.len()
                 * axes.fps.len(),
         );
         for &res in &axes.resolutions {
             for &bitrate_mbps in &axes.bitrates_mbps {
-                for &decoder in &axes.decoders {
-                    for &fps in &axes.fps {
-                        out.push(FullPipelineConfig {
-                            width: res.0,
-                            height: res.1,
-                            fps,
-                            duration: axes.duration,
-                            bitrate_bps: bitrate_mbps.saturating_mul(1_000_000),
-                            drop_ppm: 0,
-                            latency_ms: 0,
-                            csv: None,
-                            consumer: decoder,
-                        });
+                for &encoder in &axes.encoders {
+                    for &decoder in &axes.decoders {
+                        for &fps in &axes.fps {
+                            out.push(FullPipelineConfig {
+                                width: res.0,
+                                height: res.1,
+                                fps,
+                                duration: axes.duration,
+                                bitrate_bps: bitrate_mbps.saturating_mul(1_000_000),
+                                drop_ppm: 0,
+                                latency_ms: 0,
+                                csv: None,
+                                consumer: decoder,
+                                encoder,
+                            });
+                        }
                     }
                 }
             }
@@ -111,6 +125,7 @@ mod matrix {
             cfg.fps,
             cfg.bitrate_bps / 1_000_000,
             cfg.consumer,
+            cfg.encoder,
         );
         if run.frames.is_empty() {
             return ConfigStats {
@@ -118,6 +133,7 @@ mod matrix {
                 resolution: (cfg.width, cfg.height),
                 bitrate_mbps: cfg.bitrate_bps / 1_000_000,
                 decoder: cfg.consumer,
+                encoder: cfg.encoder,
                 fps: cfg.fps,
                 sent: run.sent,
                 received: run.received,
@@ -161,6 +177,7 @@ mod matrix {
             resolution: (cfg.width, cfg.height),
             bitrate_mbps: cfg.bitrate_bps / 1_000_000,
             decoder: cfg.consumer,
+            encoder: cfg.encoder,
             fps: cfg.fps,
             sent: run.sent,
             received: run.received,
@@ -208,29 +225,34 @@ mod matrix {
         Ok(())
     }
 
-    /// Write summary.csv across all configs. 17-column header per spec.
+    /// Write summary.csv across all configs. 18-column header (added encoder column).
     pub fn write_summary_csv(path: &Path, stats: &[ConfigStats]) -> std::io::Result<()> {
         let mut wtr = std::fs::File::create(path)?;
         writeln!(
             wtr,
-            "config_id,resolution,bitrate_mbps,decoder,fps,sent,received,loss_ppm,\
+            "config_id,resolution,bitrate_mbps,decoder,encoder,fps,sent,received,loss_ppm,\
              arrival_p50_us,arrival_p95_us,arrival_p99_us,\
              decode_p50_us,decode_p95_us,decode_p99_us,\
              e2e_p50_us,e2e_p95_us,e2e_p99_us"
         )?;
         for s in stats {
             let dec = match s.decoder {
-                ConsumerBackend::Mf => "mf",
+                ConsumerBackend::Mf => "mfdec",
                 ConsumerBackend::Nvdec => "nvdec",
+            };
+            let enc = match s.encoder {
+                EncoderBackend::Nvenc => "nvenc",
+                EncoderBackend::Mf => "mfenc",
             };
             writeln!(
                 wtr,
-                "{},{}x{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                "{},{}x{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
                 s.config_id,
                 s.resolution.0,
                 s.resolution.1,
                 s.bitrate_mbps,
                 dec,
+                enc,
                 s.fps,
                 s.sent,
                 s.received,
@@ -255,6 +277,7 @@ pub use matrix::{
     aggregate, config_id, expand_matrix, write_per_frame_csv, write_summary_csv, ConfigStats,
     MatrixAxes,
 };
+
 
 #[cfg(test)]
 mod tests {
@@ -281,11 +304,23 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn config_id_format_canonical() {
-        let id = config_id((1920, 1080), 60, 30, ConsumerBackend::Mf);
-        assert_eq!(id, "1080p60-30mbps-mf");
+        let id = config_id(
+            (1920, 1080),
+            60,
+            30,
+            ConsumerBackend::Mf,
+            EncoderBackend::Nvenc,
+        );
+        assert_eq!(id, "1080p60-30mbps-encnvenc-decmfdec");
 
-        let id = config_id((3840, 2160), 120, 50, ConsumerBackend::Nvdec);
-        assert_eq!(id, "2160p120-50mbps-nvdec");
+        let id = config_id(
+            (3840, 2160),
+            120,
+            50,
+            ConsumerBackend::Nvdec,
+            EncoderBackend::Mf,
+        );
+        assert_eq!(id, "2160p120-50mbps-encmfenc-decnvdec");
     }
 
     #[cfg(windows)]
@@ -295,13 +330,14 @@ mod tests {
             resolutions: vec![(1920, 1080), (2560, 1440)],
             bitrates_mbps: vec![10, 30],
             decoders: vec![ConsumerBackend::Mf],
+            encoders: vec![EncoderBackend::Nvenc],
             fps: vec![60],
             duration: std::time::Duration::from_secs(10),
         };
         let configs = expand_matrix(&axes);
-        // 2 * 2 * 1 * 1 = 4 configs
+        // 2 * 2 * 1 * 1 * 1 = 4 configs
         assert_eq!(configs.len(), 4);
-        // Order: outermost = resolution, then bitrate, then decoder, then fps
+        // Order: outermost = resolution, then bitrate, then encoder, then decoder, then fps
         assert_eq!((configs[0].width, configs[0].height), (1920, 1080));
         assert_eq!(configs[0].bitrate_bps, 10_000_000);
         assert_eq!((configs[1].width, configs[1].height), (1920, 1080));
@@ -325,6 +361,7 @@ mod tests {
             latency_ms: 0,
             csv: None,
             consumer: ConsumerBackend::Mf,
+            encoder: EncoderBackend::Nvenc,
         };
         let run = RunStats {
             sent: 0,
@@ -332,7 +369,7 @@ mod tests {
             frames: vec![],
         };
         let stats = aggregate(&cfg, &run);
-        assert_eq!(stats.config_id, "1080p60-30mbps-mf");
+        assert_eq!(stats.config_id, "1080p60-30mbps-encnvenc-decmfdec");
         assert_eq!(stats.loss_ppm, 1_000_000);
         assert_eq!(stats.arrival_p50_us, 0);
         assert_eq!(stats.e2e_p99_us, 0);
@@ -351,6 +388,7 @@ mod tests {
             latency_ms: 0,
             csv: None,
             consumer: ConsumerBackend::Mf,
+            encoder: EncoderBackend::Nvenc,
         };
         // 100 frames with arrival_lag_us = i, decode_lag_us = 2*i, e2e = 3*i.
         let frames: Vec<StageTimes> = (1..=100u64)
@@ -396,6 +434,7 @@ mod tests {
             latency_ms: 0,
             csv: None,
             consumer: ConsumerBackend::Mf,
+            encoder: EncoderBackend::Nvenc,
         };
         let run = RunStats {
             sent: 600,
@@ -416,12 +455,12 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2, "header + 1 row");
         assert!(
-            lines[0].starts_with("config_id,resolution,bitrate_mbps,decoder,fps,"),
+            lines[0].starts_with("config_id,resolution,bitrate_mbps,decoder,encoder,fps,"),
             "unexpected header: {}",
             lines[0]
         );
         assert!(
-            lines[1].starts_with("1080p60-30mbps-mf,1920x1080,30,mf,60,600,598,"),
+            lines[1].starts_with("1080p60-30mbps-encnvenc-decmfdec,1920x1080,30,mfdec,nvenc,60,600,598,"),
             "unexpected row: {}",
             lines[1]
         );
