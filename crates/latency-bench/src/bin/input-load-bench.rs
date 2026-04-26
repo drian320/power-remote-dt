@@ -248,6 +248,80 @@ async fn run_one_config(cfg: &Cfg) -> RunStats {
     }
 }
 
+#[allow(dead_code)] // wired in Task 4
+struct ConfigStats {
+    config_id: String,
+    input_rate_hz: u32,
+    video_rate_fps: u32,
+    duration_ms: u64,
+    input_sent: u64,
+    input_received: u64,
+    input_loss_ppm: u64,
+    input_p50_us: u64,
+    input_p95_us: u64,
+    input_p99_us: u64,
+}
+
+#[allow(dead_code)] // wired in Task 4
+fn aggregate(cfg: &Cfg, stats: &RunStats) -> ConfigStats {
+    let (input_p50_us, input_p95_us, input_p99_us) = if stats.lags.is_empty() {
+        (0, 0, 0)
+    } else {
+        let mut lags = stats.lags.clone();
+        let (p50, _, p95, p99, _) = prdt_latency_bench::percentiles(&mut lags);
+        (p50, p95, p99)
+    };
+    let input_loss_ppm = if stats.input_sent > 0 {
+        (stats.input_sent.saturating_sub(stats.input_received))
+            * 1_000_000
+            / stats.input_sent
+    } else {
+        0
+    };
+    ConfigStats {
+        config_id: config_id(cfg),
+        input_rate_hz: cfg.input_rate_hz,
+        video_rate_fps: cfg.video_rate_fps,
+        duration_ms: cfg.duration.as_millis() as u64,
+        input_sent: stats.input_sent,
+        input_received: stats.input_received,
+        input_loss_ppm,
+        input_p50_us,
+        input_p95_us,
+        input_p99_us,
+    }
+}
+
+#[allow(dead_code)] // wired in Task 4
+fn write_summary_csv(
+    path: &std::path::Path,
+    stats: &[ConfigStats],
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut wtr = std::fs::File::create(path)?;
+    writeln!(
+        wtr,
+        "config_id,input_rate_hz,video_rate_fps,duration_ms,input_sent,input_received,input_loss_ppm,input_p50_us,input_p95_us,input_p99_us"
+    )?;
+    for s in stats {
+        writeln!(
+            wtr,
+            "{},{},{},{},{},{},{},{},{},{}",
+            s.config_id,
+            s.input_rate_hz,
+            s.video_rate_fps,
+            s.duration_ms,
+            s.input_sent,
+            s.input_received,
+            s.input_loss_ppm,
+            s.input_p50_us,
+            s.input_p95_us,
+            s.input_p99_us
+        )?;
+    }
+    Ok(())
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
@@ -340,5 +414,90 @@ mod tests {
         let stats = run_one_config(&cfg).await;
         assert!(stats.input_sent >= 10);
         assert_eq!(stats.input_received, stats.input_sent, "no drops at default LoopbackOptions");
+    }
+
+    #[test]
+    fn aggregate_collects_outcomes() {
+        let cfg = Cfg {
+            input_rate_hz: 100,
+            video_rate_fps: 0,
+            video_frame_bytes: 0,
+            duration: Duration::from_millis(500),
+        };
+        let stats = RunStats {
+            input_sent: 50,
+            input_received: 49,
+            lags: (1..=49u64).collect(),
+        };
+        let s = aggregate(&cfg, &stats);
+        assert_eq!(s.input_sent, 50);
+        assert_eq!(s.input_received, 49);
+        // 1 lost out of 50 = 20000 ppm
+        assert_eq!(s.input_loss_ppm, 20_000);
+        // p50 of 1..=49 (49 elements) using round-style picking:
+        // idx = round((49-1) * 0.5) = round(24.0) = 24 -> v[24] = 25
+        assert_eq!(s.input_p50_us, 25);
+        // p95: idx = round(48 * 0.95) = round(45.6) = 46 -> v[46] = 47
+        assert_eq!(s.input_p95_us, 47);
+        // p99: idx = round(48 * 0.99) = round(47.52) = 48 -> v[48] = 49
+        assert_eq!(s.input_p99_us, 49);
+    }
+
+    #[test]
+    fn aggregate_empty_lags_emits_zero_percentiles_but_keeps_counts() {
+        let cfg = Cfg {
+            input_rate_hz: 100,
+            video_rate_fps: 0,
+            video_frame_bytes: 0,
+            duration: Duration::from_millis(500),
+        };
+        let stats = RunStats {
+            input_sent: 0,
+            input_received: 0,
+            lags: vec![],
+        };
+        let s = aggregate(&cfg, &stats);
+        assert_eq!(s.input_sent, 0);
+        assert_eq!(s.input_received, 0);
+        assert_eq!(s.input_loss_ppm, 0);
+        assert_eq!(s.input_p50_us, 0);
+        assert_eq!(s.input_p95_us, 0);
+        assert_eq!(s.input_p99_us, 0);
+    }
+
+    #[test]
+    fn summary_csv_writer_emits_header_and_one_row() {
+        let cfg = Cfg {
+            input_rate_hz: 1000,
+            video_rate_fps: 60,
+            video_frame_bytes: 50_000,
+            duration: Duration::from_secs(5),
+        };
+        let s = ConfigStats {
+            config_id: config_id(&cfg),
+            input_rate_hz: cfg.input_rate_hz,
+            video_rate_fps: cfg.video_rate_fps,
+            duration_ms: cfg.duration.as_millis() as u64,
+            input_sent: 5000,
+            input_received: 4998,
+            input_loss_ppm: 400,
+            input_p50_us: 12,
+            input_p95_us: 28,
+            input_p99_us: 45,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("summary.csv");
+        write_summary_csv(&path, std::slice::from_ref(&s)).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "header + 1 row");
+        assert_eq!(
+            lines[0],
+            "config_id,input_rate_hz,video_rate_fps,duration_ms,input_sent,input_received,input_loss_ppm,input_p50_us,input_p95_us,input_p99_us"
+        );
+        assert_eq!(
+            lines[1],
+            "in1000hz-vid60fps,1000,60,5000,5000,4998,400,12,28,45"
+        );
     }
 }
