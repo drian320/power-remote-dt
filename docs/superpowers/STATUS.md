@@ -1,9 +1,9 @@
 # power-remote-dt — Project Status & Roadmap
 
 **Last updated:** 2026-04-26
-**Latest tag:** `plan4-b4-net-profile-bench-complete`
-**Branch state:** master (all phase work merged) — **Phase 4 + Plan 4 B1 + B4 + B6 + B7 完了**
-**Test count:** 305 automated tests across the workspace, all passing
+**Latest tag:** `plan4-b8-stability-bench-complete`
+**Branch state:** master (all phase work merged) — **Phase 4 + Plan 4 B1 + B4 + B6 + B7 + B8 完了 (B3 のみ HW ブロック保留)**
+**Test count:** 305 automated Rust tests + 11 Python tests, all passing
 
 ---
 
@@ -50,6 +50,7 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
 | `plan4-b6-fec-bench-complete` | `prdt-fec-bench` bin(純 CPU FEC アルゴリズム bench、30 構成 sweep: k=8/32/64 × m=2/6 × drop_ppm=0/1%/5%/10%/20%、1000 trials/構成、~30 秒)。`packetize → per-packet drop → FrameAssembler` を直接駆動、transport / GPU / 暗号化なし。`Cfg` / `TrialOutcome { CompleteNoFec, CompleteWithFec, Lost }` / `simulate_one_trial`(xorshift64 RNG で seed-deterministic な drop 判定)/ `aggregate`(recovery_rate_ppm + reconstruct p50/p95)/ `write_summary_csv`(12 列)。8 unit tests。実測結果: drop=0 で 100% 復元、k=8m6 が k=8m2 より drop=20% で +33% の recovery rate(945k vs 610k ppm)、reconstruct latency は k=8 で ~9µs / k=64 で ~270µs。出力は seed-deterministic(timing 列のみ wall-clock ジッター)。`docs/fec-bench.md` に schema + 解釈例。 |
 | `plan4-b7-input-load-bench-complete` | `prdt-input-load-bench` bin(input event 配送 lag を並行 video 負荷下で計測、12 構成 sweep: input_rates=[100,500,1000,5000]Hz × video_rates=[0,60,120]fps、5s/構成、~63 秒)。InProcTransport pair で `tokio::spawn` 3 タスク(input sender、optional video sender、receiver)+ CancellationToken cancel-on-deadline + 50ms post-cancel drain。InputEvent には timestamp フィールド無いので `mpsc::unbounded_channel<u64>` で sender→receiver に sent_us を流す。`aggregate`(input_loss_ppm + p50/p95/p99)/ `write_summary_csv`(10 列)。7 unit tests(2 sync + 2 async + 3 aggregate/csv)。実測結果(LoopbackOptions::default = drop_ppm=0): 全 12 構成で loss=0、p50 5-15µs、p95 25-43µs。`docs/input-load-bench.md` に schema + 解釈例 + 限界(real network/host inject/glass-to-glass を含まない)。 |
 | `plan4-b4-net-profile-bench-complete` | `prdt-net-profile-bench` bin(network profile sweep、20 構成: latencies_ms=[0,1,10,50,200] × drops_ppm=[0,1000,10000,50000]、5s/構成、~82 秒)。LoopbackOptions の `latency`/`drop_ppm` を populate して InProcTransport で simulated 1-way delay + msg-level drop。input + video 両方の sent/received 計数。`run_one_config`(B7 派生、3 spawn task)/ `aggregate`(input_loss_ppm + video_loss_ppm + input p50/p95/p99)/ `write_summary_csv`(15 列)。7 unit tests。実測結果(RTX 3070 Ti): lat=0/drop=0 baseline で p50=11µs、lat=10ms/drop=0 で p50=15.6ms(10ms 注入 + sleep オーバヘッド)、lat=50ms で sender が ~16 events/sec まで blocking で律速。**既知限界: drop_ppm>0 時の input_p50/p95/p99_us は FIFO-pairing artifact で inflated**(loss 列は正確; docs Caveats に明記 + 修正案あり)。Real LAN/TURN/jitter は2台環境必要で out-of-scope。 |
+| `plan4-b8-stability-bench-complete` | 30 分長時間安定性。新 Rust コードなし — 既存 `prdt-bench-matrix --duration 30m --resolutions 1080 --bitrates 30 --decoders nvdec --fps 60` を実機で 1 回実行 + 新 `scripts/analyze-stability.py`(pandas + numpy)で per-frame CSV を分単位 bucket 解析。`bucket_frames` / `percentile_round`(Rust 互換 half-away-from-zero)/ `e2e_p50_slope_us_per_minute`(wall-clock 時間軸の線形回帰)/ `outlier_buckets`(e2e_p99 > 2× median)+ CLI(stdout drift summary)+ 11 unittest tests。実測結果(RTX 3070 Ti、1080p60 30Mbps NVDEC、30分): 89921 sent / 89920 received(loss 11ppm = 0.001%)、e2e_p50=13.3ms / p95=14.6ms / p99=16.9ms、drift slope=-4.42µs/min(基本 flat)、bucket 間 max-min=482µs、outlier なし → **30 分通して安定**確認。`docs/stability-bench.md` に schema + 実測結果 + interpretation。Out of scope: real network drift、OS-level memory leaks、multi-config matrix(時間爆発)、glass-to-glass(M3)。 |
 
 ### Plan 2d — NVDEC 実装
 | タグ | 内容 |
@@ -98,7 +99,7 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
 - ~~**B5: デコーダ比較(MF / NVDEC)**~~ ✅
 - ~~**B6: FEC 効果(k=8 / 32 / 64、m=2 / 6)**~~ ✅(2026-04-26、`plan4-b6-fec-bench-complete`、30 構成、recovery rate + reconstruct latency)
 - ~~**B7: input round-trip latency(クリック→画面反映)**~~ ✅ software-only 部分(2026-04-26、`plan4-b7-input-load-bench-complete`、12 構成、send-to-recv lag)。真の click→画面 RTT は M3(カメラ)必要、保留
-- **B8: 長時間安定性(30 分連続接続でのレイテンシ・パケットロス推移)** — host/viewer 本体に bench mode 追加
+- ~~**B8: 長時間安定性**~~ ✅ (2026-04-26、`plan4-b8-stability-bench-complete`、`scripts/analyze-stability.py` で 30-min `prdt-bench-matrix` 出力を分単位 bucket 解析、drift / outlier 検出。実測: 1080p60 30Mbps NVDEC で 30 分間ドリフトほぼ 0、loss 0.001%)
 - **B1+B2+B5 実機結果(RTX 3070 Ti、2026-04-26)**: bench-results/2026-04-26-final/(60 構成、全成功)
   - NVDEC が 29/29 paired 構成で MF より速い(median e2e_p50 ratio 0.83、17% 高速)
   - NVDEC: lower jitter (CV 0.286 vs 0.309)、lower loss (1930 vs 3857 ppm)
