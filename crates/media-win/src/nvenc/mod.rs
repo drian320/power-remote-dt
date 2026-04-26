@@ -9,5 +9,5 @@ pub mod ffi;
 pub mod loader;
 
 pub use config::NvencEncoderConfig;
-pub use encoder::{EncodedH265Frame, NvencEncoder};
+pub use encoder::NvencEncoder;
 pub use loader::NvEncLibrary;

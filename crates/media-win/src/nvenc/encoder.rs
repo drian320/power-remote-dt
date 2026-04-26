@@ -33,6 +33,7 @@ use std::ptr;
 use windows::core::Interface;
 
 use crate::d3d11::{D3d11Device, D3d11Texture};
+use crate::encoder_trait::{EncodedH265Frame, Hevc265Encoder};
 use crate::error::{MediaError, Result};
 use crate::nvenc::config::{
     nv_enc_create_bitstream_buffer_ver, nv_enc_lock_bitstream_ver, nv_enc_map_input_resource_ver,
@@ -41,12 +42,6 @@ use crate::nvenc::config::{
 };
 use crate::nvenc::ffi;
 use crate::nvenc::loader::NvEncLibrary;
-
-pub struct EncodedH265Frame {
-    pub nal_bytes: Vec<u8>,
-    pub is_keyframe: bool,
-    pub timestamp: u64,
-}
 
 /// Convert the i32-repr `NVENCSTATUS` returned by NVENC fns to a plain i32
 /// for easy logging and comparison. `NV_ENC_SUCCESS == 0`.
@@ -206,7 +201,7 @@ impl NvencEncoder {
     /// In sync mode the call returns only after encode is complete and
     /// the bitstream is ready to be locked.
     pub fn encode(
-        &self,
+        &mut self,
         texture: &D3d11Texture,
         force_idr: bool,
         timestamp: u64,
@@ -316,6 +311,36 @@ impl NvencEncoder {
                 timestamp,
             })
         }
+    }
+}
+
+impl Hevc265Encoder for NvencEncoder {
+    fn encode(
+        &mut self,
+        texture: &D3d11Texture,
+        force_idr: bool,
+        timestamp_us: u64,
+    ) -> std::result::Result<EncodedH265Frame, MediaError> {
+        // Delegates to the inherent method.
+        NvencEncoder::encode(self, texture, force_idr, timestamp_us)
+    }
+
+    fn set_target_bitrate(&mut self, bps: u32) {
+        // The current NVENC implementation does not yet support live
+        // bitrate reconfiguration; record the requested value for the
+        // next session restart. This matches the existing behaviour:
+        // bitrate is set in `NvencEncoderConfig::bitrate_bps` at
+        // construction time.
+        tracing::warn!(
+            target = "nvenc",
+            requested_bps = bps,
+            "set_target_bitrate is currently a no-op for NVENC \
+             (rate-control reconfiguration is a follow-up)"
+        );
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "nvenc"
     }
 }
 
@@ -454,7 +479,7 @@ mod tests {
             bitrate_bps: 5_000_000,
             gop_length: 60,
         };
-        let enc = NvencEncoder::new(&dev, &cfg).expect("encoder");
+        let mut enc = NvencEncoder::new(&dev, &cfg).expect("encoder");
         let tex = make_counter_texture(&dev, 256, 256, 0).expect("texture");
         let frame = enc.encode(&tex, true, 0).expect("encode");
         eprintln!(

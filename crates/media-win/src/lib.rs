@@ -6,6 +6,7 @@
 pub mod adapter;
 pub mod d3d11;
 pub mod dxgi;
+pub mod encoder_trait;
 pub mod error;
 pub mod mf;
 pub mod nvdec;
@@ -22,8 +23,9 @@ pub use d3d11::{
 };
 pub use dxgi::{enumerate_outputs_for_adapter, AcquiredFrame, DesktopDuplication, OutputInfo};
 pub use error::{MediaError, Result};
-pub use mf::H265Decoder;
+pub use mf::{H265Decoder, MfH265Encoder};
 pub use nvdec::NvdecD3d11Consumer;
-pub use nvenc::{EncodedH265Frame, NvEncLibrary, NvencEncoder, NvencEncoderConfig};
+pub use encoder_trait::{EncodedH265Frame, Hevc265Encoder, HwHevcEncoder};
+pub use nvenc::{NvEncLibrary, NvencEncoder, NvencEncoderConfig};
 pub use pipeline::{DxgiNvencProducer, MfD3d11Consumer};
 pub use platform::MmcssScope;
