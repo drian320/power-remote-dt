@@ -18,6 +18,7 @@ use prdt_input_win::{
 };
 use prdt_media_win::{
     dxgi::enumerate_outputs_for_adapter, pick_default_adapter, D3d11Device, DxgiNvencProducer,
+    Hevc265Encoder, HwHevcEncoder, MfH265Encoder, NvencEncoder, NvencEncoderConfig,
 };
 use prdt_protocol::{wire::AudioPacket, ControlMessage, MonitorRect, VideoProducer};
 use prdt_transport::{
@@ -94,6 +95,12 @@ pub struct Args {
     #[arg(long)]
     turn_url: Option<url::Url>,
 
+    /// Encoder backend: auto (default) | nvenc | mf.
+    /// "auto" picks NVENC on NVIDIA GPUs and MF (Media Foundation
+    /// H.265 encoder MFT) on AMD/Intel.
+    #[arg(long, default_value = "auto")]
+    encoder: String,
+
     /// Run in CLI-only mode without launching the GUI. Required for headless servers / CI.
     #[arg(long)]
     headless: bool,
@@ -155,6 +162,7 @@ pub async fn run_host(
         monitor = args.monitor,
         device_name = %output.device_name,
         bitrate_mbps = args.bitrate_mbps,
+        encoder = %args.encoder,
         "host starting"
     );
 
@@ -303,7 +311,18 @@ pub async fn run_host(
 
     // Build producer after handshake so the viewer's negotiated params can
     // eventually influence encoder setup (Phase 0 keeps this fixed).
-    let mut producer = DxgiNvencProducer::new(&dev, &output, bitrate_bps).context("producer")?;
+    let enc_cfg = NvencEncoderConfig {
+        width: (output.desktop_rect.right - output.desktop_rect.left) as u32,
+        height: (output.desktop_rect.bottom - output.desktop_rect.top) as u32,
+        fps_numerator: 60,
+        fps_denominator: 1,
+        bitrate_bps,
+        gop_length: 60,
+    };
+    let encoder = pick_encoder(&args.encoder, &adapter, &dev, &enc_cfg).context("encoder")?;
+    info!(backend = encoder.backend_name(), "encoder ready");
+    let mut producer =
+        DxgiNvencProducer::with_encoder(&dev, &output, encoder).context("producer")?;
 
     // Spawn video loop.
     let tx_video = Arc::clone(&transport);
@@ -598,4 +617,28 @@ fn init_tracing() {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
+}
+
+fn pick_encoder(
+    args_encoder: &str,
+    adapter: &prdt_media_win::AdapterInfo,
+    dev: &D3d11Device,
+    cfg: &NvencEncoderConfig,
+) -> anyhow::Result<HwHevcEncoder> {
+    let choice = if args_encoder == "auto" {
+        if adapter.is_nvidia() { "nvenc" } else { "mf" }
+    } else {
+        args_encoder
+    };
+    match choice {
+        "nvenc" => {
+            let enc = NvencEncoder::new(dev, cfg).context("NvencEncoder::new")?;
+            Ok(HwHevcEncoder::from(enc))
+        }
+        "mf" => {
+            let enc = MfH265Encoder::new(dev, cfg).context("MfH265Encoder::new")?;
+            Ok(HwHevcEncoder::from(enc))
+        }
+        other => anyhow::bail!("unknown --encoder {other:?} (valid: auto, nvenc, mf)"),
+    }
 }

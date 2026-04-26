@@ -36,6 +36,14 @@ pub struct HostConfig {
     pub key_file: PathBuf,
     #[serde(default)]
     pub auto_start: bool,
+    /// Encoder backend choice. "auto" picks NVENC on NVIDIA, MF
+    /// elsewhere. Other values: "nvenc", "mf".
+    #[serde(default = "default_encoder_choice")]
+    pub encoder: String,
+}
+
+fn default_encoder_choice() -> String {
+    "auto".into()
 }
 
 impl Default for HostConfig {
@@ -49,6 +57,7 @@ impl Default for HostConfig {
             host_id_file: PathBuf::from("host-id.txt"),
             key_file: PathBuf::from("host-key.bin"),
             auto_start: false,
+            encoder: "auto".into(),
         }
     }
 }
