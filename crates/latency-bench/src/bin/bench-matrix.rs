@@ -105,7 +105,17 @@ async fn main() -> anyhow::Result<()> {
 
     let mut all_stats: Vec<ConfigStats> = Vec::with_capacity(configs.len());
     let mut skipped: u64 = 0;
+    // Brief pause between configs so the previous config's NVENC/NVDEC/CUDA
+    // context teardown has time to fully release GPU resources before the
+    // next config rebuilds them. Without this, sporadic configs come up
+    // with sent=1 received=0 because the next encoder steals state from
+    // the still-tearing-down previous one. Empirically 250ms is sufficient
+    // on RTX 3070 Ti (200ms was marginal in one observed run).
+    const INTER_CONFIG_DELAY: Duration = Duration::from_millis(250);
     for (i, cfg) in configs.iter().enumerate() {
+        if i > 0 {
+            tokio::time::sleep(INTER_CONFIG_DELAY).await;
+        }
         let id = config_id(
             (cfg.width, cfg.height),
             cfg.fps,
