@@ -87,6 +87,154 @@ fn expand_matrix(args: &Args) -> Vec<Cfg> {
     out
 }
 
+use std::time::Instant;
+
+use bytes::Bytes;
+use prdt_protocol::{frame::Codec, EncodedFrame};
+use prdt_transport::{
+    assembler::{FeedResult, FrameAssembler},
+    packetize::packetize,
+    FecCodec,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // used in tests; Tasks 3-4 wire into main
+enum TrialOutcome {
+    CompleteNoFec,
+    CompleteWithFec,
+    Lost,
+}
+
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // used in tests; Tasks 3-4 wire into main
+struct TrialResult {
+    outcome: TrialOutcome,
+    reconstruct_us: Option<u64>,
+}
+
+/// xorshift64-based RNG. Pure function: takes a state, returns the next
+/// state. Cheap, deterministic. The caller threads state through repeated
+/// calls or seeds it from a per-call hash.
+#[allow(dead_code)] // used in tests; Tasks 3-4 wire into main
+fn xorshift64(mut x: u64) -> u64 {
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    x.max(1) // never return 0 (would freeze the generator)
+}
+
+/// Roll a per-packet drop decision. Mixes seed + trial_idx + packet_idx
+/// so each trial is reproducible and packet decisions within one trial
+/// are independent.
+#[allow(dead_code)] // used in tests; Tasks 3-4 wire into main
+fn should_drop(drop_ppm: u32, seed: u64, trial_idx: u64, packet_idx: u16) -> bool {
+    if drop_ppm == 0 {
+        return false;
+    }
+    if drop_ppm >= 1_000_000 {
+        return true;
+    }
+    let mut x = seed
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(trial_idx)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(packet_idx as u64);
+    x = xorshift64(x);
+    let r = (x % 1_000_000) as u32;
+    r < drop_ppm
+}
+
+/// Build a synthetic frame of `frame_bytes` bytes, content varied
+/// deterministically by `seed + trial_idx`. The per-byte content varies
+/// so packetize doesn't accidentally collapse identical shards.
+#[allow(dead_code)] // used in tests; Tasks 3-4 wire into main
+fn make_frame(seed: u64, trial_idx: u64, frame_bytes: usize) -> EncodedFrame {
+    let mut buf = Vec::with_capacity(frame_bytes);
+    let base = seed.wrapping_add(trial_idx);
+    for i in 0..frame_bytes {
+        buf.push(((base.rotate_left(i as u32 % 64)) ^ (i as u64)) as u8);
+    }
+    EncodedFrame {
+        seq: trial_idx + 1,
+        timestamp_host_us: 0,
+        is_keyframe: true,
+        nal_units: Bytes::from(buf),
+        width: 1920,
+        height: 1080,
+        codec: Codec::H265,
+    }
+}
+
+/// Run one packetize -> drop -> assemble cycle.
+#[allow(dead_code)] // used in tests; Tasks 3-4 wire into main
+fn simulate_one_trial(cfg: &Cfg, trial_idx: u64, seed: u64) -> TrialResult {
+    let fec = match FecCodec::new(cfg.k, cfg.m) {
+        Ok(f) => f,
+        Err(_) => {
+            return TrialResult { outcome: TrialOutcome::Lost, reconstruct_us: None };
+        }
+    };
+    let frame = make_frame(seed, trial_idx, cfg.frame_bytes);
+    let packets = match packetize(&frame, &fec, cfg.chunk_payload_len) {
+        Ok(p) => p,
+        Err(_) => {
+            return TrialResult { outcome: TrialOutcome::Lost, reconstruct_us: None };
+        }
+    };
+
+    // Track whether any source-chunk packet (idx 0..k) was dropped. If all
+    // source chunks survive, no FEC was needed even if parity packets were
+    // also delivered.
+    let mut all_source_present = true;
+    let mut surviving: Vec<_> = packets
+        .iter()
+        .enumerate()
+        .filter_map(|(i, pkt)| {
+            if should_drop(cfg.drop_ppm, seed, trial_idx, i as u16) {
+                if pkt.chunk_idx < cfg.k as u16 {
+                    all_source_present = false;
+                }
+                None
+            } else {
+                Some(pkt.clone())
+            }
+        })
+        .collect();
+
+    // Deterministic shuffle so packet order varies per trial but is
+    // reproducible given the same seed/trial_idx.
+    let mut shuffle_seed = xorshift64(seed.wrapping_add(trial_idx));
+    for i in (1..surviving.len()).rev() {
+        shuffle_seed = xorshift64(shuffle_seed);
+        let j = (shuffle_seed as usize) % (i + 1);
+        surviving.swap(i, j);
+    }
+
+    let mut asm = FrameAssembler::new(frame.width, frame.height, frame.codec);
+    let start = Instant::now();
+    let mut completed = false;
+    for pkt in surviving {
+        match asm.feed(pkt, &fec) {
+            Ok(FeedResult::Complete(_)) => {
+                completed = true;
+                break;
+            }
+            Ok(FeedResult::Pending) | Ok(FeedResult::Stale) => {}
+            Err(_) => break, // FEC reconstruction error -> lost
+        }
+    }
+    let elapsed_us = start.elapsed().as_micros() as u64;
+
+    if !completed {
+        return TrialResult { outcome: TrialOutcome::Lost, reconstruct_us: None };
+    }
+    if all_source_present {
+        TrialResult { outcome: TrialOutcome::CompleteNoFec, reconstruct_us: None }
+    } else {
+        TrialResult { outcome: TrialOutcome::CompleteWithFec, reconstruct_us: Some(elapsed_us) }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
@@ -140,5 +288,41 @@ mod tests {
         assert_eq!((cfgs[1].k, cfgs[1].m, cfgs[1].drop_ppm), (8, 2, 100_000));
         assert_eq!((cfgs[2].k, cfgs[2].m, cfgs[2].drop_ppm), (8, 6, 0));
         assert_eq!((cfgs[4].k, cfgs[4].m, cfgs[4].drop_ppm), (32, 2, 0));
+    }
+
+    #[test]
+    fn trial_no_drop_completes_no_fec() {
+        let cfg = Cfg { k: 4, m: 2, drop_ppm: 0, frame_bytes: 2000, chunk_payload_len: 1200, trials: 1 };
+        let result = simulate_one_trial(&cfg, /*trial_idx=*/0, /*seed=*/123);
+        assert_eq!(result.outcome, TrialOutcome::CompleteNoFec);
+        assert_eq!(result.reconstruct_us, None);
+    }
+
+    #[test]
+    fn trial_full_drop_lost() {
+        let cfg = Cfg { k: 4, m: 2, drop_ppm: 1_000_000, frame_bytes: 2000, chunk_payload_len: 1200, trials: 1 };
+        let result = simulate_one_trial(&cfg, /*trial_idx=*/0, /*seed=*/123);
+        assert_eq!(result.outcome, TrialOutcome::Lost);
+        assert_eq!(result.reconstruct_us, None);
+    }
+
+    #[test]
+    fn trial_recoverable_drop_completes_with_fec() {
+        // k=4, m=2 -> 6 packets, 20% drop rate -> usually some packets get
+        // dropped. We probe seeds 1..=20 looking for one where:
+        //   - At least one source-chunk packet (idx 0..k) was dropped (so
+        //     FEC reconstruction is required)
+        //   - Total surviving packets >= k (so FEC can succeed)
+        // This proves the CompleteWithFec branch fires correctly.
+        let cfg = Cfg { k: 4, m: 2, drop_ppm: 200_000, frame_bytes: 2000, chunk_payload_len: 1200, trials: 1 };
+        let mut found = false;
+        for seed in 1..=20u64 {
+            let r = simulate_one_trial(&cfg, 0, seed);
+            if r.outcome == TrialOutcome::CompleteWithFec && r.reconstruct_us.is_some() {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "expected at least one seed in 1..=20 to trigger FEC");
     }
 }
