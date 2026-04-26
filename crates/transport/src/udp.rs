@@ -324,6 +324,12 @@ impl CustomUdpTransport {
                 recv = tokio::time::timeout(remaining, self.socket.recv_from(&mut buf)) => {
                     let (n, from) = match recv {
                         Ok(Ok(v)) => v,
+                        Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionReset => {
+                            // Stale ICMP unreachable from a previous peer that has gone
+                            // away. UDP socket is fine — skip and wait for real packet.
+                            tracing::debug!(?e, "WSAECONNRESET on recv (handshake timeout loop); ignoring");
+                            continue;
+                        }
                         Ok(Err(e)) => return Err(TransportError::Io(e)),
                         Err(_) => return Err(TransportError::HandshakeTimeout),
                     };
@@ -520,10 +526,29 @@ impl CustomUdpTransport {
     /// handshake to read pre-session NoiseE1/E2 frames. Unlike `recv`, any
     /// packet arriving with the ENCRYPTED flag set is dropped rather than
     /// forwarded (we cannot decrypt it without a session).
+    ///
+    /// # WSAECONNRESET / ConnectionReset filtering
+    ///
+    /// On Windows, after a viewer disconnects abruptly the OS may queue one or
+    /// more ICMP "destination unreachable" responses (WSAECONNRESET, Os error
+    /// 10054) against the UDP socket. Because UDP is connectionless these are
+    /// stale echoes from the dead peer — the socket itself is healthy. Both
+    /// this method and `recv` silently swallow `ErrorKind::ConnectionReset`
+    /// and loop back to wait for the next real datagram rather than propagating
+    /// the error and causing the session loop to spin.
     async fn recv_raw_unencrypted(&self) -> Result<ReceivedMessage, TransportError> {
         let mut buf = vec![0u8; 4096];
         loop {
-            let (n, from) = self.socket.recv_from(&mut buf).await?;
+            let (n, from) = match self.socket.recv_from(&mut buf).await {
+                Ok(v) => v,
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
+                    // Stale ICMP unreachable from a previous peer that has gone
+                    // away. UDP socket is fine — skip and wait for real packet.
+                    tracing::debug!(?e, "WSAECONNRESET on recv (handshake); ignoring");
+                    continue;
+                }
+                Err(e) => return Err(TransportError::Io(e)),
+            };
             // Record peer on first packet if not yet set.
             {
                 let mut p = self.peer.lock().await;
@@ -678,7 +703,16 @@ impl Transport for CustomUdpTransport {
     async fn recv(&self) -> Result<ReceivedMessage, TransportError> {
         let mut buf = vec![0u8; 4096];
         loop {
-            let (n, from) = self.socket.recv_from(&mut buf).await?;
+            let (n, from) = match self.socket.recv_from(&mut buf).await {
+                Ok(v) => v,
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
+                    // Stale ICMP unreachable from a previous peer that has gone
+                    // away. UDP socket is fine — skip and wait for real packet.
+                    tracing::debug!(?e, "WSAECONNRESET on recv (encrypted); ignoring");
+                    continue;
+                }
+                Err(e) => return Err(TransportError::Io(e)),
+            };
             // Record peer on first packet if not yet set.
             {
                 let mut p = self.peer.lock().await;
