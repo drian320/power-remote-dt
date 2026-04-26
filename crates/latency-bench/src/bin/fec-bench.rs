@@ -235,6 +235,85 @@ fn simulate_one_trial(cfg: &Cfg, trial_idx: u64, seed: u64) -> TrialResult {
     }
 }
 
+#[allow(dead_code)] // Tasks 3-4; wired in Task 4
+struct ConfigStats {
+    config_id: String,
+    cfg: Cfg,
+    complete_no_fec: u64,
+    complete_with_fec: u64,
+    lost: u64,
+    recovery_rate_ppm: u64,
+    reconstruct_p50_us: u64,
+    reconstruct_p95_us: u64,
+}
+
+#[allow(dead_code)] // Tasks 3-4; wired in Task 4
+fn aggregate(cfg: &Cfg, trials: &[TrialResult]) -> ConfigStats {
+    let mut complete_no_fec = 0u64;
+    let mut complete_with_fec = 0u64;
+    let mut lost = 0u64;
+    let mut reconstructs: Vec<u64> = Vec::new();
+    for t in trials {
+        match t.outcome {
+            TrialOutcome::CompleteNoFec => complete_no_fec += 1,
+            TrialOutcome::CompleteWithFec => {
+                complete_with_fec += 1;
+                if let Some(us) = t.reconstruct_us {
+                    reconstructs.push(us);
+                }
+            }
+            TrialOutcome::Lost => lost += 1,
+        }
+    }
+    let total = (complete_no_fec + complete_with_fec + lost).max(1);
+    let recovery_rate_ppm = (complete_no_fec + complete_with_fec) * 1_000_000 / total;
+    let (reconstruct_p50_us, reconstruct_p95_us) = if reconstructs.is_empty() {
+        (0, 0)
+    } else {
+        let (p50, _, p95, _, _) = prdt_latency_bench::percentiles(&mut reconstructs);
+        (p50, p95)
+    };
+    ConfigStats {
+        config_id: config_id(cfg),
+        cfg: *cfg,
+        complete_no_fec,
+        complete_with_fec,
+        lost,
+        recovery_rate_ppm,
+        reconstruct_p50_us,
+        reconstruct_p95_us,
+    }
+}
+
+#[allow(dead_code)] // Tasks 3-4; wired in Task 4
+fn write_summary_csv(path: &std::path::Path, stats: &[ConfigStats]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut wtr = std::fs::File::create(path)?;
+    writeln!(
+        wtr,
+        "config_id,k,m,drop_ppm,frame_bytes,trials,complete_no_fec,complete_with_fec,lost,recovery_rate_ppm,reconstruct_p50_us,reconstruct_p95_us"
+    )?;
+    for s in stats {
+        writeln!(
+            wtr,
+            "{},{},{},{},{},{},{},{},{},{},{},{}",
+            s.config_id,
+            s.cfg.k,
+            s.cfg.m,
+            s.cfg.drop_ppm,
+            s.cfg.frame_bytes,
+            s.cfg.trials,
+            s.complete_no_fec,
+            s.complete_with_fec,
+            s.lost,
+            s.recovery_rate_ppm,
+            s.reconstruct_p50_us,
+            s.reconstruct_p95_us
+        )?;
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
@@ -324,5 +403,66 @@ mod tests {
             }
         }
         assert!(found, "expected at least one seed in 1..=20 to trigger FEC");
+    }
+
+    #[test]
+    fn aggregate_collects_outcomes() {
+        let trials: Vec<TrialResult> = vec![
+            TrialResult { outcome: TrialOutcome::CompleteNoFec, reconstruct_us: None },
+            TrialResult { outcome: TrialOutcome::CompleteNoFec, reconstruct_us: None },
+            TrialResult { outcome: TrialOutcome::CompleteWithFec, reconstruct_us: Some(20) },
+            TrialResult { outcome: TrialOutcome::CompleteWithFec, reconstruct_us: Some(60) },
+            TrialResult { outcome: TrialOutcome::Lost, reconstruct_us: None },
+        ];
+        let cfg = Cfg { k: 8, m: 2, drop_ppm: 100_000, frame_bytes: 5000, chunk_payload_len: 1200, trials: 5 };
+        let s = aggregate(&cfg, &trials);
+        assert_eq!(s.complete_no_fec, 2);
+        assert_eq!(s.complete_with_fec, 2);
+        assert_eq!(s.lost, 1);
+        // recovery = 4/5 = 800_000 ppm
+        assert_eq!(s.recovery_rate_ppm, 800_000);
+        // p50 of [20, 60] under round-style picking: idx = round((2-1)*0.5) = round(0.5) = 1
+        // -> v[1] = 60
+        assert_eq!(s.reconstruct_p50_us, 60);
+        assert_eq!(s.reconstruct_p95_us, 60);
+    }
+
+    #[test]
+    fn aggregate_empty_reconstruct_emits_zeros() {
+        let trials: Vec<TrialResult> = vec![
+            TrialResult { outcome: TrialOutcome::CompleteNoFec, reconstruct_us: None },
+            TrialResult { outcome: TrialOutcome::CompleteNoFec, reconstruct_us: None },
+        ];
+        let cfg = Cfg { k: 8, m: 2, drop_ppm: 0, frame_bytes: 5000, chunk_payload_len: 1200, trials: 2 };
+        let s = aggregate(&cfg, &trials);
+        assert_eq!(s.recovery_rate_ppm, 1_000_000);
+        assert_eq!(s.reconstruct_p50_us, 0);
+        assert_eq!(s.reconstruct_p95_us, 0);
+    }
+
+    #[test]
+    fn summary_csv_writer_emits_header_and_one_row() {
+        let cfg = Cfg { k: 8, m: 2, drop_ppm: 50_000, frame_bytes: 5000, chunk_payload_len: 1200, trials: 100 };
+        let s = ConfigStats {
+            config_id: config_id(&cfg),
+            cfg,
+            complete_no_fec: 90,
+            complete_with_fec: 9,
+            lost: 1,
+            recovery_rate_ppm: 990_000,
+            reconstruct_p50_us: 18,
+            reconstruct_p95_us: 35,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("summary.csv");
+        write_summary_csv(&path, std::slice::from_ref(&s)).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "header + 1 row");
+        assert_eq!(
+            lines[0],
+            "config_id,k,m,drop_ppm,frame_bytes,trials,complete_no_fec,complete_with_fec,lost,recovery_rate_ppm,reconstruct_p50_us,reconstruct_p95_us"
+        );
+        assert_eq!(lines[1], "k8m2-drop50000,8,2,50000,5000,100,90,9,1,990000,18,35");
     }
 }
