@@ -341,6 +341,7 @@ pub async fn run_host(
         // Spawn video loop.
         let tx_video = Arc::clone(&transport);
         let cancel_video = cancel.clone();
+        let cancel_video_propagate = cancel.clone();
         let mut video = tokio::spawn(async move {
             let mut frames_sent = 0u64;
             let mut send_errors = 0u64;
@@ -372,6 +373,7 @@ pub async fn run_host(
                     } => {}
                 }
             }
+            cancel_video_propagate.cancel();
         });
 
         // Spawn audio capture + encode + send loop. If the default output device
@@ -407,11 +409,13 @@ pub async fn run_host(
 
         let audio_transport = Arc::clone(&transport);
         let cancel_audio = cancel.clone();
+        let cancel_audio_propagate = cancel.clone();
         let mut audio_task = tokio::spawn(async move {
             let mut encoder = match OpusEncoder::new() {
                 Ok(e) => e,
                 Err(e) => {
                     warn!(?e, "opus encoder init");
+                    cancel_audio_propagate.cancel();
                     return;
                 }
             };
@@ -445,6 +449,7 @@ pub async fn run_host(
                     }
                 }
             }
+            cancel_audio_propagate.cancel();
         });
 
         // Shared "last clipboard text we received from peer" — used by the
@@ -457,6 +462,7 @@ pub async fn run_host(
         let injector = SendInputInjector::new();
         let input_last_remote = Arc::clone(&last_remote_clipboard);
         let cancel_input = cancel.clone();
+        let cancel_input_propagate = cancel.clone();
         let last_ka_input = Arc::clone(&last_keepalive);
         let mut input = tokio::spawn(async move {
             let mut ft_rx = TransferReceiver::new(FILE_RECV_DIR, DEFAULT_MAX_TRANSFER_BYTES);
@@ -518,6 +524,7 @@ pub async fn run_host(
                     }
                 }
             }
+            cancel_input_propagate.cancel();
         });
 
         // Spawn clipboard watcher. We poll `GetClipboardSequenceNumber` at 50ms
@@ -528,6 +535,7 @@ pub async fn run_host(
         let clip_transport = Arc::clone(&transport);
         let clip_last_remote = Arc::clone(&last_remote_clipboard);
         let cancel_clip = cancel.clone();
+        let cancel_clip_propagate = cancel.clone();
         let mut clip_task = tokio::spawn(async move {
             let mut last_sent: Option<String> = None;
             let mut last_seq = clipboard_sequence_number();
@@ -569,6 +577,7 @@ pub async fn run_host(
                     } => {}
                 }
             }
+            cancel_clip_propagate.cancel();
         });
 
         // Outgoing-dir watcher: poll `args.outgoing_dir` every few seconds.
@@ -578,6 +587,7 @@ pub async fn run_host(
         let ft_transport = Arc::clone(&transport);
         let outgoing_dir = args.outgoing_dir.clone();
         let cancel_outgoing = cancel.clone();
+        let cancel_outgoing_propagate = cancel.clone();
         let mut outgoing_task = tokio::spawn(async move {
             let sent_dir = outgoing_dir.join(FILE_SEND_SENT_SUBDIR);
             loop {
@@ -628,17 +638,15 @@ pub async fn run_host(
                     } => {}
                 }
             }
+            cancel_outgoing_propagate.cancel();
         });
 
         let mut watchdog = watchdog::spawn_watchdog(cancel.clone(), Arc::clone(&last_keepalive));
 
         tokio::select! {
-            _ = &mut video => warn!("video task ended unexpectedly"),
-            _ = &mut input => warn!("input task ended unexpectedly"),
-            _ = &mut audio_task => warn!("audio task ended unexpectedly"),
-            _ = &mut clip_task => warn!("clipboard task ended unexpectedly"),
-            _ = &mut outgoing_task => warn!("outgoing file watcher ended unexpectedly"),
-            _ = &mut watchdog => info!("watchdog cancelled session"),
+            _ = cancel.cancelled() => {
+                info!("session cancelled — joining workers");
+            }
             _ = tokio::signal::ctrl_c() => {
                 info!("ctrl-c received; shutting down");
                 cancel.cancel();
@@ -647,7 +655,7 @@ pub async fn run_host(
             }
         }
 
-        // Cancel any survivors, drain JoinHandles so encoder Drops run before
+        // Cancel any survivors and drain JoinHandles so encoder Drops run before
         // the next handshake (NVENC/MF release GPU resources here).
         cancel.cancel();
         let _ = tokio::join!(video, input, audio_task, clip_task, outgoing_task, watchdog);
