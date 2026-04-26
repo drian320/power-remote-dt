@@ -46,6 +46,7 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
 | `plan4-m2-complete` | `prdt-latency-bench` per-packet 統計 + CSV(loopback p95 ≈ 40µs) |
 | `plan4-m2-full-pipeline-complete` | フル NVENC + MF in-process bench(1080p60 e2e p95 ≈ 19ms) |
 | `plan4-stats-complete` | viewer→host `LatencyReport` 制御メッセージ |
+| `plan4-b1-bench-matrix-complete` | `prdt-bench-matrix` bin(60 構成 sweep:解像度 1080/1440/2160 × bitrate 5/10/20/30/50Mbps × decoder mf/nvdec × fps 60/120)。`run_for_matrix` core 抽出、`MatrixAxes` / `ConfigStats` / `expand_matrix` / `aggregate` / per-frame + summary CSV writer。`scripts/analyze-bench-matrix.py`(per-stage stats、paired NVDEC/MF、stability、outlier、fps-ratio)。実機実測(RTX 3070 Ti、2026-04-26): NVDEC が 29/29 paired 構成で MF より速い(median e2e_p50 ratio 0.83、CV 0.286 vs 0.309、loss 1930 vs 3857 ppm)。viewer の default decoder を `nvdec` に変更。bench-matrix の inter-config delay 250ms で NVENC/NVDEC state leak 解消。NVDEC cfg propagation バグ(latency-bench/build.rs)同時修正(従来 `prdt-latency-bench --consumer nvdec` も decoded=0 だった)。 |
 
 ### Plan 2d — NVDEC 実装
 | タグ | 内容 |
@@ -85,20 +86,23 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
 
 ### **A. すぐ取れる、影響大、規模小**
 
-#### A1. Plan 4 B1-B8 — 実機 2 台ベンチマーク行列
-- **状態**: spec 未作成。phase2-w6 で構築した 2 台 LAN 環境(Machine A: RTX 3070 Ti、Machine B: GTX 1080 + GTX 1080)が手元にある今が好機
-- **何を測るか**(想定):
-  - B1: 解像度マトリクス(1080p / 1440p / 4K)
-  - B2: ビットレートマトリクス(5/10/20/30/50 Mbps)
-  - B3: コーデック比較(H.265 / 将来 AV1)
-  - B4: 経路比較(LAN / loopback / TURN relay)
-  - B5: デコーダ比較(MF / NVDEC)
-  - B6: FEC 効果(k=8 / 32 / 64、m=2 / 6)
-  - B7: input round-trip latency(クリック→画面反映)
-  - B8: 長時間安定性(30分連続接続でのレイテンシ・パケットロス推移)
-- **アウトプット**: CSV + ヒートマップ画像、各設定の glass-to-glass 推奨ガイド
-- **ブロッカー**: Plan 4 M3(カメラ実測)が未着手なので、glass-to-glass の客観値はまだ取れない。CPU タイムスタンプベースで代替する手はある
-- **見積もり**: spec(0.5d)+ plan(0.5d)+ 実装 + 実測(2-3d)
+#### A1. Plan 4 B1-B8 — 実機 2 台ベンチマーク行列(部分完了)
+- **状態**: B1+B2+B5+fps 軸完了(`plan4-b1-bench-matrix-complete`、2026-04-26)。残 B3/B4/B6/B7/B8
+- ~~**B1: 解像度マトリクス(1080p / 1440p / 4K)**~~ ✅
+- ~~**B2: ビットレートマトリクス(5/10/20/30/50 Mbps)**~~ ✅
+- **B3: コーデック比較(H.265 / 将来 AV1)** — NVENC AV1 サポート未実装(Ada Lovelace+ GPU 必要)
+- **B4: 経路比較(LAN / loopback / TURN relay)** — 2 台 LAN 自動化 spec から(別 plan)
+- ~~**B5: デコーダ比較(MF / NVDEC)**~~ ✅
+- **B6: FEC 効果(k=8 / 32 / 64、m=2 / 6)** — transport ベンチ別 spec
+- **B7: input round-trip latency(クリック→画面反映)** — 2 台 LAN 必要
+- **B8: 長時間安定性(30 分連続接続でのレイテンシ・パケットロス推移)** — host/viewer 本体に bench mode 追加
+- **B1+B2+B5 実機結果(RTX 3070 Ti、2026-04-26)**: bench-results/2026-04-26-final/(60 構成、全成功)
+  - NVDEC が 29/29 paired 構成で MF より速い(median e2e_p50 ratio 0.83、17% 高速)
+  - NVDEC: lower jitter (CV 0.286 vs 0.309)、lower loss (1930 vs 3857 ppm)
+  - 1080p: 6.5ms、1440p: 10.6ms、2160p: 23ms 中央値 e2e_p50(NVDEC)
+  - fps を 60→120 にしても e2e ほぼ変わらず(median ratio 0.99、encode 律速)
+- **ブロッカー**: M3(カメラ実測)未着手のため真の glass-to-glass は取れず、`e2e = decode_done - capture` 近似値
+- **見積もり**: 残 B4 (~3d、2 台 LAN)、B6 (~1d)、B7 (~2d、M3 と組み合わせ)、B8 (~1d)
 
 #### ~~A2. Plan 2d optimization — NVDEC 真ゼロコピー~~ — **完了 (2026-04-25, `plan2d-zerocopy-complete`)**
 - ~~CPU バウンス排除~~ → dual R8 + R8G8 D3D11 textures + CUDA-D3D11 interop 経由で達成
