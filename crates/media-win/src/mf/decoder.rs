@@ -20,45 +20,21 @@
 //! `process_output_texture` (Plan 3 Task 2) delivers the decoded frame as a
 //! zero-copy `ID3D11Texture2D` via `IMFDXGIBuffer::GetResource`.
 
-use std::sync::OnceLock;
-
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Media::MediaFoundation::{
     IMFActivate, IMFDXGIBuffer, IMFDXGIDeviceManager, IMFTransform, MFCreateDXGIDeviceManager,
-    MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFStartup,
-    MFTEnumEx, MFVideoFormat_HEVC, MFVideoFormat_NV12, MFSTARTUP_FULL, MFT_CATEGORY_VIDEO_DECODER,
+    MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video,
+    MFTEnumEx, MFVideoFormat_HEVC, MFVideoFormat_NV12, MFT_CATEGORY_VIDEO_DECODER,
     MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_LOCALMFT,
     MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
     MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
     MFT_REGISTER_TYPE_INFO, MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT,
-    MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_VERSION,
+    MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
 };
-use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 
 use crate::d3d11::{D3d11Device, D3d11Texture, TextureFormat};
 use crate::error::{MediaError, Result};
-
-/// One-shot MF + COM initialization. Stores the stringified error so the
-/// `Result` stored inside `OnceLock` remains `Clone`-free (we just format it
-/// on each call).
-static MF_INIT_ERROR: OnceLock<Option<String>> = OnceLock::new();
-
-fn ensure_mf_initialized() -> Result<()> {
-    let err = MF_INIT_ERROR.get_or_init(|| unsafe {
-        // CoInitializeEx returns S_FALSE if COM is already initialized on
-        // this thread; both S_OK and S_FALSE are acceptable.
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        match MFStartup(MF_VERSION, MFSTARTUP_FULL) {
-            Ok(()) => None,
-            Err(e) => Some(format!("MFStartup: {e}")),
-        }
-    });
-    match err {
-        None => Ok(()),
-        Some(msg) => Err(MediaError::Other(format!("MF init error: {msg}"))),
-    }
-}
 
 /// Windows Media Foundation H.265 hardware decoder.
 ///
@@ -83,7 +59,7 @@ pub struct H265Decoder {
 
 impl H265Decoder {
     pub fn new(dev: &D3d11Device, width: u32, height: u32) -> Result<Self> {
-        ensure_mf_initialized()?;
+        super::ensure_mf_runtime()?;
 
         unsafe {
             // 1. Enumerate H.265 decoder MFTs.
