@@ -5,6 +5,7 @@ mod watchdog;
 
 use std::fs;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -268,325 +269,387 @@ pub async fn run_host(
         info!("no --signaling-url; using LAN fixed-address mode");
     }
 
-    info!("waiting for Noise handshake");
-    transport
-        .handshake_as_server(&keypair)
-        .await
-        .context("Noise server handshake")?;
-    info!("Noise handshake complete — encrypted channel established");
+    loop {
+        transport.reset_session().await;
 
-    // Wait for Hello, send HelloAck. Session ID is random per host start so
-    // a reconnect from a viewer that had the old ID cached gets treated as a
-    // fresh session (no stale seq expectations from an earlier run).
-    let session_id: u64 = {
-        use rand_core::{OsRng, RngCore};
-        let mut buf = [0u8; 8];
-        OsRng.fill_bytes(&mut buf);
-        u64::from_le_bytes(buf)
-    };
-    let bitrate_bps = args.bitrate_mbps.saturating_mul(1_000_000);
-    let monitor_rect = MonitorRect::new(
-        output.desktop_rect.left,
-        output.desktop_rect.top,
-        output.desktop_rect.right,
-        output.desktop_rect.bottom,
-    );
-    let vd_rect = virtual_desktop_rect();
-    info!(
-        monitor = ?monitor_rect,
-        virtual_desktop = ?vd_rect,
-        "advertising desktop geometry to viewer",
-    );
-    let req = host_handshake(
-        &*transport,
-        session_id,
-        now_monotonic_us(),
-        bitrate_bps,
-        monitor_rect,
-        vd_rect,
-        Duration::from_secs(60),
-    )
-    .await
-    .context("handshake")?;
-    info!(?req, "handshake complete");
-
-    // Build producer after handshake so the viewer's negotiated params can
-    // eventually influence encoder setup (Phase 0 keeps this fixed).
-    let enc_cfg = NvencEncoderConfig {
-        width: (output.desktop_rect.right - output.desktop_rect.left) as u32,
-        height: (output.desktop_rect.bottom - output.desktop_rect.top) as u32,
-        fps_numerator: 60,
-        fps_denominator: 1,
-        bitrate_bps,
-        gop_length: 60,
-    };
-    let encoder = pick_encoder(&args.encoder, &adapter, &dev, &enc_cfg).context("encoder")?;
-    info!(backend = encoder.backend_name(), "encoder ready");
-    let mut producer =
-        DxgiNvencProducer::with_encoder(&dev, &output, encoder).context("producer")?;
-
-    // Spawn video loop.
-    let tx_video = Arc::clone(&transport);
-    let video = tokio::spawn(async move {
-        let mut frames_sent = 0u64;
-        let mut send_errors = 0u64;
-        let mut last_log = std::time::Instant::now();
-        loop {
-            match producer.next_frame().await {
-                Ok(frame) => {
-                    let nal_len = frame.nal_units.len();
-                    let is_kf = frame.is_keyframe;
-                    if let Err(e) = tx_video.send_video(frame).await {
-                        send_errors += 1;
-                        warn!(?e, nal_len, is_kf, "send_video error; continuing");
-                    } else {
-                        frames_sent += 1;
-                    }
-                    if last_log.elapsed() >= std::time::Duration::from_secs(1) {
-                        info!(frames_sent, send_errors, "host tx stats");
-                        last_log = std::time::Instant::now();
-                    }
-                }
-                Err(e) => {
-                    warn!(?e, "producer error; continuing");
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            }
+        info!("waiting for Noise handshake");
+        if let Err(e) = transport.handshake_as_server(&keypair).await {
+            warn!(?e, "Noise server handshake failed; resetting session");
+            continue;
         }
-    });
+        info!("Noise handshake complete — encrypted channel established");
 
-    // Spawn audio capture + encode + send loop. If the default output device
-    // isn't 48kHz stereo (or loopback fails for any other reason) we log and
-    // skip audio — video/input continue normally.
-    //
-    // `LoopbackCapture` wraps a `cpal::Stream` which is `!Send` on Windows
-    // (WASAPI streams are bound to the creating thread via COM), so it lives
-    // on a dedicated OS thread. The thread hands PCM frames over to the
-    // async encode/send task via a tokio mpsc.
-    let (pcm_async_tx, mut pcm_async_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
-    std::thread::Builder::new()
-        .name("prdt-host-audio-capture".into())
-        .spawn(move || match LoopbackCapture::start() {
-            Ok((cap, mut pcm_rx)) => {
-                // Keep the capture stream alive for the thread's lifetime.
-                let _cap = cap;
-                // Bridge the std-thread-owned blocking receiver to the async
-                // side. The cpal callback sends into a tokio UnboundedReceiver
-                // via `unbounded_send`, which doesn't require a runtime, so we
-                // can block_recv and forward.
-                while let Some(frame) = pcm_rx.blocking_recv() {
-                    if pcm_async_tx.send(frame).is_err() {
-                        break; // async side gone
-                    }
-                }
-            }
+        // Wait for Hello, send HelloAck. Session ID is random per host start so
+        // a reconnect from a viewer that had the old ID cached gets treated as a
+        // fresh session (no stale seq expectations from an earlier run).
+        let session_id: u64 = {
+            use rand_core::{OsRng, RngCore};
+            let mut buf = [0u8; 8];
+            OsRng.fill_bytes(&mut buf);
+            u64::from_le_bytes(buf)
+        };
+        let bitrate_bps = args.bitrate_mbps.saturating_mul(1_000_000);
+        let monitor_rect = MonitorRect::new(
+            output.desktop_rect.left,
+            output.desktop_rect.top,
+            output.desktop_rect.right,
+            output.desktop_rect.bottom,
+        );
+        let vd_rect = virtual_desktop_rect();
+        info!(
+            monitor = ?monitor_rect,
+            virtual_desktop = ?vd_rect,
+            "advertising desktop geometry to viewer",
+        );
+        let req = match host_handshake(
+            &*transport,
+            session_id,
+            now_monotonic_us(),
+            bitrate_bps,
+            monitor_rect,
+            vd_rect,
+            Duration::from_secs(60),
+        )
+        .await
+        {
+            Ok(r) => r,
             Err(e) => {
-                warn!(?e, "audio capture failed; skipping audio");
-            }
-        })
-        .expect("spawn audio capture thread");
-
-    let audio_transport = Arc::clone(&transport);
-    let audio_task = tokio::spawn(async move {
-        let mut encoder = match OpusEncoder::new() {
-            Ok(e) => e,
-            Err(e) => {
-                warn!(?e, "opus encoder init");
-                return;
+                warn!(?e, "host_handshake failed; resetting session");
+                continue;
             }
         };
-        let epoch = std::time::Instant::now();
-        let mut seq = 0u64;
-        while let Some(frame) = pcm_async_rx.recv().await {
-            let opus_bytes = match encoder.encode(&frame) {
-                Ok(b) => b,
-                Err(e) => {
-                    warn!(?e, "opus encode");
-                    continue;
-                }
-            };
-            seq += 1;
-            let pkt = AudioPacket {
-                seq,
-                timestamp_us: epoch.elapsed().as_micros() as u64,
-                opus_bytes,
-            };
-            if let Err(e) = audio_transport.send_audio(pkt).await {
-                warn!(?e, "send_audio");
-            }
-        }
-    });
+        info!(?req, "handshake complete");
 
-    // Shared "last clipboard text we received from peer" — used by the
-    // clipboard watcher to avoid echoing remote updates back to the peer.
-    let last_remote_clipboard: Arc<tokio::sync::Mutex<Option<String>>> =
-        Arc::new(tokio::sync::Mutex::new(None));
+        // Build producer after handshake so the viewer's negotiated params can
+        // eventually influence encoder setup (Phase 0 keeps this fixed).
+        let enc_cfg = NvencEncoderConfig {
+            width: (output.desktop_rect.right - output.desktop_rect.left) as u32,
+            height: (output.desktop_rect.bottom - output.desktop_rect.top) as u32,
+            fps_numerator: 60,
+            fps_denominator: 1,
+            bitrate_bps,
+            gop_length: 60,
+        };
+        let encoder = pick_encoder(&args.encoder, &adapter, &dev, &enc_cfg).context("encoder")?;
+        info!(backend = encoder.backend_name(), "encoder ready");
+        let mut producer =
+            DxgiNvencProducer::with_encoder(&dev, &output, encoder).context("producer")?;
 
-    // Spawn input injection loop.
-    let rx_input = Arc::clone(&transport);
-    let injector = SendInputInjector::new();
-    let input_last_remote = Arc::clone(&last_remote_clipboard);
-    let input = tokio::spawn(async move {
-        let mut ft_rx = TransferReceiver::new(FILE_RECV_DIR, DEFAULT_MAX_TRANSFER_BYTES);
-        loop {
-            match rx_input.recv().await {
-                Ok(ReceivedMessage::Input(ev)) => {
-                    if let Err(e) = injector.inject(ev) {
-                        warn!(?e, "inject error");
-                    }
-                }
-                Ok(ReceivedMessage::Control(ControlMessage::ClipboardText { text })) => {
-                    // Remember this text so the watcher loop doesn't echo it back.
-                    *input_last_remote.lock().await = Some(text.clone());
-                    if let Err(e) = write_clipboard_text(&text) {
-                        warn!(?e, "write_clipboard_text failed");
-                    }
-                }
-                Ok(ReceivedMessage::Control(ControlMessage::Bye)) => {
-                    info!("peer sent Bye");
-                    break;
-                }
-                Ok(ReceivedMessage::Control(ControlMessage::LatencyReport {
-                    samples,
-                    arrival_p50_us,
-                    arrival_p95_us,
-                    decode_p50_us,
-                    decode_p95_us,
-                    present_p50_us,
-                    present_p95_us,
-                    present_p99_us,
-                })) => {
-                    info!(
-                        samples,
-                        arrival_p50_us,
-                        arrival_p95_us,
-                        decode_p50_us,
-                        decode_p95_us,
-                        present_p50_us,
-                        present_p95_us,
-                        present_p99_us,
-                        "viewer latency report",
-                    );
-                }
-                Ok(ReceivedMessage::Control(msg)) => {
-                    let _ = ft_rx.handle(msg);
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    warn!(?e, "recv error");
-                    break;
-                }
-            }
-        }
-    });
+        let cancel = CancellationToken::new();
+        let last_keepalive = Arc::new(AtomicU64::new(now_monotonic_us()));
 
-    // Spawn clipboard watcher. We poll `GetClipboardSequenceNumber` at 50ms
-    // which is cheap (no OpenClipboard handshake, no text copy), and only
-    // actually read the clipboard when the sequence counter moves. This
-    // drops copy-paste lag from the old 500ms polling interval while
-    // keeping CPU use minimal when the clipboard is idle.
-    let clip_transport = Arc::clone(&transport);
-    let clip_last_remote = Arc::clone(&last_remote_clipboard);
-    let clip_task = tokio::spawn(async move {
-        let mut last_sent: Option<String> = None;
-        let mut last_seq = clipboard_sequence_number();
-        loop {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            let seq = clipboard_sequence_number();
-            if seq == last_seq {
-                continue;
-            }
-            last_seq = seq;
-            let current = match read_clipboard_text() {
-                Ok(t) => t,
-                Err(_) => continue, // no text / inaccessible / transient failure
-            };
-            if current.len() > MAX_CLIPBOARD_BYTES {
-                continue;
-            }
-            if last_sent.as_ref() == Some(&current) {
-                continue;
-            }
-            // Skip if this matches what we just received from the peer —
-            // don't echo remote updates back.
-            if clip_last_remote.lock().await.as_ref() == Some(&current) {
-                continue;
-            }
-            if let Err(e) = clip_transport
-                .send_control(ControlMessage::ClipboardText {
-                    text: current.clone(),
-                })
-                .await
-            {
-                warn!(?e, "send clipboard failed");
-            } else {
-                last_sent = Some(current);
-            }
-        }
-    });
-
-    // Outgoing-dir watcher: poll `args.outgoing_dir` every few seconds.
-    // Any regular file (not in the `sent/` subdir, not a dotfile) gets
-    // streamed to the viewer and then moved into `sent/` so we don't
-    // resend on the next poll. The `sent/` subdir is created on demand.
-    let ft_transport = Arc::clone(&transport);
-    let outgoing_dir = args.outgoing_dir.clone();
-    let outgoing_task = tokio::spawn(async move {
-        let sent_dir = outgoing_dir.join(FILE_SEND_SENT_SUBDIR);
-        loop {
-            tokio::time::sleep(OUTGOING_POLL_INTERVAL).await;
-            if !outgoing_dir.is_dir() {
-                continue;
-            }
-            let mut read_dir = match tokio::fs::read_dir(&outgoing_dir).await {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!(?e, path = %outgoing_dir.display(), "read_dir failed");
-                    continue;
-                }
-            };
-            while let Ok(Some(entry)) = read_dir.next_entry().await {
-                let path = entry.path();
-                if !path.is_file() {
-                    continue;
-                }
-                let name = path.file_name().and_then(|s| s.to_str());
-                if name.map_or(true, |n| n.starts_with('.')) {
-                    continue;
-                }
-                info!(path = %path.display(), "sending outgoing file to viewer");
-                match send_file(&*ft_transport, &path, DEFAULT_MAX_TRANSFER_BYTES).await {
-                    Ok(()) => {
-                        if let Err(e) = tokio::fs::create_dir_all(&sent_dir).await {
-                            warn!(?e, "create sent/ subdir failed");
-                            continue;
+        // Spawn video loop.
+        let tx_video = Arc::clone(&transport);
+        let cancel_video = cancel.clone();
+        let mut video = tokio::spawn(async move {
+            let mut frames_sent = 0u64;
+            let mut send_errors = 0u64;
+            let mut last_log = std::time::Instant::now();
+            loop {
+                tokio::select! {
+                    _ = cancel_video.cancelled() => break,
+                    _ = async {
+                        match producer.next_frame().await {
+                            Ok(frame) => {
+                                let nal_len = frame.nal_units.len();
+                                let is_kf = frame.is_keyframe;
+                                if let Err(e) = tx_video.send_video(frame).await {
+                                    send_errors += 1;
+                                    warn!(?e, nal_len, is_kf, "send_video error; continuing");
+                                } else {
+                                    frames_sent += 1;
+                                }
+                                if last_log.elapsed() >= std::time::Duration::from_secs(1) {
+                                    info!(frames_sent, send_errors, "host tx stats");
+                                    last_log = std::time::Instant::now();
+                                }
+                            }
+                            Err(e) => {
+                                warn!(?e, "producer error; continuing");
+                                tokio::time::sleep(Duration::from_millis(10)).await;
+                            }
                         }
-                        let dest = sent_dir.join(path.file_name().unwrap());
-                        let dest = prdt_filetransfer::unique_path(&dest);
-                        if let Err(e) = tokio::fs::rename(&path, &dest).await {
-                            warn!(
-                                ?e,
-                                from = %path.display(),
-                                to = %dest.display(),
-                                "move to sent/ failed; file will be resent on next poll",
-                            );
+                    } => {}
+                }
+            }
+        });
+
+        // Spawn audio capture + encode + send loop. If the default output device
+        // isn't 48kHz stereo (or loopback fails for any other reason) we log and
+        // skip audio — video/input continue normally.
+        //
+        // `LoopbackCapture` wraps a `cpal::Stream` which is `!Send` on Windows
+        // (WASAPI streams are bound to the creating thread via COM), so it lives
+        // on a dedicated OS thread. The thread hands PCM frames over to the
+        // async encode/send task via a tokio mpsc.
+        let (pcm_async_tx, mut pcm_async_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
+        std::thread::Builder::new()
+            .name("prdt-host-audio-capture".into())
+            .spawn(move || match LoopbackCapture::start() {
+                Ok((cap, mut pcm_rx)) => {
+                    // Keep the capture stream alive for the thread's lifetime.
+                    let _cap = cap;
+                    // Bridge the std-thread-owned blocking receiver to the async
+                    // side. The cpal callback sends into a tokio UnboundedReceiver
+                    // via `unbounded_send`, which doesn't require a runtime, so we
+                    // can block_recv and forward.
+                    while let Some(frame) = pcm_rx.blocking_recv() {
+                        if pcm_async_tx.send(frame).is_err() {
+                            break; // async side gone
                         }
                     }
-                    Err(e) => warn!(?e, path = %path.display(), "send_file failed"),
+                }
+                Err(e) => {
+                    warn!(?e, "audio capture failed; skipping audio");
+                }
+            })
+            .expect("spawn audio capture thread");
+
+        let audio_transport = Arc::clone(&transport);
+        let cancel_audio = cancel.clone();
+        let mut audio_task = tokio::spawn(async move {
+            let mut encoder = match OpusEncoder::new() {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!(?e, "opus encoder init");
+                    return;
+                }
+            };
+            let epoch = std::time::Instant::now();
+            let mut seq = 0u64;
+            loop {
+                tokio::select! {
+                    _ = cancel_audio.cancelled() => break,
+                    _ = async {
+                        if let Some(frame) = pcm_async_rx.recv().await {
+                            let opus_bytes = match encoder.encode(&frame) {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    warn!(?e, "opus encode");
+                                    return;
+                                }
+                            };
+                            seq += 1;
+                            let pkt = AudioPacket {
+                                seq,
+                                timestamp_us: epoch.elapsed().as_micros() as u64,
+                                opus_bytes,
+                            };
+                            if let Err(e) = audio_transport.send_audio(pkt).await {
+                                warn!(?e, "send_audio");
+                            }
+                        }
+                    } => {}
                 }
             }
-        }
-    });
+        });
 
-    tokio::select! {
-        _ = video => info!("video task ended"),
-        _ = input => info!("input task ended"),
-        _ = audio_task => info!("audio task ended"),
-        _ = clip_task => info!("clipboard task ended"),
-        _ = outgoing_task => info!("outgoing file watcher ended"),
-        _ = tokio::signal::ctrl_c() => info!("ctrl-c received"),
+        // Shared "last clipboard text we received from peer" — used by the
+        // clipboard watcher to avoid echoing remote updates back to the peer.
+        let last_remote_clipboard: Arc<tokio::sync::Mutex<Option<String>>> =
+            Arc::new(tokio::sync::Mutex::new(None));
+
+        // Spawn input injection loop.
+        let rx_input = Arc::clone(&transport);
+        let injector = SendInputInjector::new();
+        let input_last_remote = Arc::clone(&last_remote_clipboard);
+        let cancel_input = cancel.clone();
+        let last_ka_input = Arc::clone(&last_keepalive);
+        let mut input = tokio::spawn(async move {
+            let mut ft_rx = TransferReceiver::new(FILE_RECV_DIR, DEFAULT_MAX_TRANSFER_BYTES);
+            loop {
+                tokio::select! {
+                    _ = cancel_input.cancelled() => break,
+                    msg = rx_input.recv() => {
+                        match msg {
+                            Ok(ReceivedMessage::Input(ev)) => {
+                                if let Err(e) = injector.inject(ev) {
+                                    warn!(?e, "inject error");
+                                }
+                            }
+                            Ok(ReceivedMessage::Control(ControlMessage::KeepAlive)) => {
+                                last_ka_input.store(now_monotonic_us(), Ordering::Relaxed);
+                            }
+                            Ok(ReceivedMessage::Control(ControlMessage::ClipboardText { text })) => {
+                                // Remember this text so the watcher loop doesn't echo it back.
+                                *input_last_remote.lock().await = Some(text.clone());
+                                if let Err(e) = write_clipboard_text(&text) {
+                                    warn!(?e, "write_clipboard_text failed");
+                                }
+                            }
+                            Ok(ReceivedMessage::Control(ControlMessage::Bye)) => {
+                                info!("peer sent Bye");
+                                break;
+                            }
+                            Ok(ReceivedMessage::Control(ControlMessage::LatencyReport {
+                                samples,
+                                arrival_p50_us,
+                                arrival_p95_us,
+                                decode_p50_us,
+                                decode_p95_us,
+                                present_p50_us,
+                                present_p95_us,
+                                present_p99_us,
+                            })) => {
+                                info!(
+                                    samples,
+                                    arrival_p50_us,
+                                    arrival_p95_us,
+                                    decode_p50_us,
+                                    decode_p95_us,
+                                    present_p50_us,
+                                    present_p95_us,
+                                    present_p99_us,
+                                    "viewer latency report",
+                                );
+                            }
+                            Ok(ReceivedMessage::Control(msg)) => {
+                                let _ = ft_rx.handle(msg);
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                warn!(?e, "recv error");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // Spawn clipboard watcher. We poll `GetClipboardSequenceNumber` at 50ms
+        // which is cheap (no OpenClipboard handshake, no text copy), and only
+        // actually read the clipboard when the sequence counter moves. This
+        // drops copy-paste lag from the old 500ms polling interval while
+        // keeping CPU use minimal when the clipboard is idle.
+        let clip_transport = Arc::clone(&transport);
+        let clip_last_remote = Arc::clone(&last_remote_clipboard);
+        let cancel_clip = cancel.clone();
+        let mut clip_task = tokio::spawn(async move {
+            let mut last_sent: Option<String> = None;
+            let mut last_seq = clipboard_sequence_number();
+            loop {
+                tokio::select! {
+                    _ = cancel_clip.cancelled() => break,
+                    _ = async {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        let seq = clipboard_sequence_number();
+                        if seq == last_seq {
+                            return;
+                        }
+                        last_seq = seq;
+                        let current = match read_clipboard_text() {
+                            Ok(t) => t,
+                            Err(_) => return, // no text / inaccessible / transient failure
+                        };
+                        if current.len() > MAX_CLIPBOARD_BYTES {
+                            return;
+                        }
+                        if last_sent.as_ref() == Some(&current) {
+                            return;
+                        }
+                        // Skip if this matches what we just received from the peer —
+                        // don't echo remote updates back.
+                        if clip_last_remote.lock().await.as_ref() == Some(&current) {
+                            return;
+                        }
+                        if let Err(e) = clip_transport
+                            .send_control(ControlMessage::ClipboardText {
+                                text: current.clone(),
+                            })
+                            .await
+                        {
+                            warn!(?e, "send clipboard failed");
+                        } else {
+                            last_sent = Some(current);
+                        }
+                    } => {}
+                }
+            }
+        });
+
+        // Outgoing-dir watcher: poll `args.outgoing_dir` every few seconds.
+        // Any regular file (not in the `sent/` subdir, not a dotfile) gets
+        // streamed to the viewer and then moved into `sent/` so we don't
+        // resend on the next poll. The `sent/` subdir is created on demand.
+        let ft_transport = Arc::clone(&transport);
+        let outgoing_dir = args.outgoing_dir.clone();
+        let cancel_outgoing = cancel.clone();
+        let mut outgoing_task = tokio::spawn(async move {
+            let sent_dir = outgoing_dir.join(FILE_SEND_SENT_SUBDIR);
+            loop {
+                tokio::select! {
+                    _ = cancel_outgoing.cancelled() => break,
+                    _ = async {
+                        tokio::time::sleep(OUTGOING_POLL_INTERVAL).await;
+                        if !outgoing_dir.is_dir() {
+                            return;
+                        }
+                        let mut read_dir = match tokio::fs::read_dir(&outgoing_dir).await {
+                            Ok(r) => r,
+                            Err(e) => {
+                                warn!(?e, path = %outgoing_dir.display(), "read_dir failed");
+                                return;
+                            }
+                        };
+                        while let Ok(Some(entry)) = read_dir.next_entry().await {
+                            let path = entry.path();
+                            if !path.is_file() {
+                                continue;
+                            }
+                            let name = path.file_name().and_then(|s| s.to_str());
+                            if name.map_or(true, |n| n.starts_with('.')) {
+                                continue;
+                            }
+                            info!(path = %path.display(), "sending outgoing file to viewer");
+                            match send_file(&*ft_transport, &path, DEFAULT_MAX_TRANSFER_BYTES).await {
+                                Ok(()) => {
+                                    if let Err(e) = tokio::fs::create_dir_all(&sent_dir).await {
+                                        warn!(?e, "create sent/ subdir failed");
+                                        return;
+                                    }
+                                    let dest = sent_dir.join(path.file_name().unwrap());
+                                    let dest = prdt_filetransfer::unique_path(&dest);
+                                    if let Err(e) = tokio::fs::rename(&path, &dest).await {
+                                        warn!(
+                                            ?e,
+                                            from = %path.display(),
+                                            to = %dest.display(),
+                                            "move to sent/ failed; file will be resent on next poll",
+                                        );
+                                    }
+                                }
+                                Err(e) => warn!(?e, path = %path.display(), "send_file failed"),
+                            }
+                        }
+                    } => {}
+                }
+            }
+        });
+
+        let mut watchdog = watchdog::spawn_watchdog(cancel.clone(), Arc::clone(&last_keepalive));
+
+        tokio::select! {
+            _ = &mut video => warn!("video task ended unexpectedly"),
+            _ = &mut input => warn!("input task ended unexpectedly"),
+            _ = &mut audio_task => warn!("audio task ended unexpectedly"),
+            _ = &mut clip_task => warn!("clipboard task ended unexpectedly"),
+            _ = &mut outgoing_task => warn!("outgoing file watcher ended unexpectedly"),
+            _ = &mut watchdog => info!("watchdog cancelled session"),
+            _ = tokio::signal::ctrl_c() => {
+                info!("ctrl-c received; shutting down");
+                cancel.cancel();
+                let _ = tokio::join!(video, input, audio_task, clip_task, outgoing_task, watchdog);
+                return Ok(());
+            }
+        }
+
+        // Cancel any survivors, drain JoinHandles so encoder Drops run before
+        // the next handshake (NVENC/MF release GPU resources here).
+        cancel.cancel();
+        let _ = tokio::join!(video, input, audio_task, clip_task, outgoing_task, watchdog);
+        info!("session ended; returning to handshake wait");
     }
-    Ok(())
 }
 
 fn main() -> Result<()> {
