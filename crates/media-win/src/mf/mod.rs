@@ -1,9 +1,10 @@
-//! Media Foundation H.265 decoder support. Encoder lives in
-//! `mf::encoder` (added by Task 4 of mf-encoder-fallback).
+//! Media Foundation H.265 decoder and encoder support.
 
 pub mod decoder;
+pub mod encoder;
 
 pub use decoder::H265Decoder;
+pub use encoder::MfH265Encoder;
 
 use std::sync::OnceLock;
 
