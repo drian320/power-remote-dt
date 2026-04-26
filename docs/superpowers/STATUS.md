@@ -1,9 +1,9 @@
 # power-remote-dt — Project Status & Roadmap
 
 **Last updated:** 2026-04-26
-**Latest tag:** `plan4-b1-bench-matrix-complete`
-**Branch state:** master (all phase work merged) — **Phase 4 完了 + Plan 4 B1 (bench matrix) 完了**
-**Test count:** 283 automated tests across the workspace, all passing
+**Latest tag:** `plan4-b6-fec-bench-complete`
+**Branch state:** master (all phase work merged) — **Phase 4 + Plan 4 B1 + B6 完了**
+**Test count:** 291 automated tests across the workspace, all passing
 
 ---
 
@@ -47,6 +47,7 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
 | `plan4-m2-full-pipeline-complete` | フル NVENC + MF in-process bench(1080p60 e2e p95 ≈ 19ms) |
 | `plan4-stats-complete` | viewer→host `LatencyReport` 制御メッセージ |
 | `plan4-b1-bench-matrix-complete` | `prdt-bench-matrix` bin(60 構成 sweep:解像度 1080/1440/2160 × bitrate 5/10/20/30/50Mbps × decoder mf/nvdec × fps 60/120)。`run_for_matrix` core 抽出、`MatrixAxes` / `ConfigStats` / `expand_matrix` / `aggregate` / per-frame + summary CSV writer。`scripts/analyze-bench-matrix.py`(per-stage stats、paired NVDEC/MF、stability、outlier、fps-ratio)。実機実測(RTX 3070 Ti、2026-04-26): NVDEC が 29/29 paired 構成で MF より速い(median e2e_p50 ratio 0.83、CV 0.286 vs 0.309、loss 1930 vs 3857 ppm)。viewer の default decoder を `nvdec` に変更。bench-matrix の inter-config delay 250ms で NVENC/NVDEC state leak 解消。NVDEC cfg propagation バグ(latency-bench/build.rs)同時修正(従来 `prdt-latency-bench --consumer nvdec` も decoded=0 だった)。 |
+| `plan4-b6-fec-bench-complete` | `prdt-fec-bench` bin(純 CPU FEC アルゴリズム bench、30 構成 sweep: k=8/32/64 × m=2/6 × drop_ppm=0/1%/5%/10%/20%、1000 trials/構成、~30 秒)。`packetize → per-packet drop → FrameAssembler` を直接駆動、transport / GPU / 暗号化なし。`Cfg` / `TrialOutcome { CompleteNoFec, CompleteWithFec, Lost }` / `simulate_one_trial`(xorshift64 RNG で seed-deterministic な drop 判定)/ `aggregate`(recovery_rate_ppm + reconstruct p50/p95)/ `write_summary_csv`(12 列)。8 unit tests。実測結果: drop=0 で 100% 復元、k=8m6 が k=8m2 より drop=20% で +33% の recovery rate(945k vs 610k ppm)、reconstruct latency は k=8 で ~9µs / k=64 で ~270µs。出力は seed-deterministic(timing 列のみ wall-clock ジッター)。`docs/fec-bench.md` に schema + 解釈例。 |
 
 ### Plan 2d — NVDEC 実装
 | タグ | 内容 |
@@ -93,7 +94,7 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
 - **B3: コーデック比較(H.265 / 将来 AV1)** — NVENC AV1 サポート未実装(Ada Lovelace+ GPU 必要)
 - **B4: 経路比較(LAN / loopback / TURN relay)** — 2 台 LAN 自動化 spec から(別 plan)
 - ~~**B5: デコーダ比較(MF / NVDEC)**~~ ✅
-- **B6: FEC 効果(k=8 / 32 / 64、m=2 / 6)** — transport ベンチ別 spec
+- ~~**B6: FEC 効果(k=8 / 32 / 64、m=2 / 6)**~~ ✅(2026-04-26、`plan4-b6-fec-bench-complete`、30 構成、recovery rate + reconstruct latency)
 - **B7: input round-trip latency(クリック→画面反映)** — 2 台 LAN 必要
 - **B8: 長時間安定性(30 分連続接続でのレイテンシ・パケットロス推移)** — host/viewer 本体に bench mode 追加
 - **B1+B2+B5 実機結果(RTX 3070 Ti、2026-04-26)**: bench-results/2026-04-26-final/(60 構成、全成功)
