@@ -123,8 +123,39 @@ The `mf` encoder path calls `MFTEnumEx` with `MFT_ENUM_FLAG_HARDWARE`. This requ
 
 ---
 
+## Known limitations
+
+### NVIDIA's MF HEVC MFT does not honor bitrate hints
+
+On NVIDIA hardware, Windows' MF H.265 encoder MFT (provided by the NVIDIA
+driver) appears to ignore `ICodecAPI` rate-control attributes
+(`AVEncCommonRateControlMode`, `AVEncCommonMeanBitRate`,
+`AVEncCommonMaxBitRate`, `AVEncMPVGOPSize`). At a 20 Mbps target, observed
+frame sizes:
+
+| frame | NVENC (reference) | MF MFT on NVIDIA |
+|---|---|---|
+| IDR | ~50 KB | ~470 KB (uncapped) |
+| P   | ~5 KB  | ~100–300 KB |
+
+This causes the FEC packetizer (per-frame budget ~75 KB) to drop most
+frames after the initial IDR. Use `--encoder nvenc` on NVIDIA hardware
+for production. This is the default auto-select behavior — `--encoder mf`
+is intended for non-NVIDIA fallback only.
+
+### AMD / Intel hardware: untested
+
+The implementation conforms to the Microsoft MFT contract (async event
+protocol, NV12 input, Annex-B output) and should work on AMD VCN and
+Intel QuickSync HEVC encoders. End-to-end smoke testing on those
+platforms has not been performed and may surface additional
+driver-specific quirks.
+
+---
+
 ## Future work
 
 - Live bitrate reconfiguration for `nvenc` (currently a no-op warn; bitrate is set at construction).
 - AV1 backend (`EncoderBackend::Av1Nvenc`) — requires Ada Lovelace (RTX 40-series) GPU.
 - D3D12 Video Encode path (lower CPU overhead on recent drivers).
+- AMD / Intel end-to-end smoke test to verify bitrate compliance on non-NVIDIA MF MFTs.
