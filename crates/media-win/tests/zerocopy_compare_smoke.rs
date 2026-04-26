@@ -52,7 +52,7 @@ async fn compare_mf_vs_nvdec_decode_throughput() {
     let dev = D3d11Device::create(&adapter).expect("D3D11 device");
     let (w, h) = (1920u32, 1080u32);
 
-    let enc = NvencEncoder::new(
+    let mut enc = NvencEncoder::new(
         &dev,
         &NvencEncoderConfig {
             width: w,

@@ -358,7 +358,7 @@ mod tests {
 
         // Encode one IDR + one P-frame so the decoder has enough to
         // actually emit a display picture.
-        let enc = NvencEncoder::new(
+        let mut enc = NvencEncoder::new(
             &dev,
             &NvencEncoderConfig {
                 width: w,

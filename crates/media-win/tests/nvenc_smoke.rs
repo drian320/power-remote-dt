@@ -40,7 +40,7 @@ fn encode_60_frames_1080p_hevc() {
         bitrate_bps: 20_000_000,
         gop_length: 30,
     };
-    let enc = NvencEncoder::new(&dev, &cfg).expect("NVENC encoder creation");
+    let mut enc = NvencEncoder::new(&dev, &cfg).expect("NVENC encoder creation");
 
     let mut total_bytes = 0usize;
     let mut idr_count = 0usize;

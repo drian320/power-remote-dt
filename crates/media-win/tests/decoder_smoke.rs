@@ -31,7 +31,7 @@ fn nvenc_to_mf_decode_round_trip() {
         bitrate_bps: 2_000_000,
         gop_length: 30,
     };
-    let enc = NvencEncoder::new(&dev, &cfg).expect("encoder");
+    let mut enc = NvencEncoder::new(&dev, &cfg).expect("encoder");
     let mut dec = match H265Decoder::new(&dev, cfg.width, cfg.height) {
         Ok(d) => d,
         Err(e) => {

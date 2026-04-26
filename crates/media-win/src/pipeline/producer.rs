@@ -7,6 +7,7 @@ use prdt_protocol::{now_monotonic_us, EncodedFrame, ProducerError, VideoProducer
 
 use crate::d3d11::D3d11Device;
 use crate::dxgi::{AcquiredFrame, DesktopDuplication, OutputInfo};
+use crate::encoder_trait::{Hevc265Encoder, HwHevcEncoder};
 use crate::error::MediaError;
 use crate::nvenc::{NvencEncoder, NvencEncoderConfig};
 
@@ -14,7 +15,7 @@ pub struct DxgiNvencProducer {
     dev: D3d11Device,
     output: OutputInfo,
     dup: DesktopDuplication,
-    encoder: NvencEncoder,
+    encoder: HwHevcEncoder,
     seq: u64,
     idr_pending: bool,
     width: u32,
@@ -40,7 +41,21 @@ impl DxgiNvencProducer {
             bitrate_bps,
             gop_length: 60,
         };
-        let encoder = NvencEncoder::new(dev, &cfg)?;
+        let encoder: HwHevcEncoder = NvencEncoder::new(dev, &cfg)?.into();
+        Self::with_encoder(dev, output, encoder)
+    }
+
+    /// Construct a producer with a pre-built encoder. Used by the host
+    /// bin when it has chosen the backend explicitly (`--encoder mf`,
+    /// etc.) so the producer layer doesn't need a vendor switch.
+    pub fn with_encoder(
+        dev: &D3d11Device,
+        output: &OutputInfo,
+        encoder: HwHevcEncoder,
+    ) -> Result<Self, MediaError> {
+        let dup = DesktopDuplication::new(dev, output)?;
+        let width = dup.width();
+        let height = dup.height();
         Ok(Self {
             dev: dev.clone(),
             output: output.clone(),
