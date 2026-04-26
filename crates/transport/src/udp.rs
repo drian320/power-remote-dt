@@ -203,6 +203,14 @@ impl CustomUdpTransport {
         self.socket.is_relay()
     }
 
+    /// Reset session state so the next `handshake_as_server` accepts a
+    /// fresh peer. Used by the host's outer session loop after a viewer
+    /// disconnects or times out. Idempotent.
+    pub async fn reset_session(&self) {
+        *self.peer.lock().await = None;
+        *self.crypto.lock().await = None;
+    }
+
     async fn current_peer(&self) -> Result<SocketAddr, TransportError> {
         self.peer.lock().await.ok_or_else(|| {
             TransportError::Io(std::io::Error::new(
