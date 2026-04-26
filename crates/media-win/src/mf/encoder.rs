@@ -79,6 +79,7 @@ impl MfH265Encoder {
 
         configure_output_type(&transform, cfg)?;
         configure_input_type(&transform, cfg)?;
+        configure_rate_control(&transform, cfg)?;
         set_low_latency(&transform)?;
 
         let bgra_to_nv12 = BgraToNv12::new(dev, cfg.width, cfg.height)?;
@@ -346,6 +347,48 @@ fn configure_input_type(
         transform
             .SetInputType(0, &in_type, 0)
             .map_err(|e| MediaError::Other(format!("SetInputType: {e}")))?;
+    }
+    Ok(())
+}
+
+fn configure_rate_control(
+    transform: &IMFTransform,
+    cfg: &NvencEncoderConfig,
+) -> Result<(), MediaError> {
+    use windows::Win32::Media::MediaFoundation::{
+        ICodecAPI, CODECAPI_AVEncCommonMaxBitRate, CODECAPI_AVEncCommonMeanBitRate,
+        CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncMPVGOPSize,
+    };
+    // windows-rs 0.58 exposes From<u32> for windows::core::VARIANT (VT_UI4).
+    // ICodecAPI::SetValue takes *const windows_core::VARIANT.
+    let var_u32 = |v: u32| windows::core::VARIANT::from(v);
+
+    unsafe {
+        let codec_api: ICodecAPI = transform
+            .cast()
+            .map_err(|e| MediaError::Other(format!("cast ICodecAPI: {e}")))?;
+
+        // CBR mode = 0 (eAVEncCommonRateControlMode_CBR). Must be set first —
+        // without it the MFT defaults to quality mode and bursts IDRs ~9× over budget.
+        codec_api
+            .SetValue(&CODECAPI_AVEncCommonRateControlMode, &var_u32(0))
+            .map_err(|e| MediaError::Other(format!("SetValue RateControlMode CBR: {e}")))?;
+
+        codec_api
+            .SetValue(&CODECAPI_AVEncCommonMeanBitRate, &var_u32(cfg.bitrate_bps))
+            .map_err(|e| MediaError::Other(format!("SetValue MeanBitRate: {e}")))?;
+
+        // Cap peak at mean + 20% — belt-and-braces on top of CBR.
+        let max_bps = cfg.bitrate_bps.saturating_add(cfg.bitrate_bps / 5);
+        codec_api
+            .SetValue(&CODECAPI_AVEncCommonMaxBitRate, &var_u32(max_bps))
+            .map_err(|e| MediaError::Other(format!("SetValue MaxBitRate: {e}")))?;
+
+        // GOP = 1 second. Forces frequent small IDRs instead of one massive IDR per scene cut.
+        let gop = (cfg.fps_numerator / cfg.fps_denominator).max(1);
+        codec_api
+            .SetValue(&CODECAPI_AVEncMPVGOPSize, &var_u32(gop))
+            .map_err(|e| MediaError::Other(format!("SetValue GOPSize: {e}")))?;
     }
     Ok(())
 }
