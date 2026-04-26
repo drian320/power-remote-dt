@@ -97,15 +97,18 @@ def bucket_frames(frame_df: pd.DataFrame, bucket_seconds: int) -> pd.DataFrame:
 
 
 def e2e_p50_slope_us_per_minute(buckets: pd.DataFrame) -> float:
-    """Linear regression slope of e2e_p50_us across buckets, in
-    µs per bucket. Returns 0.0 for ≤1 row."""
+    """Linear regression slope of e2e_p50_us against wall-clock time,
+    expressed in µs per minute. Uses `bucket_start_s` (seconds since
+    first frame) divided by 60 as the x-axis so the unit is correct
+    regardless of `bucket_seconds`. Returns 0.0 for ≤1 row."""
     n = len(buckets)
     if n <= 1:
         return 0.0
-    x = np.array(buckets["bucket_idx"], dtype=np.float64)
+    x_minutes = np.array(buckets["bucket_start_s"], dtype=np.float64) / 60.0
     y = np.array(buckets["e2e_p50_us"], dtype=np.float64)
-    slope, _intercept = np.polyfit(x, y, 1)
-    # Round to 2 decimal places to suppress floating-point noise from polyfit
+    slope, _intercept = np.polyfit(x_minutes, y, 1)
+    # Round to 2 decimals to suppress polyfit FP noise (~1e-14 for
+    # constant input) so test assertions can use assertEqual exactly.
     return round(float(slope), 2)
 
 
@@ -249,6 +252,33 @@ class TestDriftDetection(unittest.TestCase):
         slope = e2e_p50_slope_us_per_minute(buckets)
         # 200 us increase per 4 buckets = 50 us per bucket
         self.assertEqual(slope, 50.0)
+
+    def test_drift_slope_per_minute_with_30s_buckets(self):
+        # Same 200us increase, but spread over 5 buckets at 30s apart.
+        # Total time: 4 * 30 = 120 seconds = 2 minutes.
+        # Expected slope: 200 us / 2 min = 100 us/min.
+        # If the implementation incorrectly used bucket_idx as x-axis,
+        # it would compute 200 / 4 = 50 us/(bucket-step) and label it
+        # as us/min — wrong by 2x.
+        buckets = pd.DataFrame(
+            {
+                "bucket_idx": list(range(5)),
+                "bucket_start_s": [0, 30, 60, 90, 120],
+                "frames_in_bucket": [60] * 5,
+                "arrival_p50_us": [200] * 5,
+                "arrival_p95_us": [200] * 5,
+                "arrival_p99_us": [200] * 5,
+                "decode_p50_us": [100] * 5,
+                "decode_p95_us": [100] * 5,
+                "decode_p99_us": [100] * 5,
+                "e2e_p50_us": [300, 350, 400, 450, 500],
+                "e2e_p95_us": [400] * 5,
+                "e2e_p99_us": [500] * 5,
+            }
+        )
+        slope = e2e_p50_slope_us_per_minute(buckets)
+        # 200 us / 2 min = 100 us/min
+        self.assertEqual(slope, 100.0)
 
     def test_outlier_buckets_flags_high_p99(self):
         buckets = pd.DataFrame(
