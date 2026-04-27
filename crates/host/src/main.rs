@@ -22,7 +22,7 @@ use prdt_media_win::{
     dxgi::enumerate_outputs_for_adapter, pick_default_adapter, D3d11Device, DxgiNvencProducer,
     Hevc265Encoder, HwHevcEncoder, MfH265Encoder, NvencEncoder, NvencEncoderConfig,
 };
-use prdt_protocol::{wire::AudioPacket, ControlMessage, MonitorRect, VideoProducer};
+use prdt_protocol::{wire::AudioPacket, Codec, ControlMessage, MonitorRect, VideoProducer};
 use prdt_transport::{
     host_handshake, now_monotonic_us, CustomUdpTransport, ReceivedMessage, Transport,
     UdpTransportConfig,
@@ -308,6 +308,7 @@ pub async fn run_host(
             bitrate_bps,
             monitor_rect,
             vd_rect,
+            &[Codec::H265],
             Duration::from_secs(60),
         )
         .await

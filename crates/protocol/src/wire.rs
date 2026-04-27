@@ -655,8 +655,8 @@ pub fn decode_control(buf: &[u8]) -> Result<ControlMessage, ProtocolError> {
     let kind = buf[0];
     // We don't trust `kind` blindly; bincode will decode the whole tagged enum.
     // We keep the leading byte as a fast-path dispatch hint for future optimization.
-    // 0-16 + 20-21 are defined (see ControlMessage::kind_u8); 17-19 reserved.
-    if kind > 21 {
+    // 0-17 + 20-22 are defined (see ControlMessage::kind_u8); 18-19 reserved.
+    if kind > 22 {
         return Err(ProtocolError::UnknownControlKind(kind));
     }
     let msg: ControlMessage = bincode::deserialize(&buf[1..])?;
@@ -671,7 +671,7 @@ mod control_tests {
     #[test]
     fn control_hello_round_trip() {
         let msg = ControlMessage::Hello {
-            protocol_version: 1,
+            protocol_version: 2,
             req_width: 3840,
             req_height: 2160,
             req_fps: 60,
@@ -681,6 +681,37 @@ mod control_tests {
         assert_eq!(buf[0], msg.kind_u8());
         let back = decode_control(&buf).unwrap();
         assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn control_helloreject_round_trip() {
+        let msg = ControlMessage::HelloReject {
+            reason: "host does not support h264".to_string(),
+        };
+        let buf = encode_control(&msg).unwrap();
+        assert_eq!(buf[0], 22);
+        let back = decode_control(&buf).unwrap();
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn control_kind_22_accepted() {
+        // kind 22 (HelloReject) must pass the upper-bound check.
+        let msg = ControlMessage::HelloReject {
+            reason: "x".into(),
+        };
+        let buf = encode_control(&msg).unwrap();
+        assert!(decode_control(&buf).is_ok());
+    }
+
+    #[test]
+    fn control_kind_23_rejected() {
+        // kind 23 is not yet defined; must be rejected at the upper-bound.
+        let buf = vec![23u8];
+        assert!(matches!(
+            decode_control(&buf).unwrap_err(),
+            ProtocolError::UnknownControlKind(23),
+        ));
     }
 
     #[test]

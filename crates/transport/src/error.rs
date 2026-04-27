@@ -14,6 +14,9 @@ pub enum TransportError {
     #[error("handshake timeout")]
     HandshakeTimeout,
 
+    #[error("hello rejected by host: {0}")]
+    HelloRejected(String),
+
     #[error("peer sent Bye")]
     PeerClosed,
 

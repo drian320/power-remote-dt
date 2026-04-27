@@ -20,6 +20,14 @@ impl Codec {
             _ => None,
         }
     }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::H265 => "h265",
+            Self::H264 => "h264",
+            Self::Av1 => "av1",
+        }
+    }
 }
 
 /// A single encoded video frame - one or more NAL units concatenated.
@@ -53,6 +61,25 @@ impl EncodedFrame {
             width,
             height,
             codec: Codec::H265,
+        }
+    }
+
+    pub fn new_h264(
+        seq: u64,
+        timestamp_host_us: u64,
+        is_keyframe: bool,
+        nal_units: Bytes,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        Self {
+            seq,
+            timestamp_host_us,
+            is_keyframe,
+            nal_units,
+            width,
+            height,
+            codec: Codec::H264,
         }
     }
 

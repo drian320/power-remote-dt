@@ -133,6 +133,7 @@ async fn w2_smoke_stun_plus_signaling_plus_noise() {
             10_000_000,
             MonitorRect::new(0, 0, 1920, 1080),
             MonitorRect::new(0, 0, 1920, 1080),
+            &[Codec::H265],
             Duration::from_secs(5),
         )
         .await

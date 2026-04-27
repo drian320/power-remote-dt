@@ -38,6 +38,13 @@ pub enum ControlMessage {
         req_width: u32,
         req_height: u32,
         req_fps: u32,
+        /// Post-Phase-0 semantics: this is the codec the host has been told
+        /// to negotiate for. Pre-Phase-0 the viewer set it to its preferred
+        /// codec. The field name is kept (not renamed) so existing wire
+        /// captures still decode; the host now interprets it as a
+        /// negotiation request, not a viewer-side selection. The host
+        /// replies with HelloReject if the codec is not in its supported
+        /// set.
         codec: Codec,
     },
     /// Host → Viewer.
@@ -53,6 +60,13 @@ pub enum ControlMessage {
         host_monitor_rect: MonitorRect,
         /// Bounding rect of the host's entire virtual desktop (all monitors).
         host_virtual_desktop_rect: MonitorRect,
+        /// Codec the host has chosen for this session. Always one of
+        /// `host_supported_codecs`. Post-Phase-0 the producer/consumer
+        /// dispatch on this value.
+        negotiated_codec: Codec,
+        /// Full set of codecs the host can drive. The viewer uses this for
+        /// `--codec auto` fallback selection in later phases.
+        host_supported_codecs: Vec<Codec>,
     },
     /// Bidirectional.
     Bye,
@@ -123,6 +137,11 @@ pub enum ControlMessage {
     Probe { nonce: [u8; 16] },
     /// Reply to a Probe — echoes the received nonce back to the original sender.
     ProbeAck { nonce: [u8; 16] },
+    /// Host → Viewer. Sent in response to a Hello whose requested codec is
+    /// not in the host's supported set, or whose protocol_version is
+    /// otherwise incompatible. The viewer should surface `reason` and exit.
+    HelloReject { reason: String },
+    // DO NOT INSERT VARIANTS ABOVE THIS LINE — bincode discriminants are wire-stable
 }
 
 impl ControlMessage {
@@ -147,6 +166,7 @@ impl ControlMessage {
             Self::KeepAlive => 17,
             Self::Probe { .. } => 20,
             Self::ProbeAck { .. } => 21,
+            Self::HelloReject { .. } => 22,
         }
     }
 }
@@ -158,7 +178,7 @@ mod tests {
     #[test]
     fn control_kinds_are_stable() {
         let hello = ControlMessage::Hello {
-            protocol_version: 1,
+            protocol_version: 2,
             req_width: 3840,
             req_height: 2160,
             req_fps: 60,
@@ -167,6 +187,43 @@ mod tests {
         assert_eq!(hello.kind_u8(), 0);
         assert_eq!(ControlMessage::Bye.kind_u8(), 2);
         assert_eq!(ControlMessage::RequestIdr.kind_u8(), 5);
+    }
+
+    #[test]
+    fn helloreject_kind_is_stable() {
+        let r = ControlMessage::HelloReject {
+            reason: "nope".into(),
+        };
+        assert_eq!(r.kind_u8(), 22);
+    }
+
+    #[test]
+    fn helloreject_round_trip() {
+        let msg = ControlMessage::HelloReject {
+            reason: "host does not support h264".to_string(),
+        };
+        let bytes = bincode::serialize(&msg).unwrap();
+        let back: ControlMessage = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(msg, back);
+    }
+
+    #[test]
+    fn helloack_negotiated_codec_round_trip() {
+        let msg = ControlMessage::HelloAck {
+            session_id: 0xCAFEBABE,
+            host_monotonic_base_us: 42,
+            neg_width: 1920,
+            neg_height: 1080,
+            neg_fps: 60,
+            neg_bitrate_bps: 30_000_000,
+            host_monitor_rect: MonitorRect::new(0, 0, 1920, 1080),
+            host_virtual_desktop_rect: MonitorRect::new(0, 0, 1920, 1080),
+            negotiated_codec: Codec::H264,
+            host_supported_codecs: vec![Codec::H265, Codec::H264],
+        };
+        let bytes = bincode::serialize(&msg).unwrap();
+        let back: ControlMessage = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(msg, back);
     }
 
     #[test]

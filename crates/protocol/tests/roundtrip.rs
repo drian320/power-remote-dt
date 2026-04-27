@@ -86,6 +86,8 @@ fn full_control_datagram_round_trip() {
         neg_bitrate_bps: 50_000_000,
         host_monitor_rect: MonitorRect::new(0, 0, 3840, 2160),
         host_virtual_desktop_rect: MonitorRect::new(0, 0, 5760, 2160),
+        negotiated_codec: prdt_protocol::frame::Codec::H265,
+        host_supported_codecs: vec![prdt_protocol::frame::Codec::H265],
     };
     let body = encode_control(&msg).unwrap();
     let hdr = PacketHeader {
