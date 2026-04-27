@@ -80,8 +80,13 @@ impl NvdecD3d11Consumer {
     /// downstream renderer is `DualPlaneYuvRenderer` rather than
     /// `Nv12Renderer`. Must be called on the thread that owns the D3D11
     /// immediate context (the viewer's event-loop thread).
+    ///
+    /// Returns `Arc<DualPlaneFrame>` so the underlying decoder can publish
+    /// the frame lock-free via `arc-swap` without copying the texture
+    /// handles. Cheap to clone via `Arc::clone` if multiple stages need
+    /// to observe the same frame.
     #[cfg(prdt_nvdec_bindings)]
-    pub fn take_latest_dual_plane(&self) -> Option<DualPlaneFrame> {
+    pub fn take_latest_dual_plane(&self) -> Option<Arc<DualPlaneFrame>> {
         self.decoder.take_latest_dual_plane()
     }
 }
@@ -390,7 +395,10 @@ mod tests {
             .expect("NVDEC should have produced at least one dual-plane frame");
         assert_eq!(dual.width, w);
         assert_eq!(dual.height, h);
-        assert_eq!(dual.y_tex.format(), crate::d3d11::TextureFormat::R8);
-        assert_eq!(dual.uv_tex.format(), crate::d3d11::TextureFormat::R8G8);
+        assert_eq!(dual.y_tex_raw().format(), crate::d3d11::TextureFormat::R8);
+        assert_eq!(
+            dual.uv_tex_raw().format(),
+            crate::d3d11::TextureFormat::R8G8
+        );
     }
 }

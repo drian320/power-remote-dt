@@ -13,6 +13,11 @@ tracing = { workspace = true }
 bytes = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
 libloading = "0.8"
+# arc-swap: lock-free Arc-as-atomic-cell. Used to publish the latest decoded
+# DualPlaneFrame from the cuvid display callback to the viewer thread without
+# acquiring a Mutex on the hot path. Not in workspace deps because no other
+# crate currently consumes it.
+arc-swap = "1"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",

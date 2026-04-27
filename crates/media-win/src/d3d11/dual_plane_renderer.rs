@@ -203,8 +203,8 @@ impl DualPlaneYuvRenderer {
             }
             srv.ok_or_else(|| MediaError::Other("CreateShaderResourceView returned null".into()))
         };
-        let y_srv = make_srv(&frame.y_tex, DXGI_FORMAT_R8_UNORM)?;
-        let uv_srv = make_srv(&frame.uv_tex, DXGI_FORMAT_R8G8_UNORM)?;
+        let y_srv = make_srv(frame.y_tex_raw(), DXGI_FORMAT_R8_UNORM)?;
+        let uv_srv = make_srv(frame.uv_tex_raw(), DXGI_FORMAT_R8G8_UNORM)?;
 
         let viewport = D3D11_VIEWPORT {
             TopLeftX: 0.0,

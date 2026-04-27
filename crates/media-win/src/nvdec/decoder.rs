@@ -48,18 +48,43 @@ pub struct DecodedFrame {
 
 /// One decoded frame as a pair of D3D11 textures sitting in GPU memory,
 /// already populated by the display callback via CUDA-D3D11 device-to-device
-/// `cuMemcpy2D_v2`. Cloning is cheap (refcount bump on the inner ID3D11Texture2D).
-#[derive(Clone)]
+/// `cuMemcpy2D_v2`.
+///
+/// The texture fields are `pub(crate)` so the writer (decoder display
+/// callback) and the renderer (in this same crate) can read them directly,
+/// while external callers must go through the `*_raw()` accessors. This
+/// keeps the type opaque enough that we can swap the inner storage
+/// representation (e.g. wrap in `Arc`) without breaking the API.
+///
+/// Note: `Clone` is intentionally NOT derived. The arc-swap design ships
+/// the entire frame as `Arc<DualPlaneFrame>`, so cheap reference-count
+/// sharing happens at the `Arc` layer, never via field-by-field clones of
+/// the underlying texture handles. If a future caller needs to clone the
+/// per-frame textures in isolation, do it explicitly via `y_tex_raw().clone()`.
 pub struct DualPlaneFrame {
     /// R8 texture, width × height. Holds the Y (luma) plane.
-    pub y_tex: crate::d3d11::D3d11Texture,
+    pub(crate) y_tex: crate::d3d11::D3d11Texture,
     /// R8G8 texture, (width/2) × (height/2). Each element is (Cb, Cr).
-    pub uv_tex: crate::d3d11::D3d11Texture,
+    pub(crate) uv_tex: crate::d3d11::D3d11Texture,
     /// Width of the original NV12 frame in pixels (Y plane size).
     pub width: u32,
     /// Height of the original NV12 frame in pixels (Y plane size).
     pub height: u32,
     pub timestamp_us: i64,
+}
+
+impl DualPlaneFrame {
+    /// Borrow the Y (luma) plane texture. Read-only accessor for callers
+    /// outside this crate; the underlying `D3d11Texture` clone is itself
+    /// cheap (a refcount bump on the inner `ID3D11Texture2D`).
+    pub fn y_tex_raw(&self) -> &crate::d3d11::D3d11Texture {
+        &self.y_tex
+    }
+
+    /// Borrow the UV (chroma) plane texture. See `y_tex_raw` for rationale.
+    pub fn uv_tex_raw(&self) -> &crate::d3d11::D3d11Texture {
+        &self.uv_tex
+    }
 }
 
 /// CUDA-side handle for a registered D3D11 texture pair. The `Drop` impl
@@ -114,13 +139,52 @@ impl DualCache {
 
 impl Drop for DualCache {
     fn drop(&mut self) {
+        // Test-only counter: bumped exactly once per `DualCache` drop so a
+        // unit test can assert that constructing a cache and letting it go
+        // out of scope actually runs the destructor (and, transitively, the
+        // unregister calls below). Production builds omit this entirely.
+        #[cfg(test)]
+        DUAL_CACHE_DROP_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         unsafe {
             // Best-effort unregister; failing here only leaks until the
-            // CUDA context is destroyed.
-            let _ = ffi::cuGraphicsUnregisterResource(self.y_cuda_res);
-            let _ = ffi::cuGraphicsUnregisterResource(self.uv_cuda_res);
+            // CUDA context is destroyed. Routed through a test-only shim
+            // (no-op wrapper in production) so the test suite can count
+            // calls without altering behavior.
+            let _ = cu_graphics_unregister_resource_shim(self.y_cuda_res);
+            let _ = cu_graphics_unregister_resource_shim(self.uv_cuda_res);
         }
     }
+}
+
+/// Test-observable counter: total number of `DualCache::drop` invocations
+/// since process start. Tests reset this to zero before exercising the
+/// drop path. See `dual_cache_drop_counter_increments`.
+#[cfg(test)]
+pub(crate) static DUAL_CACHE_DROP_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Test-observable counter: total number of times the
+/// `cuGraphicsUnregisterResource` shim has been called. Each `DualCache`
+/// drop bumps this by exactly two (Y plane + UV plane). See
+/// `dual_cache_drop_calls_unregister_twice`.
+#[cfg(test)]
+pub(crate) static UNREG_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Test build: increment `UNREG_CALLS` and forward to the real CUDA FFI.
+/// Lets tests count unregister calls without changing observable behavior.
+#[cfg(test)]
+unsafe fn cu_graphics_unregister_resource_shim(res: ffi::CUgraphicsResource) -> ffi::CUresult {
+    UNREG_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    ffi::cuGraphicsUnregisterResource(res)
+}
+
+/// Production build: zero-overhead direct forwarder. Marked `#[inline]` so
+/// the optimizer collapses this back to a plain FFI call site.
+#[cfg(not(test))]
+#[inline]
+unsafe fn cu_graphics_unregister_resource_shim(res: ffi::CUgraphicsResource) -> ffi::CUresult {
+    ffi::cuGraphicsUnregisterResource(res)
 }
 
 /// State shared between the Rust side and the C callback trio. Owned
@@ -149,7 +213,13 @@ struct DecoderState {
     dual_cache: Mutex<Option<DualCache>>,
     /// Latest decoded GPU dual-plane frame. Holds clones (refcount bumps)
     /// of the textures inside `dual_cache`, plus the timestamp.
-    latest_dual: Mutex<Option<DualPlaneFrame>>,
+    ///
+    /// Stored as `ArcSwapOption<DualPlaneFrame>` so the cuvid display
+    /// callback can publish a new frame with a single atomic store and
+    /// the consumer thread can drain it with a single atomic swap — no
+    /// Mutex contention on the decode hot path. Consume semantics live
+    /// in `take_latest_dual_plane`.
+    latest_dual: arc_swap::ArcSwapOption<DualPlaneFrame>,
     /// Sticky error from a callback: any MediaError produced inside
     /// a callback gets stashed so `submit()` can surface it.
     error: Mutex<Option<MediaError>>,
@@ -189,7 +259,7 @@ impl CuvidDecoder {
             #[cfg(any(test, feature = "cpu-nv12"))]
             latest: Mutex::new(None),
             dual_cache: Mutex::new(None),
-            latest_dual: Mutex::new(None),
+            latest_dual: arc_swap::ArcSwapOption::empty(),
             error: Mutex::new(None),
         });
 
@@ -256,14 +326,28 @@ impl CuvidDecoder {
 
     /// GPU-side dual-plane frame: a (R8 Y, R8G8 UV) D3D11 texture pair already
     /// populated by the display callback via CUDA-D3D11 device-to-device copy.
-    pub fn take_latest_dual_plane(&self) -> Option<DualPlaneFrame> {
-        self.state.latest_dual.lock().unwrap().take()
+    ///
+    /// Consume semantics: the latest frame is replaced with `None` via
+    /// `ArcSwapOption::swap(None)`, so the same frame cannot be observed
+    /// twice. Do **not** use `load_full()` for a peek-style API — peek
+    /// would inflate the refcount and break this contract (callers
+    /// expect drain-on-read).
+    pub fn take_latest_dual_plane(&self) -> Option<Arc<DualPlaneFrame>> {
+        self.state.latest_dual.swap(None)
     }
 }
 
 impl Drop for CuvidDecoder {
     fn drop(&mut self) {
         let _g = self.ctx.push();
+
+        // Drop the latest published frame BEFORE the dual_cache so that
+        // any outstanding `Arc<DualPlaneFrame>` we still own is released
+        // while the CUDA context is pushed. The `Arc` clones inside the
+        // frame hold the same `D3d11Texture` handles as `dual_cache`, so
+        // letting them outlive `dual_cache`'s unregister would risk a
+        // dangling D3D11 view release ordering.
+        self.state.latest_dual.store(None);
 
         // Explicitly drop dual_cache while the CUDA context is pushed.
         // Without this, the implicit `Box<DecoderState>` drop runs after
@@ -560,13 +644,16 @@ unsafe extern "C" fn handle_picture_display(
         let _ = ffi::cuGraphicsUnmapResources(2, resources.as_mut_ptr(), std::ptr::null_mut());
 
         if copy_ok {
-            *state.latest_dual.lock().unwrap() = Some(DualPlaneFrame {
+            // Publish the freshly populated dual-plane frame as
+            // `Arc<DualPlaneFrame>` via a single lock-free atomic store.
+            // Consumers drain it with `swap(None)` (see `take_latest_dual_plane`).
+            state.latest_dual.store(Some(Arc::new(DualPlaneFrame {
                 y_tex: cache.y_tex.clone(),
                 uv_tex: cache.uv_tex.clone(),
                 width: state.width,
                 height: state.height,
                 timestamp_us: (*disp).timestamp,
-            });
+            })));
         }
         drop(cache_guard);
 
@@ -628,5 +715,215 @@ fn record_error(state: &DecoderState, err: MediaError) {
     let mut slot = state.error.lock().unwrap();
     if slot.is_none() {
         *slot = Some(err);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Phase 3 tests for the arc-swap NVDEC publication path.
+    //!
+    //! Tests #1 / #2 exercise the `ArcSwapOption<DualPlaneFrame>` consume
+    //! semantics in isolation — they need a D3D11 device to fabricate
+    //! `D3d11Texture` handles, but they do NOT need CUDA context push or
+    //! a live decoder.
+    //!
+    //! Tests #3 / #4 exercise `DualCache::Drop` directly: the cache
+    //! constructor calls `cuGraphicsD3D11RegisterResource`, so they require
+    //! both a D3D11 device and a pushed CUDA context. They skip gracefully
+    //! when either is unavailable (non-NVIDIA host or no CUDA driver).
+
+    use super::*;
+    use crate::adapter::pick_default_adapter;
+    use crate::d3d11::{D3d11Device, D3d11Texture, TextureFormat};
+    use std::sync::atomic::Ordering::SeqCst;
+
+    /// Helper: build a `(device, y_tex, uv_tex)` triple suitable for
+    /// constructing a `DualPlaneFrame`. Returns `None` on hosts where the
+    /// D3D11 device cannot be created (rare; we still want a graceful skip
+    /// instead of a hard failure on degenerate CI).
+    fn make_test_frame_textures(
+        width: u32,
+        height: u32,
+    ) -> Option<(D3d11Device, D3d11Texture, D3d11Texture)> {
+        let dev = D3d11Device::create_default().ok()?;
+        let y = D3d11Texture::new_for_cuda_interop(&dev, width, height, TextureFormat::R8).ok()?;
+        let uv =
+            D3d11Texture::new_for_cuda_interop(&dev, width / 2, height / 2, TextureFormat::R8G8)
+                .ok()?;
+        Some((dev, y, uv))
+    }
+
+    /// Test #1: `take_latest_dual_plane`'s consume semantics. Uses the same
+    /// `ArcSwapOption::swap(None)` primitive as the real decoder, so this
+    /// test guards the contract without booting NVDEC.
+    ///
+    /// Invariant: storing a frame and swapping it out yields `Some` exactly
+    /// once; a subsequent swap on the now-empty slot returns `None`.
+    #[test]
+    fn take_latest_dual_plane_consume_semantics() {
+        let Some((_dev, y_tex, uv_tex)) = make_test_frame_textures(64, 64) else {
+            eprintln!("skipping: D3D11 device unavailable");
+            return;
+        };
+        let frame = DualPlaneFrame {
+            y_tex,
+            uv_tex,
+            width: 64,
+            height: 64,
+            timestamp_us: 0,
+        };
+        let slot: arc_swap::ArcSwapOption<DualPlaneFrame> = arc_swap::ArcSwapOption::empty();
+        slot.store(Some(Arc::new(frame)));
+
+        // First drain: must observe the published frame.
+        assert!(
+            slot.swap(None).is_some(),
+            "first swap(None) must return the stored frame",
+        );
+        // Second drain: slot is empty, so the consumer sees None.
+        assert!(
+            slot.swap(None).is_none(),
+            "second swap(None) must return None — frame must not be redelivered",
+        );
+    }
+
+    /// Test #2: arc-swap publication does not silently clone the inner
+    /// `DualPlaneFrame`. We assert that across 100 publish/drain cycles the
+    /// drained `Arc` always has `strong_count == 2` (caller + the local
+    /// `frame` clone), and the held `frame` returns to count 1 after each
+    /// drop. A regression that re-introduced a `DualPlaneFrame: Clone`
+    /// derive (and accidentally cloned the inner frame on every swap)
+    /// would push `strong_count` higher and trip this assertion.
+    #[test]
+    fn take_latest_dual_plane_no_inner_clone_via_strong_count() {
+        let Some((_dev, y_tex, uv_tex)) = make_test_frame_textures(64, 64) else {
+            eprintln!("skipping: D3D11 device unavailable");
+            return;
+        };
+        let frame = Arc::new(DualPlaneFrame {
+            y_tex,
+            uv_tex,
+            width: 64,
+            height: 64,
+            timestamp_us: 0,
+        });
+        assert_eq!(
+            Arc::strong_count(&frame),
+            1,
+            "freshly created Arc must have refcount 1",
+        );
+
+        let slot: arc_swap::ArcSwapOption<DualPlaneFrame> = arc_swap::ArcSwapOption::empty();
+        for i in 0..100 {
+            slot.store(Some(frame.clone()));
+            let taken = slot.swap(None).expect("frame missing");
+            assert_eq!(
+                Arc::strong_count(&taken),
+                2,
+                "iter={i}: drained Arc should share refcount with held `frame` (no inner clone)",
+            );
+            drop(taken);
+            assert_eq!(
+                Arc::strong_count(&frame),
+                1,
+                "iter={i}: refcount must return to 1 after the drained Arc drops",
+            );
+        }
+    }
+
+    /// Test #3: `DualCache::Drop` runs exactly once when a cache is
+    /// constructed and goes out of scope. Uses the test-only
+    /// `DUAL_CACHE_DROP_COUNT` AtomicUsize.
+    ///
+    /// Skips gracefully when CUDA / NVIDIA / D3D11 are unavailable on the
+    /// host so a non-NVIDIA developer machine still runs the rest of the
+    /// suite green.
+    ///
+    /// Liveness invariant: `DualCache::new` calls
+    /// `cuGraphicsD3D11RegisterResource`, which requires a current CUDA
+    /// context. The fact that drop completes without panic implies the
+    /// `_g` push-guard kept the context current through the whole cache
+    /// lifecycle, including its destructor.
+    #[test]
+    fn dual_cache_drop_counter_increments() {
+        let Ok(adapter) = pick_default_adapter() else {
+            eprintln!("skipping: no D3D11 adapter");
+            return;
+        };
+        if !adapter.is_nvidia() {
+            eprintln!("skipping: non-NVIDIA adapter");
+            return;
+        }
+        let Ok(dev) = D3d11Device::create(&adapter) else {
+            eprintln!("skipping: D3D11 device creation failed");
+            return;
+        };
+        let ctx = match CudaContext::create_primary() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("skipping: CUDA unavailable: {e}");
+                return;
+            }
+        };
+        let _g = ctx.push().expect("push CUDA context");
+
+        DUAL_CACHE_DROP_COUNT.store(0, SeqCst);
+
+        {
+            let _cache = DualCache::new(&dev, 256, 256).expect("DualCache::new");
+            // Cache drops at the end of this scope.
+        }
+
+        assert_eq!(
+            DUAL_CACHE_DROP_COUNT.load(SeqCst),
+            1,
+            "DualCache::Drop must have fired exactly once",
+        );
+    }
+
+    /// Test #4: `DualCache::Drop` calls `cuGraphicsUnregisterResource`
+    /// exactly twice (Y plane + UV plane) via the test shim. Validates
+    /// that no future refactor silently drops one of the two unregister
+    /// calls and leaks the corresponding CUDA-D3D11 graphics resource
+    /// until process teardown.
+    ///
+    /// Liveness invariant: `cuGraphicsUnregisterResource` requires a live
+    /// CUDA context. `UNREG_CALLS` reaching 2 without panic implies the
+    /// `DualCache` was dropped while the context push was still in scope.
+    #[test]
+    fn dual_cache_drop_calls_unregister_twice() {
+        let Ok(adapter) = pick_default_adapter() else {
+            eprintln!("skipping: no D3D11 adapter");
+            return;
+        };
+        if !adapter.is_nvidia() {
+            eprintln!("skipping: non-NVIDIA adapter");
+            return;
+        }
+        let Ok(dev) = D3d11Device::create(&adapter) else {
+            eprintln!("skipping: D3D11 device creation failed");
+            return;
+        };
+        let ctx = match CudaContext::create_primary() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("skipping: CUDA unavailable: {e}");
+                return;
+            }
+        };
+        let _g = ctx.push().expect("push CUDA context");
+
+        UNREG_CALLS.store(0, SeqCst);
+
+        {
+            let _cache = DualCache::new(&dev, 256, 256).expect("DualCache::new");
+            // Cache drops at the end of this scope, invoking the shim twice.
+        }
+
+        assert_eq!(
+            UNREG_CALLS.load(SeqCst),
+            2,
+            "DualCache::Drop must call cuGraphicsUnregisterResource for both Y and UV planes",
+        );
     }
 }

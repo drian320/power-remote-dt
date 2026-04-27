@@ -34,8 +34,11 @@ enum LatestFrame {
     /// Dual-plane (R8 Y, R8G8 UV) frame from
     /// `NvdecD3d11Consumer::take_latest_dual_plane`. Only constructed when
     /// `prdt_nvdec_bindings` cfg is set.
+    ///
+    /// Wrapped in `Arc` because the decoder publishes via arc-swap; we
+    /// receive the same `Arc` the writer constructed, with no extra clone.
     #[cfg(prdt_nvdec_bindings)]
-    DualPlane(prdt_media_win::DualPlaneFrame),
+    DualPlane(std::sync::Arc<prdt_media_win::DualPlaneFrame>),
 }
 
 /// Decoder-selected consumer. Held behind the recv task's
@@ -572,7 +575,9 @@ impl ViewerApp {
                     }
                     #[cfg(prdt_nvdec_bindings)]
                     (ViewerRenderer::Nvdec(rnv), LatestFrame::DualPlane(dpl)) => {
-                        if let Err(e) = rnv.render(dpl, &render.swap) {
+                        // `dpl: &Arc<DualPlaneFrame>` — deref through the
+                        // Arc to hand the renderer a plain `&DualPlaneFrame`.
+                        if let Err(e) = rnv.render(dpl.as_ref(), &render.swap) {
                             warn!(?e, "DualPlaneYuvRenderer::render failed");
                         }
                     }
