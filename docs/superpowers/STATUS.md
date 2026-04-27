@@ -1,10 +1,11 @@
 # power-remote-dt — Project Status & Roadmap
 
 **Last updated:** 2026-04-27
-**Latest tag:** `host-session-liveness-complete`
-**Branch state:** master (all phase work merged) — **Phase 4 + Plan 4 B1 + B4 + B6 + B7 + B8 完了 + MF エンコーダ fallback 完了 + host session liveness (heartbeat + watchdog) 完了 (B3 のみ HW ブロック保留)**
-**Test count:** 315 automated Rust tests + 11 Python tests, all passing
+**Latest tag:** `nvdec-arcswap-complete`
+**Branch state:** master (all phase work merged) — **Phase 4 + Plan 4 B1 + B4 + B6 + B7 + B8 完了 + MF エンコーダ fallback 完了 + host session liveness 完了 + NVDEC arc-swap 化 完了 (B3 のみ HW ブロック保留)**
+**Test count:** 315 automated Rust tests + 11 Python tests, all passing (4 NVDEC arcswap tests を含む)
 
+| `nvdec-arcswap-complete` | NVDEC `latest_dual` を `Mutex<Option<DualPlaneFrame>>` から `arc_swap::ArcSwapOption<DualPlaneFrame>` に置換、`take_latest_dual_plane(&self) -> Option<Arc<DualPlaneFrame>>` で `swap(None)` の consume セマンティクス。`DualPlaneFrame` は `#[derive(Clone)]` 削除 + `pub(crate)` フィールド + `y_tex_raw()`/`uv_tex_raw()` accessor で外部からの inner clone を型レベル封鎖、reader 側 `ID3D11Texture2D::AddRef` 倍化を排除。`CuvidDecoder::Drop` で `latest_dual.store(None)` を `dual_cache=None` の前に挿入し CUDA context 生存中に Arc release。新規テスト 4 本 (consume 契約、`Arc::strong_count` 不変条件 100-iter、`DualCache::Drop` カウンタ、`cuGraphicsUnregisterResource` shim カウンタ; Drop 順序は liveness invariant で間接保証、prod 型汚染なし)。N=5 baseline (host-session-liveness 子) vs N=5 arcswap 計測で primary 2 指標両方とも改善: `e2e_p99` -26% (28.9ms→21.3ms)、`decode_p99` -44% (7.2ms→4.0ms)、加えて run-to-run spread が `e2e_p99` で 97% 削減 (39.6ms→1.1ms) と tail 安定性大幅向上。全 7 指標で acceptance pass (regression guard `median+2σ` 内)。`arc-swap = "1"` を crate-local dep に追加 (workspace 昇格せず)。ralplan consensus iteration 4 で APPROVE (Planner→Architect→Critic 4 周)。ADR `docs/adr/2026-04-27-nvdec-latest-dual-arcswap.md` 9 セクション完備。 |
 | `host-session-liveness-complete` | viewer 1Hz `KeepAlive` heartbeat、host 5s watchdog、`CancellationToken` 配下で全 worker tearing down → outer loop で `reset_session` + 再 handshake。viewer 異常終了でも host 再起動なしで 5-7 秒以内に新セッション受け入れ。`recv_raw_unencrypted` + encrypted recv で `WSAECONNRESET` (stale ICMP) フィルタ。3 cycle smoke ok、0 panic。 |
 
 ---
