@@ -7,6 +7,7 @@ license.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 prdt-protocol = { path = "../protocol" }
+prdt-media-sw = { path = "../media-sw", optional = true }
 async-trait = "0.1"
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -45,3 +46,8 @@ default = []
 # regression tests that compare CPU and GPU output pixel-by-pixel; off by
 # default in production where it would slow the decode loop by 2 PCIe copies.
 cpu-nv12 = []
+# Enables the CPU→GPU NV12 upload path used by the openh264 SW decoder.
+# Builds `CpuI420Uploader` and pulls in `prdt-media-sw` for the I420→NV12
+# conversion helper. Distinct from `cpu-nv12` (which is a *readback* path
+# used only by NVDEC regression tests).
+i420-upload = ["dep:prdt-media-sw"]

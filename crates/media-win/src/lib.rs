@@ -4,6 +4,8 @@
 #![cfg(windows)]
 
 pub mod adapter;
+#[cfg(feature = "i420-upload")]
+pub mod cpu_i420_upload;
 pub mod d3d11;
 pub mod dxgi;
 pub mod encoder_trait;
@@ -14,6 +16,9 @@ pub mod nvenc;
 pub mod pipeline;
 pub mod platform;
 pub mod synthetic;
+
+#[cfg(feature = "i420-upload")]
+pub use cpu_i420_upload::CpuI420Uploader;
 
 #[cfg(prdt_nvdec_bindings)]
 pub use crate::nvdec::decoder::DualPlaneFrame;

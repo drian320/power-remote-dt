@@ -32,6 +32,7 @@ path = "src/bin/net-profile-bench.rs"
 [dependencies]
 prdt-protocol = { path = "../protocol" }
 prdt-transport = { path = "../transport" }
+prdt-media-sw = { path = "../media-sw" }
 tokio.workspace = true
 clap.workspace = true
 tracing.workspace = true

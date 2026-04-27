@@ -15,7 +15,11 @@ use prdt_input_win::{
 };
 #[cfg(prdt_nvdec_bindings)]
 use prdt_media_win::NvdecD3d11Consumer;
-use prdt_media_win::{pick_default_adapter, D3d11Device, MfD3d11Consumer, Nv12Renderer, SwapChain};
+use prdt_media_win::{
+    pick_default_adapter, CpuI420Uploader, D3d11Device, MfD3d11Consumer, Nv12Renderer, SwapChain,
+};
+use prdt_media_sw::Openh264Decoder;
+use prdt_media_sw::traits::SwH264Decoder;
 use prdt_protocol::{frame::Codec, ControlMessage, InputEvent, MonitorRect, VideoConsumer};
 
 #[allow(dead_code)] // wired into ViewerApp in Task 3
@@ -47,6 +51,18 @@ enum ViewerConsumer {
     Mf(prdt_media_win::MfD3d11Consumer),
     #[cfg(prdt_nvdec_bindings)]
     Nvdec(prdt_media_win::NvdecD3d11Consumer),
+    /// Software H.264 path: OpenH264 decoder produces I420 on CPU,
+    /// `CpuI420Uploader` converts to NV12 and uploads into a D3D11
+    /// texture shaped like what `MfD3d11Consumer` returns. The recv
+    /// loop carries the most recently-uploaded texture in
+    /// `latest_texture` so it can be drained next to the MF case
+    /// without changing the renderer.
+    Openh264 {
+        decoder: Openh264Decoder,
+        uploader: CpuI420Uploader,
+        latest_texture: Option<prdt_media_win::D3d11Texture>,
+        needs_idr: bool,
+    },
 }
 
 /// Decoder-selected renderer. Held inside the event-loop's render code.
@@ -120,8 +136,39 @@ struct Args {
     /// makes overall e2e slower. Use `mf` for legacy reasons or when
     /// the CUDA Toolkit isn't installed at build time -- in that case
     /// `nvdec` falls back to `mf` with a warning.
-    #[arg(long, default_value = "nvdec", value_parser = ["mf", "nvdec"])]
+    ///
+    /// `openh264` selects the cross-platform OpenH264 software decoder
+    /// from `prdt-media-sw`. It is the only decoder that consumes
+    /// H.264 streams (negotiated when the host advertises only
+    /// `[H264]`). Use it together with `--codec h264` against an
+    /// `--encoder openh264` host, or together with `--codec auto` to
+    /// silently downgrade.
+    ///
+    /// `auto` picks NVDEC when available (with the same MF fallback)
+    /// for H.265 streams, and OpenH264 for H.264 streams; the actual
+    /// choice is made after the Hello handshake using the host's
+    /// negotiated codec.
+    #[arg(
+        long,
+        default_value = "nvdec",
+        value_parser = ["mf", "nvdec", "openh264", "auto"],
+    )]
     decoder: String,
+
+    /// Codec preference sent in Hello. `auto` (default) sends `H265`
+    /// (the historical default) and accepts whatever the host
+    /// negotiates; this is the only path that performs an implicit
+    /// codec downgrade. `h265` and `h264` send the explicit codec and
+    /// error out if the host responds with anything else (including a
+    /// `HelloReject` from a host that does not support the requested
+    /// codec). The interaction with `--decoder` is checked after
+    /// handshake; mismatches print a precise error and exit non-zero.
+    #[arg(
+        long,
+        default_value = "auto",
+        value_parser = ["auto", "h265", "h264"],
+    )]
+    codec: String,
 
     /// Rendezvous via a signaling server instead of direct host address.
     #[arg(long)]
@@ -195,6 +242,114 @@ fn parse_resolution(s: &str) -> Result<(u32, u32)> {
     let w: u32 = w.parse().with_context(|| format!("bad width in {s:?}"))?;
     let h: u32 = h.parse().with_context(|| format!("bad height in {s:?}"))?;
     Ok((w, h))
+}
+
+/// User-supplied `--codec` flag in its parsed form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodecArg {
+    Auto,
+    H265,
+    H264,
+}
+
+impl CodecArg {
+    fn parse(s: &str) -> Result<Self> {
+        match s {
+            "auto" => Ok(Self::Auto),
+            "h265" => Ok(Self::H265),
+            "h264" => Ok(Self::H264),
+            other => anyhow::bail!(
+                "bad --codec {other:?}, expected one of: auto, h265, h264"
+            ),
+        }
+    }
+
+    /// The codec the viewer advertises in Hello. `auto` resolves to
+    /// `H265` (historical default) so a non-upgraded host that ignores
+    /// the new wire fields still gets a sensible request.
+    fn hello_codec(self) -> Codec {
+        match self {
+            Self::Auto => Codec::H265,
+            Self::H265 => Codec::H265,
+            Self::H264 => Codec::H264,
+        }
+    }
+}
+
+/// Concrete decoder picked after handshake, after the negotiation
+/// guard has approved the (decoder, negotiated_codec, codec) triple.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DecoderChoice {
+    Nvdec,
+    Mf,
+    Openh264,
+}
+
+/// Decide the concrete decoder backend given `--decoder`, the
+/// host-negotiated codec from HelloAck, and the user's `--codec`
+/// preference. Returns the verbatim error string from plan §Phase 3
+/// on mismatch; the caller prints it and exits non-zero.
+///
+/// Pure function over `&str` so this matrix can be exhaustively
+/// unit-tested without spinning up a transport.
+fn choose_decoder(
+    decoder_arg: &str,
+    negotiated: Codec,
+    codec_arg: CodecArg,
+) -> std::result::Result<DecoderChoice, String> {
+    // Step 1: enforce explicit --codec mismatches first. An explicit
+    // --codec h264 against a negotiated H265 (or vice-versa) is always
+    // an error regardless of --decoder, because we already opted out
+    // of the implicit-downgrade path.
+    match codec_arg {
+        CodecArg::H265 if negotiated != Codec::H265 => {
+            return Err(format!(
+                "codec mismatch: --codec h265 but host negotiated {}",
+                negotiated.name()
+            ));
+        }
+        CodecArg::H264 if negotiated != Codec::H264 => {
+            return Err(format!(
+                "codec mismatch: --codec h264 but host negotiated {}",
+                negotiated.name()
+            ));
+        }
+        _ => {}
+    }
+
+    // Step 2: enforce --decoder vs negotiated. Plan §Phase 3 specifies
+    // exact error strings for the (nvdec|mf, H264) and (openh264, H265)
+    // cases; preserve them verbatim.
+    match (decoder_arg, negotiated) {
+        ("nvdec", Codec::H265) => Ok(DecoderChoice::Nvdec),
+        ("mf", Codec::H265) => Ok(DecoderChoice::Mf),
+        ("openh264", Codec::H264) => Ok(DecoderChoice::Openh264),
+        ("auto", Codec::H265) => Ok(DecoderChoice::Nvdec),
+        ("auto", Codec::H264) => Ok(DecoderChoice::Openh264),
+        ("nvdec", Codec::H264) => Err(
+            "codec mismatch: viewer requested nvdec (H.265) but host \
+             negotiated H.264; pass --decoder openh264 or --decoder auto"
+                .into(),
+        ),
+        ("mf", Codec::H264) => Err(
+            "codec mismatch: viewer requested mf (H.265) but host \
+             negotiated H.264; pass --decoder openh264 or --decoder auto"
+                .into(),
+        ),
+        ("openh264", Codec::H265) => Err(
+            "codec mismatch: viewer requested openh264 (H.264) but host \
+             negotiated H.265; pass --decoder {nvdec|mf} or --decoder auto"
+                .into(),
+        ),
+        (_, Codec::Av1) => Err(format!(
+            "codec mismatch: host negotiated AV1 but viewer has no AV1 decoder \
+             (decoder={decoder_arg})"
+        )),
+        (other, _) => Err(format!(
+            "internal: unhandled (decoder={other}, negotiated={})",
+            negotiated.name()
+        )),
+    }
 }
 
 /// Shared state between the winit main thread and the tokio worker thread.
@@ -902,6 +1057,7 @@ fn main() -> Result<()> {
         args.fps,
         args.recv_dir.clone(),
         args.decoder.clone(),
+        args.codec.clone(),
     );
 
     // Build the event loop + app.
@@ -952,6 +1108,7 @@ fn spawn_worker_tasks(
     req_fps: u32,
     recv_dir: std::path::PathBuf,
     decoder: String,
+    codec: String,
 ) {
     handle.clone().spawn(async move {
         // CLI --bind supplies the local UDP bind (default 0.0.0.0:0). We only
@@ -1119,12 +1276,24 @@ fn spawn_worker_tasks(
         }
         tracing::info!("Noise handshake complete");
 
+        // Parse --codec into a typed value. Args were already validated
+        // by clap's value_parser so this is infallible in the happy path;
+        // we still bubble up errors instead of unwrap so the codec_arg
+        // helper test exercises the failure branch.
+        let codec_arg = match CodecArg::parse(&codec) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(error = %e, "bad --codec");
+                std::process::exit(2);
+            }
+        };
+
         // Handshake.
         let req = HelloRequest {
             req_width: req_w,
             req_height: req_h,
             req_fps,
-            codec: Codec::H265,
+            codec: codec_arg.hello_codec(),
         };
         let ack = match viewer_handshake(
             &*transport,
@@ -1135,6 +1304,16 @@ fn spawn_worker_tasks(
         .await
         {
             Ok(a) => a,
+            Err(prdt_transport::TransportError::HelloRejected(reason)) => {
+                // Plan §Phase 3 acceptance: surface reason verbatim and
+                // exit non-zero within 100ms of Hello send. The transport
+                // layer's `viewer_handshake` already returns immediately
+                // on HelloReject without retrying, so the deadline is
+                // bounded by `process::exit` overhead.
+                tracing::error!(reason = %reason, "host rejected Hello");
+                eprintln!("HelloReject: {reason}");
+                std::process::exit(3);
+            }
             Err(e) => {
                 warn!(?e, "handshake failed");
                 return;
@@ -1153,39 +1332,86 @@ fn spawn_worker_tasks(
         *shared.host_monitor_rect.lock().unwrap() = ack.host_monitor_rect;
         *shared.host_virtual_desktop_rect.lock().unwrap() = ack.host_virtual_desktop_rect;
 
-        // Build consumer — dispatch on --decoder flag.
-        let consumer: Arc<tokio::sync::Mutex<ViewerConsumer>> = if decoder == "nvdec" {
-            #[cfg(prdt_nvdec_bindings)]
-            {
-                match NvdecD3d11Consumer::new(&dev, ack.neg_width, ack.neg_height) {
-                    Ok(nv) => Some(Arc::new(tokio::sync::Mutex::new(ViewerConsumer::Nvdec(nv)))),
-                    Err(e) => {
-                        warn!(%e, "NVDEC unavailable; falling back to MF decoder");
-                        None
+        // Negotiation guard — full matrix per plan §Phase 3. Runs
+        // before consumer construction so we can fail fast with a
+        // precise message if the host's negotiated codec disagrees with
+        // --decoder / --codec.
+        let mut decoder_choice = match choose_decoder(&decoder, ack.negotiated_codec, codec_arg) {
+            Ok(c) => c,
+            Err(msg) => {
+                tracing::error!(error = %msg, "negotiation guard rejected handshake");
+                eprintln!("{msg}");
+                std::process::exit(4);
+            }
+        };
+
+        // Build consumer — explicit 3-way match. NVDEC may fall back
+        // to MF if the bindings aren't compiled in (preserves prior
+        // behavior of `--decoder nvdec` on builds without CUDA).
+        let consumer: Arc<tokio::sync::Mutex<ViewerConsumer>> = match decoder_choice {
+            DecoderChoice::Nvdec => {
+                #[cfg(prdt_nvdec_bindings)]
+                {
+                    match NvdecD3d11Consumer::new(&dev, ack.neg_width, ack.neg_height) {
+                        Ok(nv) => Arc::new(tokio::sync::Mutex::new(ViewerConsumer::Nvdec(nv))),
+                        Err(e) => {
+                            warn!(%e, "NVDEC unavailable; falling back to MF decoder");
+                            decoder_choice = DecoderChoice::Mf;
+                            Arc::new(tokio::sync::Mutex::new(ViewerConsumer::Mf(
+                                MfD3d11Consumer::new(&dev, ack.neg_width, ack.neg_height)
+                                    .unwrap_or_else(|err| {
+                                        warn!(?err, "MfD3d11Consumer::new failed");
+                                        panic!("no decoder could be initialized")
+                                    }),
+                            )))
+                        }
                     }
                 }
+                #[cfg(not(prdt_nvdec_bindings))]
+                {
+                    warn!(
+                        "negotiated H.265 but NVDEC bindings are not compiled in; \
+                         falling back to MF"
+                    );
+                    decoder_choice = DecoderChoice::Mf;
+                    Arc::new(tokio::sync::Mutex::new(ViewerConsumer::Mf(
+                        MfD3d11Consumer::new(&dev, ack.neg_width, ack.neg_height)
+                            .unwrap_or_else(|err| {
+                                warn!(?err, "MfD3d11Consumer::new failed");
+                                panic!("no decoder could be initialized")
+                            }),
+                    )))
+                }
             }
-            #[cfg(not(prdt_nvdec_bindings))]
-            {
-                warn!("--decoder nvdec specified but NVDEC bindings are not compiled in; falling back to MF");
-                None
+            DecoderChoice::Mf => Arc::new(tokio::sync::Mutex::new(ViewerConsumer::Mf(
+                MfD3d11Consumer::new(&dev, ack.neg_width, ack.neg_height).unwrap_or_else(|err| {
+                    warn!(?err, "MfD3d11Consumer::new failed");
+                    panic!("no decoder could be initialized")
+                }),
+            ))),
+            DecoderChoice::Openh264 => {
+                let openh264 = Openh264Decoder::new().unwrap_or_else(|err| {
+                    tracing::error!(?err, "Openh264Decoder::new failed");
+                    panic!("openh264 decoder init failed")
+                });
+                let uploader = CpuI420Uploader::new(&dev, ack.neg_width, ack.neg_height)
+                    .unwrap_or_else(|err| {
+                        tracing::error!(?err, "CpuI420Uploader::new failed");
+                        panic!("openh264 uploader init failed")
+                    });
+                Arc::new(tokio::sync::Mutex::new(ViewerConsumer::Openh264 {
+                    decoder: openh264,
+                    uploader,
+                    latest_texture: None,
+                    needs_idr: true,
+                }))
             }
-        } else {
-            None
-        }
-        .unwrap_or_else(|| {
-            // Fallback / default path.
-            Arc::new(tokio::sync::Mutex::new(ViewerConsumer::Mf(
-                match MfD3d11Consumer::new(&dev, ack.neg_width, ack.neg_height) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        warn!(?e, "MfD3d11Consumer::new failed");
-                        panic!("no decoder could be initialized");
-                    }
-                },
-            )))
-        });
-        info!(backend = %decoder, "decoder ready; spawning worker tasks");
+        };
+        info!(
+            backend = ?decoder_choice,
+            negotiated = ack.negotiated_codec.name(),
+            "decoder ready; spawning worker tasks"
+        );
 
         // Shared "last clipboard text received from host" — used by the
         // watcher below to avoid echoing remote updates back.
@@ -1283,22 +1509,57 @@ fn spawn_worker_tasks(
                         let nal_len = frame.nal_units.len();
                         recv_shared.latency.record_recv(seq, host_ts_us);
                         let mut c = recv_consumer.lock().await;
-                        let submit_result = match &mut *c {
-                            ViewerConsumer::Mf(m) => m.submit(frame).await,
+                        let submit_result: std::result::Result<(), String> = match &mut *c {
+                            ViewerConsumer::Mf(m) => m
+                                .submit(frame)
+                                .await
+                                .map_err(|e| format!("{e:?}")),
                             #[cfg(prdt_nvdec_bindings)]
-                            ViewerConsumer::Nvdec(n) => n.submit(frame).await,
+                            ViewerConsumer::Nvdec(n) => n
+                                .submit(frame)
+                                .await
+                                .map_err(|e| format!("{e:?}")),
+                            ViewerConsumer::Openh264 {
+                                decoder,
+                                uploader,
+                                latest_texture,
+                                needs_idr,
+                            } => {
+                                // OpenH264 accepts the entire access unit
+                                // at once. If the host hasn't sent a
+                                // keyframe yet (post-reset), the decoder
+                                // will silently return None until the
+                                // next IDR arrives, which is fine.
+                                match decoder.decode(&frame.nal_units) {
+                                    Ok(Some(i420)) => {
+                                        match uploader.upload(&i420) {
+                                            Ok(tex) => {
+                                                *latest_texture = Some(tex);
+                                                *needs_idr = false;
+                                                Ok(())
+                                            }
+                                            Err(e) => Err(format!("upload: {e}")),
+                                        }
+                                    }
+                                    Ok(None) => Ok(()),
+                                    Err(e) => Err(format!("decode: {e}")),
+                                }
+                            }
                         };
                         if let Err(e) = submit_result {
-                            warn!(?e, seq, is_kf, nal_len, "consumer.submit error");
+                            warn!(error = %e, seq, is_kf, nal_len, "consumer.submit error");
                             continue;
                         }
-                        let frame_opt: Option<LatestFrame> = match &*c {
+                        let frame_opt: Option<LatestFrame> = match &mut *c {
                             ViewerConsumer::Mf(m) => {
                                 m.take_latest_texture().map(LatestFrame::Nv12)
                             }
                             #[cfg(prdt_nvdec_bindings)]
                             ViewerConsumer::Nvdec(n) => {
                                 n.take_latest_dual_plane().map(LatestFrame::DualPlane)
+                            }
+                            ViewerConsumer::Openh264 { latest_texture, .. } => {
+                                latest_texture.take().map(LatestFrame::Nv12)
                             }
                         };
                         if let Some(frame) = frame_opt {
@@ -1598,5 +1859,112 @@ mod tests {
     #[test]
     fn normalize_short_numeric_passthrough() {
         assert_eq!(normalize_host_id_input("12345"), "12345");
+    }
+
+    #[test]
+    fn codec_flag_parses() {
+        assert_eq!(CodecArg::parse("auto").unwrap(), CodecArg::Auto);
+        assert_eq!(CodecArg::parse("h265").unwrap(), CodecArg::H265);
+        assert_eq!(CodecArg::parse("h264").unwrap(), CodecArg::H264);
+        // Reject invalid values; the error message must mention the
+        // accepted set so users can self-correct without docs.
+        let err = CodecArg::parse("vp9").unwrap_err().to_string();
+        assert!(
+            err.contains("auto") && err.contains("h265") && err.contains("h264"),
+            "error must list accepted values, got: {err}"
+        );
+        // Auto sends H265 in Hello (historical default).
+        assert_eq!(CodecArg::Auto.hello_codec(), Codec::H265);
+        assert_eq!(CodecArg::H265.hello_codec(), Codec::H265);
+        assert_eq!(CodecArg::H264.hello_codec(), Codec::H264);
+    }
+
+    #[test]
+    fn negotiation_guard_nvdec_h265_ok() {
+        let r = choose_decoder("nvdec", Codec::H265, CodecArg::Auto);
+        assert_eq!(r.unwrap(), DecoderChoice::Nvdec);
+    }
+
+    #[test]
+    fn negotiation_guard_nvdec_h264_errors_with_plan_message() {
+        let err = choose_decoder("nvdec", Codec::H264, CodecArg::Auto).unwrap_err();
+        // Plan §Phase 3 verbatim message.
+        assert!(
+            err.contains("viewer requested nvdec (H.265)")
+                && err.contains("host negotiated H.264")
+                && err.contains("--decoder openh264 or --decoder auto"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn negotiation_guard_mf_h264_errors() {
+        let err = choose_decoder("mf", Codec::H264, CodecArg::Auto).unwrap_err();
+        assert!(
+            err.contains("viewer requested mf (H.265)")
+                && err.contains("host negotiated H.264"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn negotiation_guard_openh264_h264_ok() {
+        let r = choose_decoder("openh264", Codec::H264, CodecArg::Auto);
+        assert_eq!(r.unwrap(), DecoderChoice::Openh264);
+    }
+
+    #[test]
+    fn negotiation_guard_openh264_h265_errors_with_plan_message() {
+        // Mirror case from plan iteration 3.
+        let err = choose_decoder("openh264", Codec::H265, CodecArg::Auto).unwrap_err();
+        assert!(
+            err.contains("viewer requested openh264 (H.264)")
+                && err.contains("host negotiated H.265")
+                && err.contains("--decoder {nvdec|mf} or --decoder auto"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn negotiation_guard_auto_auto_picks_negotiated() {
+        // Both auto: silent downgrade is permitted on either codec.
+        assert_eq!(
+            choose_decoder("auto", Codec::H265, CodecArg::Auto).unwrap(),
+            DecoderChoice::Nvdec
+        );
+        assert_eq!(
+            choose_decoder("auto", Codec::H264, CodecArg::Auto).unwrap(),
+            DecoderChoice::Openh264
+        );
+    }
+
+    #[test]
+    fn negotiation_guard_explicit_codec_overrides_auto_decoder() {
+        // --decoder auto --codec h265 against H264 host → error
+        // (explicit --codec wins over auto-pick).
+        let err = choose_decoder("auto", Codec::H264, CodecArg::H265).unwrap_err();
+        assert!(
+            err.contains("--codec h265") && err.contains("h264"),
+            "unexpected message: {err}"
+        );
+        let err = choose_decoder("auto", Codec::H265, CodecArg::H264).unwrap_err();
+        assert!(
+            err.contains("--codec h264") && err.contains("h265"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn negotiation_guard_explicit_codec_match_ok() {
+        // --codec matches negotiated → permitted, decoder dispatch
+        // still uses the explicit --decoder.
+        assert_eq!(
+            choose_decoder("nvdec", Codec::H265, CodecArg::H265).unwrap(),
+            DecoderChoice::Nvdec
+        );
+        assert_eq!(
+            choose_decoder("openh264", Codec::H264, CodecArg::H264).unwrap(),
+            DecoderChoice::Openh264
+        );
     }
 }

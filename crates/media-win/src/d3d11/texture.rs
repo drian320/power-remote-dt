@@ -228,6 +228,69 @@ impl D3d11Texture {
         &self.inner
     }
 
+    /// Tight-packed CPU readback of this texture's BGRA/RGBA bytes into a
+    /// caller-provided buffer using a caller-provided staging texture
+    /// (allocated once per producer lifetime so the hot path doesn't pay
+    /// for a fresh staging allocation per frame). `out` must already be
+    /// `width * height * 4` bytes long.
+    ///
+    /// Used by the SW codec path (`DxgiSwProducer` in the host crate) where
+    /// readback is the dominant cost and we can't afford the allocate-per-
+    /// call pattern used by `read_back_bgra_or_rgba`.
+    pub fn read_back_bgra_into(
+        &self,
+        dev: &D3d11Device,
+        staging: &D3d11Texture,
+        out: &mut [u8],
+    ) -> Result<()> {
+        if !matches!(self.format, TextureFormat::Bgra8 | TextureFormat::Rgba8) {
+            return Err(MediaError::UnsupportedFormat {
+                fmt: "read_back_bgra_into requires BGRA8 or RGBA8 source",
+            });
+        }
+        if staging.format != self.format
+            || staging.width != self.width
+            || staging.height != self.height
+        {
+            return Err(MediaError::UnsupportedFormat {
+                fmt: "staging tex format/dims mismatch source",
+            });
+        }
+        let row_bytes = (self.width as usize) * 4;
+        let expected = row_bytes * (self.height as usize);
+        if out.len() != expected {
+            return Err(MediaError::UnsupportedFormat {
+                fmt: "read_back_bgra_into out buffer wrong size",
+            });
+        }
+
+        // Copy GPU → staging.
+        dev.with_context(|ctx| unsafe {
+            ctx.CopyResource(&staging.inner, &self.inner);
+        });
+
+        // Map and tight-pack.
+        dev.with_context(|ctx| -> Result<()> {
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            unsafe {
+                ctx.Map(&staging.inner, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                    .map_err(|e| MediaError::d3d11("Map staging texture (read_back_bgra_into)", e))?;
+            }
+            let row_pitch = mapped.RowPitch as usize;
+            unsafe {
+                for y in 0..self.height as usize {
+                    let src_row = (mapped.pData as *const u8).add(y * row_pitch);
+                    let dst_row = out.as_mut_ptr().add(y * row_bytes);
+                    std::ptr::copy_nonoverlapping(src_row, dst_row, row_bytes);
+                }
+                ctx.Unmap(&staging.inner, 0);
+            }
+            Ok(())
+        })?;
+
+        Ok(())
+    }
+
     /// Copy this texture to a staging texture, map it, and return a CPU-side
     /// Vec<u8> containing the pixel bytes (row-major, tight packing for BGRA/RGBA).
     ///

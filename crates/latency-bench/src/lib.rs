@@ -71,10 +71,12 @@ mod matrix {
         let dec = match decoder {
             ConsumerBackend::Mf => "mfdec",
             ConsumerBackend::Nvdec => "nvdec",
+            ConsumerBackend::Openh264 => "openh264",
         };
         let enc = match encoder {
             EncoderBackend::Nvenc => "nvenc",
             EncoderBackend::Mf => "mfenc",
+            EncoderBackend::Openh264 => "openh264",
         };
         format!(
             "{}p{}-{}mbps-enc{}-dec{}",
@@ -239,10 +241,12 @@ mod matrix {
             let dec = match s.decoder {
                 ConsumerBackend::Mf => "mfdec",
                 ConsumerBackend::Nvdec => "nvdec",
+                ConsumerBackend::Openh264 => "openh264",
             };
             let enc = match s.encoder {
                 EncoderBackend::Nvenc => "nvenc",
                 EncoderBackend::Mf => "mfenc",
+                EncoderBackend::Openh264 => "openh264",
             };
             writeln!(
                 wtr,
@@ -321,6 +325,15 @@ mod tests {
             EncoderBackend::Mf,
         );
         assert_eq!(id, "2160p120-50mbps-encmfenc-decnvdec");
+
+        let id = config_id(
+            (1920, 1080),
+            60,
+            30,
+            ConsumerBackend::Openh264,
+            EncoderBackend::Openh264,
+        );
+        assert_eq!(id, "1080p60-30mbps-encopenh264-decopenh264");
     }
 
     #[cfg(windows)]

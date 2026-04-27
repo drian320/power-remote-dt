@@ -1,0 +1,13 @@
+[package]
+name = "prdt-media-sw"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+prdt-protocol = { path = "../protocol" }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+openh264 = { version = "0.9.3", default-features = false, features = ["source"] }

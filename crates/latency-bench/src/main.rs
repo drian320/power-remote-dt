@@ -62,14 +62,15 @@ struct Args {
 
     /// Decoder backend for `--mode full-pipeline-win`. `mf` uses Media
     /// Foundation (default, Plan 2c); `nvdec` uses the Plan 2d direct
-    /// nvcuvid path. Ignored in `--mode in-process`.
-    #[arg(long, default_value = "mf", value_parser = ["mf", "nvdec"])]
+    /// nvcuvid path; `openh264` is the SW H.264 path (Plan §Phase 5).
+    /// Ignored in `--mode in-process`.
+    #[arg(long, default_value = "mf", value_parser = ["mf", "nvdec", "openh264"])]
     consumer: String,
 
     /// Encoder backend for `--mode full-pipeline-win`. `nvenc` (default)
-    /// uses NVIDIA NVENC; `mf` uses Media Foundation MFT.
-    /// Ignored in `--mode in-process`.
-    #[arg(long, default_value = "nvenc", value_parser = ["nvenc", "mf"])]
+    /// uses NVIDIA NVENC; `mf` uses Media Foundation MFT; `openh264` is
+    /// the SW H.264 path. Ignored in `--mode in-process`.
+    #[arg(long, default_value = "nvenc", value_parser = ["nvenc", "mf", "openh264"])]
     encoder: String,
 }
 

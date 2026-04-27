@@ -40,7 +40,6 @@ pub struct CrashReport {
 /// Install a panic hook that writes a JSON dump on every Rust panic.
 /// `binary_name` and `version` are typically `env!("CARGO_PKG_NAME")` and
 /// `env!("CARGO_PKG_VERSION")` from the binary calling this.
-#[allow(deprecated)] // PanicInfo renamed to PanicHookInfo in 1.81; keep PanicInfo for MSRV 1.78
 pub fn install_panic_hook(binary_name: &'static str, version: &'static str) {
     std::panic::set_hook(Box::new(move |info| {
         let report = build_report(binary_name, version, info);
@@ -59,8 +58,7 @@ pub fn install_panic_hook(binary_name: &'static str, version: &'static str) {
     }));
 }
 
-#[allow(deprecated)] // PanicInfo renamed to PanicHookInfo in 1.81; keep PanicInfo for MSRV 1.78
-fn build_report(binary: &str, version: &str, info: &std::panic::PanicInfo<'_>) -> CrashReport {
+fn build_report(binary: &str, version: &str, info: &std::panic::PanicHookInfo<'_>) -> CrashReport {
     let panic_message = match info.payload().downcast_ref::<&'static str>() {
         Some(s) => (*s).to_string(),
         None => info

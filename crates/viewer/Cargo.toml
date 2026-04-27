@@ -28,7 +28,8 @@ winit = "0.30"
 raw-window-handle = "0.6"
 
 [target.'cfg(windows)'.dependencies]
-prdt-media-win = { path = "../media-win" }
+prdt-media-win = { path = "../media-win", features = ["i420-upload"] }
+prdt-media-sw = { path = "../media-sw" }
 prdt-input-win = { path = "../input-win" }
 prdt-gui-viewer = { path = "../gui-viewer" }
 prdt-gui-common = { path = "../gui-common" }

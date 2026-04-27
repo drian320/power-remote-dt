@@ -60,8 +60,9 @@ fn parse_decoders(strs: &[String]) -> anyhow::Result<Vec<ConsumerBackend>> {
         .map(|s| match s.as_str() {
             "mf" => Ok(ConsumerBackend::Mf),
             "nvdec" => Ok(ConsumerBackend::Nvdec),
+            "openh264" => Ok(ConsumerBackend::Openh264),
             other => Err(anyhow::anyhow!(
-                "unknown decoder {other:?} (options: mf, nvdec)"
+                "unknown decoder {other:?} (options: mf, nvdec, openh264)"
             )),
         })
         .collect()
@@ -72,8 +73,9 @@ fn parse_encoders(strs: &[String]) -> anyhow::Result<Vec<EncoderBackend>> {
         .map(|s| match s.as_str() {
             "nvenc" => Ok(EncoderBackend::Nvenc),
             "mf" => Ok(EncoderBackend::Mf),
+            "openh264" => Ok(EncoderBackend::Openh264),
             other => Err(anyhow::anyhow!(
-                "unknown encoder {other:?} (options: nvenc, mf)"
+                "unknown encoder {other:?} (options: nvenc, mf, openh264)"
             )),
         })
         .collect()

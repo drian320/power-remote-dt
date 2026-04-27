@@ -9,6 +9,8 @@
 
 use std::time::{Duration, Instant};
 
+use prdt_media_sw::{make_counter_i420, Openh264Decoder, Openh264Encoder, Openh264EncoderConfig};
+use prdt_media_sw::traits::{SwH264Decoder, SwH264Encoder};
 use prdt_media_win::synthetic::make_counter_texture;
 use prdt_media_win::{
     pick_default_adapter, D3d11Device, Hevc265Encoder, HwHevcEncoder, MfD3d11Consumer,
@@ -25,6 +27,8 @@ pub enum ConsumerBackend {
     Mf,
     /// Plan 2d direct nvcuvid.dll path.
     Nvdec,
+    /// Pure-software OpenH264 decoder (CPU I420 output).
+    Openh264,
 }
 
 impl std::str::FromStr for ConsumerBackend {
@@ -33,7 +37,10 @@ impl std::str::FromStr for ConsumerBackend {
         match s {
             "mf" => Ok(Self::Mf),
             "nvdec" => Ok(Self::Nvdec),
-            other => anyhow::bail!("unknown consumer backend {other:?} (options: mf, nvdec)"),
+            "openh264" => Ok(Self::Openh264),
+            other => anyhow::bail!(
+                "unknown consumer backend {other:?} (options: mf, nvdec, openh264)"
+            ),
         }
     }
 }
@@ -45,6 +52,8 @@ pub enum EncoderBackend {
     Nvenc,
     /// Media Foundation H.265 encoder MFT.
     Mf,
+    /// Pure-software OpenH264 encoder.
+    Openh264,
 }
 
 impl std::str::FromStr for EncoderBackend {
@@ -53,13 +62,18 @@ impl std::str::FromStr for EncoderBackend {
         match s {
             "nvenc" => Ok(Self::Nvenc),
             "mf" => Ok(Self::Mf),
-            other => anyhow::bail!("unknown encoder backend {other:?} (options: nvenc, mf)"),
+            "openh264" => Ok(Self::Openh264),
+            other => anyhow::bail!(
+                "unknown encoder backend {other:?} (options: nvenc, mf, openh264)"
+            ),
         }
     }
 }
 
 /// Enum wrapper so the bench body can drive either consumer through a
 /// single match-based dispatch instead of duplicating the decode loop.
+/// SW-only `Openh264` lives in the parallel `run_for_matrix_openh264`
+/// path because it bypasses D3D11 entirely.
 enum BenchConsumer {
     Mf(MfD3d11Consumer),
     Nvdec(NvdecD3d11Consumer),
@@ -198,7 +212,31 @@ pub async fn run(cfg: FullPipelineConfig) -> anyhow::Result<()> {
 ///
 /// Used by both the single-config `run()` (which logs + writes one CSV)
 /// and the matrix bin (which writes per-frame + summary CSVs).
+///
+/// Dispatches between two paths:
+/// - SW (openh264↔openh264): pure-CPU, no D3D11. Goes via
+///   `run_for_matrix_openh264`.
+/// - HW: NVENC/MF encode → NVDEC/MF decode through a D3D11 device, with
+///   counter textures synthesised on the GPU.
+///
+/// Mixed configs (SW encoder + HW decoder, or vice versa) are rejected
+/// — the bench has no I420↔NV12 GPU upload path and the asymmetric
+/// case isn't part of the Phase 5 baseline contract.
 pub async fn run_for_matrix(cfg: &FullPipelineConfig) -> anyhow::Result<RunStats> {
+    match (cfg.encoder, cfg.consumer) {
+        (EncoderBackend::Openh264, ConsumerBackend::Openh264) => {
+            return run_for_matrix_openh264(cfg).await;
+        }
+        (EncoderBackend::Openh264, _) | (_, ConsumerBackend::Openh264) => {
+            anyhow::bail!(
+                "mixed SW/HW pipeline not supported (encoder={:?}, decoder={:?})",
+                cfg.encoder,
+                cfg.consumer
+            );
+        }
+        _ => {}
+    }
+
     let adapter = pick_default_adapter().map_err(|e| anyhow::anyhow!("no GPU adapter: {e}"))?;
     let dev = D3d11Device::create(&adapter).map_err(|e| anyhow::anyhow!("D3D11 device: {e}"))?;
 
@@ -217,6 +255,7 @@ pub async fn run_for_matrix(cfg: &FullPipelineConfig) -> anyhow::Result<RunStats
         EncoderBackend::Mf => MfH265Encoder::new(&dev, &enc_cfg)
             .map_err(|e| anyhow::anyhow!("MfH265Encoder::new: {e}"))?
             .into(),
+        EncoderBackend::Openh264 => unreachable!("SW encoder dispatched above"),
     };
     info!(
         resolution = format!("{}x{}", cfg.width, cfg.height),
@@ -235,6 +274,7 @@ pub async fn run_for_matrix(cfg: &FullPipelineConfig) -> anyhow::Result<RunStats
             NvdecD3d11Consumer::new(&dev, cfg.width, cfg.height)
                 .map_err(|e| anyhow::anyhow!("NvdecD3d11Consumer::new: {e}"))?,
         ),
+        ConsumerBackend::Openh264 => unreachable!("SW decoder dispatched above"),
     };
     info!(backend = ?cfg.consumer, "decoder ready");
 
@@ -329,6 +369,134 @@ pub async fn run_for_matrix(cfg: &FullPipelineConfig) -> anyhow::Result<RunStats
                 let rx_capture_us = rx_frame.timestamp_host_us;
                 let _ = consumer.submit(rx_frame).await;
                 if consumer.take_latest_texture() {
+                    let decode_done_us = now_monotonic_us();
+                    decoded += 1;
+                    samples.push(StageTimes {
+                        seq: rx_seq,
+                        capture_us: rx_capture_us,
+                        encode_done_us: recv_us,
+                        recv_us,
+                        decode_done_us,
+                    });
+                }
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) | Err(_) => break,
+        }
+    }
+
+    Ok(RunStats {
+        sent: seq,
+        received: decoded,
+        frames: samples,
+    })
+}
+
+/// SW-only full-pipeline bench: synthetic I420 → OpenH264 encode →
+/// InProcTransport → OpenH264 decode. No D3D11 device, no GPU.
+/// Mirrors the structure of `run_for_matrix` so summary CSVs from
+/// SW and HW configs are directly comparable.
+pub async fn run_for_matrix_openh264(cfg: &FullPipelineConfig) -> anyhow::Result<RunStats> {
+    let mut encoder = Openh264Encoder::new(Openh264EncoderConfig {
+        width: cfg.width,
+        height: cfg.height,
+        target_bitrate_bps: cfg.bitrate_bps,
+        max_fps: cfg.fps as f32,
+    })
+    .map_err(|e| anyhow::anyhow!("Openh264Encoder::new: {e}"))?;
+    let mut decoder =
+        Openh264Decoder::new().map_err(|e| anyhow::anyhow!("Openh264Decoder::new: {e}"))?;
+
+    info!(
+        resolution = format!("{}x{}", cfg.width, cfg.height),
+        fps = cfg.fps,
+        bitrate_mbps = cfg.bitrate_bps / 1_000_000,
+        backend = encoder.backend_name(),
+        "openh264 encoder ready",
+    );
+    info!(backend = decoder.backend_name(), "openh264 decoder ready");
+
+    let (host_side, viewer_side) = InProcTransport::pair(LoopbackOptions {
+        drop_ppm: cfg.drop_ppm,
+        latency: if cfg.latency_ms > 0 {
+            Some(Duration::from_millis(cfg.latency_ms))
+        } else {
+            None
+        },
+    });
+
+    let frame_interval = Duration::from_secs_f64(1.0 / cfg.fps as f64);
+    let deadline = Instant::now() + cfg.duration;
+    let mut samples: Vec<StageTimes> = Vec::new();
+    let mut next_tick = Instant::now();
+    let mut seq: u64 = 0;
+    let mut decoded: u64 = 0;
+
+    while Instant::now() < deadline {
+        let capture_us = now_monotonic_us();
+        let i420 = make_counter_i420(cfg.width, cfg.height, seq as u32)
+            .map_err(|e| anyhow::anyhow!("make_counter_i420: {e}"))?;
+        let force_idr = seq == 0;
+        let frame = encoder
+            .encode(&i420, force_idr, capture_us)
+            .map_err(|e| anyhow::anyhow!("encode: {e}"))?;
+        let encode_done_us = now_monotonic_us();
+
+        if let Err(e) = host_side.send_video(frame).await {
+            warn!(?e, seq, "send_video failed; stopping");
+            break;
+        }
+
+        loop {
+            match tokio::time::timeout(Duration::from_millis(1), viewer_side.recv()).await {
+                Ok(Ok(ReceivedMessage::Video(rx_frame))) => {
+                    let recv_us = now_monotonic_us();
+                    let rx_seq = rx_frame.seq;
+                    let rx_capture_us = rx_frame.timestamp_host_us;
+                    let nal_units = rx_frame.nal_units;
+                    match decoder.decode(&nal_units) {
+                        Ok(Some(_)) => {
+                            let decode_done_us = now_monotonic_us();
+                            decoded += 1;
+                            samples.push(StageTimes {
+                                seq: rx_seq,
+                                capture_us: rx_capture_us,
+                                encode_done_us,
+                                recv_us,
+                                decode_done_us,
+                            });
+                        }
+                        Ok(None) => {
+                            // Decoder needs more input — keep going.
+                        }
+                        Err(e) => {
+                            warn!(seq = rx_seq, ?e, "openh264 decode error");
+                        }
+                    }
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(_)) | Err(_) => break,
+            }
+        }
+
+        seq += 1;
+        next_tick += frame_interval;
+        let sleep_until = next_tick;
+        let now = Instant::now();
+        if sleep_until > now {
+            tokio::time::sleep(sleep_until - now).await;
+        }
+    }
+
+    let drain_deadline = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < drain_deadline {
+        match tokio::time::timeout(Duration::from_millis(50), viewer_side.recv()).await {
+            Ok(Ok(ReceivedMessage::Video(rx_frame))) => {
+                let recv_us = now_monotonic_us();
+                let rx_seq = rx_frame.seq;
+                let rx_capture_us = rx_frame.timestamp_host_us;
+                let nal_units = rx_frame.nal_units;
+                if let Ok(Some(_)) = decoder.decode(&nal_units) {
                     let decode_done_us = now_monotonic_us();
                     decoded += 1;
                     samples.push(StageTimes {
