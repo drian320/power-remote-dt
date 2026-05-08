@@ -9,6 +9,13 @@
 
     Per-user install (InstallScope='perUser') under %LOCALAPPDATA%\prdt\
     so the MSI requires no UAC prompt.
+
+    PR4 (prdt unification): the primary entry is prdt.exe, a single
+    binary that opens the unified GUI when launched without args and
+    forwards `prdt host` / `prdt connect` to the role-specific code
+    paths. prdt-host.exe and prdt-viewer.exe remain installed as compat
+    shims for one release so existing scripts keep working; planned for
+    removal in a follow-up PR.
   -->
   <Product
       Id='*'
@@ -40,6 +47,12 @@
       <Directory Id='LocalAppDataFolder'>
         <Directory Id='AppRoot' Name='prdt'>
           <Directory Id='APPLICATIONFOLDER' Name='bin'>
+            <Component Id='ClientExe' Guid='*'>
+              <File Id='ClientExe' Source='target/release/prdt.exe' KeyPath='yes' Checksum='yes' />
+            </Component>
+            <!-- Legacy compat shims: prdt-host.exe / prdt-viewer.exe still
+                 install for one release so existing run-host.ps1 and
+                 run-viewer.ps1 keep working. Slated for removal. -->
             <Component Id='HostExe' Guid='*'>
               <File Id='HostExe' Source='target/release/prdt-host.exe' KeyPath='yes' Checksum='yes' />
             </Component>
@@ -55,12 +68,12 @@
 
       <Directory Id='ProgramMenuFolder'>
         <Directory Id='AppShortcutFolder' Name='Power Remote Desktop'>
-          <Component Id='HostShortcut' Guid='*'>
+          <Component Id='PrdtShortcut' Guid='*'>
             <Shortcut
-                Id='HostShortcut'
-                Name='Host'
-                Description='Run as host'
-                Target='[APPLICATIONFOLDER]prdt-host.exe'
+                Id='PrdtShortcut'
+                Name='Power Remote Desktop'
+                Description='Unified host + viewer client (RustDesk-style)'
+                Target='[APPLICATIONFOLDER]prdt.exe'
                 WorkingDirectory='APPLICATIONFOLDER'
                 Icon='AppIcon.ico'
                 IconIndex='0' />
@@ -68,23 +81,7 @@
             <RegistryValue
                 Root='HKCU'
                 Key='Software\prdt\Installed'
-                Name='HostShortcut'
-                Type='integer'
-                Value='1'
-                KeyPath='yes' />
-          </Component>
-          <Component Id='ViewerShortcut' Guid='*'>
-            <Shortcut
-                Id='ViewerShortcut'
-                Name='Viewer'
-                Target='[APPLICATIONFOLDER]prdt-viewer.exe'
-                WorkingDirectory='APPLICATIONFOLDER'
-                Icon='AppIcon.ico'
-                IconIndex='0' />
-            <RegistryValue
-                Root='HKCU'
-                Key='Software\prdt\Installed'
-                Name='ViewerShortcut'
+                Name='PrdtShortcut'
                 Type='integer'
                 Value='1'
                 KeyPath='yes' />
@@ -94,11 +91,11 @@
     </Directory>
 
     <Feature Id='Default' Title='Power Remote Desktop' Level='1'>
+      <ComponentRef Id='ClientExe' />
       <ComponentRef Id='HostExe' />
       <ComponentRef Id='ViewerExe' />
       <ComponentRef Id='OverlayExe' />
-      <ComponentRef Id='HostShortcut' />
-      <ComponentRef Id='ViewerShortcut' />
+      <ComponentRef Id='PrdtShortcut' />
     </Feature>
 
     <Icon Id='AppIcon.ico' SourceFile='crates/gui-host/resources/prdt-icon.ico' />
