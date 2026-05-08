@@ -262,6 +262,17 @@ impl eframe::App for ClientApp {
         // flipping back to Idle.
         self.drain_listener_result();
 
+        // Listener spawns asynchronously; the host task creates host-key.bin
+        // a few hundred ms after Start Listener is clicked. Poll for it each
+        // frame while waiting so the user doesn't have to click "Refresh
+        // Pubkey" manually. Tighter repaint cadence kicks in below.
+        let waiting_for_pubkey = self.is_listening()
+            && self.pubkey_b64.is_none()
+            && self.pubkey_load_error.is_none();
+        if waiting_for_pubkey {
+            self.refresh_pubkey();
+        }
+
         // Draw the consent dialog (if any) before tabs so it sits over
         // both. Pulls one request off the channel when idle; subsequent
         // requests stay buffered in the unbounded channel and surface in
@@ -281,8 +292,15 @@ impl eframe::App for ClientApp {
             Tab::Connect => self.draw_connect(ui),
         });
 
-        // Repaint at 1Hz so listener-state transitions are visible without input.
-        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        // Repaint cadence: 100ms while polling for first pubkey (snappy
+        // feedback during the ~hundreds-of-ms key-generation window),
+        // 1Hz otherwise to keep listener-state transitions visible.
+        let next = if waiting_for_pubkey {
+            std::time::Duration::from_millis(100)
+        } else {
+            std::time::Duration::from_secs(1)
+        };
+        ctx.request_repaint_after(next);
     }
 }
 
