@@ -5,9 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-[[bin]]
-name = "prdt-host"
-path = "src/main.rs"
+# PR5a: this crate is now lib-only. The legacy prdt-host.exe shim was
+# removed; users invoke `prdt host [...]` via the prdt-client bin, which
+# calls into prdt_host::run_with_args directly.
 
 [dependencies]
 prdt-audio = { path = "../audio" }

@@ -5,9 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-[[bin]]
-name = "prdt-viewer"
-path = "src/main.rs"
+# PR5a: this crate is now lib-only. The legacy prdt-viewer.exe shim was
+# removed; users invoke `prdt connect [...]` via the prdt-client bin,
+# which calls into prdt_viewer::run_with_args directly.
 
 [dependencies]
 prdt-audio = { path = "../audio" }
