@@ -261,10 +261,14 @@ impl CustomUdpTransport {
     /// the main recv loop. Waits for a NoiseE1 control message from the
     /// client, responds with NoiseE2, and installs the transport session so
     /// that all subsequent traffic is encrypted.
+    ///
+    /// Returns the initiator's static public key (recovered from the IK
+    /// handshake under encryption) so the caller can identify the peer
+    /// cryptographically and gate `accept` on a known-peer-ids list.
     pub async fn handshake_as_server(
         &self,
         server_keypair: &prdt_crypto::KeyPair,
-    ) -> Result<(), TransportError> {
+    ) -> Result<prdt_crypto::PubKey, TransportError> {
         use prdt_crypto::ServerHandshake;
 
         let mut hs = Some(
@@ -275,9 +279,10 @@ impl CustomUdpTransport {
             match self.recv_raw_unencrypted().await? {
                 ReceivedMessage::Control(ControlMessage::NoiseE1 { payload }) => {
                     let hs_taken = hs.take().expect("handshake already consumed");
-                    let (e2_payload, session) = hs_taken.respond(&payload).map_err(|e| {
-                        TransportError::Io(std::io::Error::other(format!("crypto: {e}")))
-                    })?;
+                    let (e2_payload, session, peer_pubkey) =
+                        hs_taken.respond(&payload).map_err(|e| {
+                            TransportError::Io(std::io::Error::other(format!("crypto: {e}")))
+                        })?;
                     // Send NoiseE2 unencrypted (session not yet installed).
                     self.send_control_unencrypted(ControlMessage::NoiseE2 {
                         payload: e2_payload,
@@ -286,7 +291,7 @@ impl CustomUdpTransport {
                     // Install the session — all subsequent traffic will be
                     // encrypted automatically by send_raw / recv.
                     *self.crypto.lock().await = Some(session);
-                    return Ok(());
+                    return Ok(peer_pubkey);
                 }
                 _ => continue, // drop any non-handshake traffic during handshake
             }
@@ -420,6 +425,10 @@ impl CustomUdpTransport {
     /// awaits the server's NoiseE2, installing the transport session on
     /// completion.
     ///
+    /// `client_keypair` is the viewer's long-term static keypair; the IK
+    /// pattern transmits its public component to the host inside the first
+    /// encrypted handshake message so the host can identify this viewer.
+    ///
     /// If `timeout` elapses before NoiseE2 is received — most commonly because
     /// the viewer was given the wrong server pubkey (so the server silently
     /// drops our NoiseE1) or the host is unreachable — returns
@@ -428,11 +437,12 @@ impl CustomUdpTransport {
     pub async fn handshake_as_client(
         &self,
         server_pubkey: &prdt_crypto::PubKey,
+        client_keypair: &prdt_crypto::KeyPair,
         timeout: std::time::Duration,
     ) -> Result<(), TransportError> {
         use prdt_crypto::ClientHandshake;
 
-        let mut hs = ClientHandshake::new(server_pubkey)
+        let mut hs = ClientHandshake::new(server_pubkey, client_keypair)
             .map_err(|e| TransportError::Io(std::io::Error::other(format!("crypto: {e}"))))?;
         let e1 = hs
             .initiate()

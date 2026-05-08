@@ -151,7 +151,8 @@ async fn w3_smoke_probe_plus_noise_plus_hello() {
         let peer_addr = vt.probe_and_commit_peer(&cand_addrs, Duration::from_secs(5)).await.expect("viewer probe");
         eprintln!("w3_smoke viewer probe winner: {peer_addr}");
 
-        vt.handshake_as_client(&host_pub_copy, DEFAULT_HANDSHAKE_TIMEOUT).await.expect("viewer Noise");
+        let viewer_kp = KeyPair::generate();
+        vt.handshake_as_client(&host_pub_copy, &viewer_kp, DEFAULT_HANDSHAKE_TIMEOUT).await.expect("viewer Noise");
         let ack = viewer_handshake(
             &*vt,
             &HelloRequest { req_width: 1920, req_height: 1080, req_fps: 60, codec: Codec::H265 },

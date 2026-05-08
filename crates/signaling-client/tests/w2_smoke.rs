@@ -186,8 +186,9 @@ async fn w2_smoke_stun_plus_signaling_plus_noise() {
             .probe_and_commit_peer(&cand_addrs, std::time::Duration::from_secs(5))
             .await
             .expect("probe winner");
+        let viewer_kp = KeyPair::generate();
         transport
-            .handshake_as_client(&host_pub_copy, DEFAULT_HANDSHAKE_TIMEOUT)
+            .handshake_as_client(&host_pub_copy, &viewer_kp, DEFAULT_HANDSHAKE_TIMEOUT)
             .await
             .expect("viewer Noise");
         let ack = viewer_handshake(

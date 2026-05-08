@@ -38,10 +38,14 @@ impl ServerHandshake {
         Ok(Self { state })
     }
 
-    /// Consume the initiator's first message (e, es) and produce the
-    /// responder's reply (e, ee). After this call the handshake is complete
-    /// and a `Session` is returned for subsequent traffic.
-    pub fn respond(mut self, client_msg: &[u8]) -> Result<(Vec<u8>, Session), CryptoError> {
+    /// Consume the initiator's first message (e, es, s, ss) and produce the
+    /// responder's reply (e, ee, se). After this call the handshake is
+    /// complete; a `Session` plus the initiator's static public key are
+    /// returned so the host can identify the peer cryptographically.
+    pub fn respond(
+        mut self,
+        client_msg: &[u8],
+    ) -> Result<(Vec<u8>, Session, PubKey), CryptoError> {
         let mut read_buf = vec![0u8; 1024];
         let _ = self.state.read_message(client_msg, &mut read_buf)?;
 
@@ -49,8 +53,22 @@ impl ServerHandshake {
         let written = self.state.write_message(&[], &mut response)?;
         response.truncate(written);
 
+        // IK pattern: by the time we've read the initiator message, snow has
+        // decrypted and stored the initiator's static pubkey. Capture it
+        // BEFORE into_transport_mode() consumes the handshake state.
+        let remote_static = self
+            .state
+            .get_remote_static()
+            .ok_or(CryptoError::WrongState("missing remote static"))?;
+        if remote_static.len() != 32 {
+            return Err(CryptoError::WrongState("missing remote static"));
+        }
+        let mut pk_bytes = [0u8; 32];
+        pk_bytes.copy_from_slice(remote_static);
+        let peer_pubkey = PubKey(pk_bytes);
+
         let transport = self.state.into_transport_mode()?;
-        Ok((response, Session { state: transport }))
+        Ok((response, Session { state: transport }, peer_pubkey))
     }
 }
 
@@ -60,11 +78,12 @@ pub struct ClientHandshake {
 }
 
 impl ClientHandshake {
-    pub fn new(server_pubkey: &PubKey) -> Result<Self, CryptoError> {
+    pub fn new(server_pubkey: &PubKey, client_keypair: &KeyPair) -> Result<Self, CryptoError> {
         let params = crate::NOISE_PATTERN
             .parse::<snow::params::NoiseParams>()
             .map_err(|e| CryptoError::Snow(format!("parse params: {e:?}")))?;
         let state = Builder::new(params)
+            .local_private_key(&client_keypair.private.0)
             .remote_public_key(&server_pubkey.0)
             .build_initiator()?;
         Ok(Self { state })
@@ -143,11 +162,12 @@ mod tests {
     #[test]
     fn full_handshake_and_roundtrip() {
         let server_kp = KeyPair::generate();
+        let client_kp = KeyPair::generate();
         let server = ServerHandshake::new(&server_kp).unwrap();
-        let mut client = ClientHandshake::new(&server_kp.public).unwrap();
+        let mut client = ClientHandshake::new(&server_kp.public, &client_kp).unwrap();
 
         let msg1 = client.initiate().unwrap();
-        let (msg2, mut server_session) = server.respond(&msg1).unwrap();
+        let (msg2, mut server_session, _peer_pk) = server.respond(&msg1).unwrap();
         let mut client_session = client.finalize(&msg2).unwrap();
 
         // Client → Server
@@ -172,8 +192,9 @@ mod tests {
     fn wrong_pubkey_fails() {
         let real = KeyPair::generate();
         let fake = KeyPair::generate();
+        let client_kp = KeyPair::generate();
         let server = ServerHandshake::new(&real).unwrap();
-        let mut client = ClientHandshake::new(&fake.public).unwrap();
+        let mut client = ClientHandshake::new(&fake.public, &client_kp).unwrap();
 
         let msg1 = client.initiate().unwrap();
         let res = server.respond(&msg1);
@@ -181,11 +202,28 @@ mod tests {
     }
 
     #[test]
+    fn server_recovers_initiator_static_pubkey() {
+        let server_kp = KeyPair::generate();
+        let client_kp = KeyPair::generate();
+        let server = ServerHandshake::new(&server_kp).unwrap();
+        let mut client = ClientHandshake::new(&server_kp.public, &client_kp).unwrap();
+
+        let msg1 = client.initiate().unwrap();
+        let (_msg2, _server_session, peer_pk) = server.respond(&msg1).unwrap();
+        assert_eq!(
+            peer_pk, client_kp.public,
+            "server-side recovered pubkey must equal client's static pubkey"
+        );
+    }
+
+    #[test]
     fn out_of_order_decrypt_with_set_receiving_nonce() {
         let server_kp = KeyPair::generate();
+        let client_kp = KeyPair::generate();
         let server = ServerHandshake::new(&server_kp).unwrap();
-        let mut client = ClientHandshake::new(&server_kp.public).unwrap();
-        let (msg2, mut server_session) = server.respond(&client.initiate().unwrap()).unwrap();
+        let mut client = ClientHandshake::new(&server_kp.public, &client_kp).unwrap();
+        let (msg2, mut server_session, _peer_pk) =
+            server.respond(&client.initiate().unwrap()).unwrap();
         let mut client_session = client.finalize(&msg2).unwrap();
 
         // Client encrypts 5 messages — snow assigns nonces 0..4 internally.
@@ -216,9 +254,11 @@ mod tests {
     #[test]
     fn rekey_preserves_message_flow() {
         let server_kp = KeyPair::generate();
+        let client_kp = KeyPair::generate();
         let server = ServerHandshake::new(&server_kp).unwrap();
-        let mut client = ClientHandshake::new(&server_kp.public).unwrap();
-        let (msg2, mut server_session) = server.respond(&client.initiate().unwrap()).unwrap();
+        let mut client = ClientHandshake::new(&server_kp.public, &client_kp).unwrap();
+        let (msg2, mut server_session, _peer_pk) =
+            server.respond(&client.initiate().unwrap()).unwrap();
         let mut client_session = client.finalize(&msg2).unwrap();
 
         // Rekey both sides in lockstep.
@@ -239,9 +279,11 @@ mod tests {
     #[test]
     fn multiple_messages_in_sequence() {
         let server_kp = KeyPair::generate();
+        let client_kp = KeyPair::generate();
         let server = ServerHandshake::new(&server_kp).unwrap();
-        let mut client = ClientHandshake::new(&server_kp.public).unwrap();
-        let (msg2, mut server_session) = server.respond(&client.initiate().unwrap()).unwrap();
+        let mut client = ClientHandshake::new(&server_kp.public, &client_kp).unwrap();
+        let (msg2, mut server_session, _peer_pk) =
+            server.respond(&client.initiate().unwrap()).unwrap();
         let mut client_session = client.finalize(&msg2).unwrap();
 
         // Send 10 messages each way and verify they all decrypt correctly.

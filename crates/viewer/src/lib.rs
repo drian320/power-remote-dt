@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::Parser;
 use prdt_audio::{AudioPlayback, OpusDecoder};
-use prdt_crypto::{KnownHosts, PubKey};
+use prdt_crypto::{KeyPair, KnownHosts, PubKey};
 use prdt_filetransfer::{send_file, TransferReceiver, DEFAULT_MAX_TRANSFER_BYTES};
 use prdt_input_win::{
     clipboard_sequence_number, read_clipboard_text, write_clipboard_text, RawInputCapturer,
@@ -216,6 +216,11 @@ pub struct Args {
     /// Override the GUI config file location (default: %APPDATA%/prdt/config.toml).
     #[arg(long)]
     config: Option<std::path::PathBuf>,
+
+    /// Path to the viewer's long-term identity key. Generated on first use if
+    /// missing. The host uses the matching pubkey to identify this viewer.
+    #[arg(long, default_value = "viewer-key.bin")]
+    pub viewer_key_file: std::path::PathBuf,
 }
 
 /// Normalize a user-supplied host_id for signaling: 9-digit numeric inputs
@@ -232,6 +237,41 @@ fn normalize_host_id_input(input: &str) -> String {
         )
     } else {
         input.to_string()
+    }
+}
+
+/// Load the viewer's long-term Noise static key from `path`, generating a new
+/// keypair and persisting the private bytes if the file does not yet exist.
+/// A wrong-size file is treated as an error rather than silently overwritten,
+/// so an admin's misplaced file is not destroyed.
+fn load_or_create_viewer_key(path: &std::path::Path) -> Result<KeyPair> {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            if bytes.len() != 32 {
+                anyhow::bail!(
+                    "viewer key file {} has wrong size: expected 32 bytes, got {}",
+                    path.display(),
+                    bytes.len()
+                );
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            Ok(KeyPair::from_private(arr))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let kp = KeyPair::generate();
+            std::fs::write(path, kp.private.0).with_context(|| {
+                format!("write new viewer key to {}", path.display())
+            })?;
+            info!(
+                path = ?path,
+                pubkey = %kp.public.to_base64(),
+                "generated new viewer key"
+            );
+            Ok(kp)
+        }
+        Err(e) => Err(anyhow::Error::from(e)
+            .context(format!("read viewer key {}", path.display()))),
     }
 }
 
@@ -994,6 +1034,12 @@ pub fn run_with_args(mut args: Args) -> Result<()> {
         }
     }
 
+    // Load (or generate-and-persist) the viewer's long-term identity key.
+    // The IK Noise pattern transmits its pubkey to the host so the host can
+    // identify this viewer cryptographically.
+    let viewer_kp: KeyPair = load_or_create_viewer_key(&args.viewer_key_file)?;
+    info!(viewer_pubkey = %viewer_kp.public.to_base64(), "viewer identity");
+
     // D3D11 device. Created on the main thread, cloned into the worker so the
     // decoder uses the same device (required for zero-copy texture handoff).
     let adapter = pick_default_adapter().context("no GPU adapter")?;
@@ -1060,6 +1106,7 @@ pub fn run_with_args(mut args: Args) -> Result<()> {
         args.recv_dir.clone(),
         args.decoder.clone(),
         args.codec.clone(),
+        viewer_kp,
     );
 
     // Build the event loop + app.
@@ -1111,6 +1158,7 @@ fn spawn_worker_tasks(
     recv_dir: std::path::PathBuf,
     decoder: String,
     codec: String,
+    viewer_kp: KeyPair,
 ) {
     handle.clone().spawn(async move {
         // CLI --bind supplies the local UDP bind (default 0.0.0.0:0). We only
@@ -1270,7 +1318,7 @@ fn spawn_worker_tasks(
         // Uses DEFAULT_HANDSHAKE_TIMEOUT so a wrong pubkey or unreachable host
         // fails fast instead of hanging the viewer forever.
         if let Err(e) = transport
-            .handshake_as_client(&pubkey, DEFAULT_HANDSHAKE_TIMEOUT)
+            .handshake_as_client(&pubkey, &viewer_kp, DEFAULT_HANDSHAKE_TIMEOUT)
             .await
         {
             warn!(?e, "Noise client handshake failed");

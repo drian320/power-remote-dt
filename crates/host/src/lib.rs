@@ -281,11 +281,20 @@ pub async fn run_host(
         transport.reset_session().await;
 
         info!("waiting for Noise handshake");
-        if let Err(e) = transport.handshake_as_server(&keypair).await {
-            warn!(?e, "Noise server handshake failed; resetting session");
-            continue;
-        }
-        info!("Noise handshake complete — encrypted channel established");
+        let peer_pubkey = match transport.handshake_as_server(&keypair).await {
+            Ok(pk) => pk,
+            Err(e) => {
+                warn!(?e, "Noise server handshake failed; resetting session");
+                continue;
+            }
+        };
+        info!(
+            peer = %peer_pubkey.to_base64(),
+            "Noise handshake complete — encrypted channel established"
+        );
+        // peer_pubkey will be consumed by PR5b.3/5b.4 (consent gating).
+        // Suppress unused-warning for now without renaming the binding.
+        let _ = &peer_pubkey;
 
         // Wait for Hello, send HelloAck. Session ID is random per host start so
         // a reconnect from a viewer that had the old ID cached gets treated as a

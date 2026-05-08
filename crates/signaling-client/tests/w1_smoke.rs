@@ -108,8 +108,9 @@ async fn w1_smoke_signaling_noise_hello_ack_completes() {
             .await
             .expect("probe winner");
 
+        let viewer_kp = KeyPair::generate();
         transport
-            .handshake_as_client(&host_pub_for_viewer, DEFAULT_HANDSHAKE_TIMEOUT)
+            .handshake_as_client(&host_pub_for_viewer, &viewer_kp, DEFAULT_HANDSHAKE_TIMEOUT)
             .await
             .expect("viewer Noise handshake");
 

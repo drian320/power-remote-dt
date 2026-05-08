@@ -50,9 +50,10 @@ async fn encrypted_round_trip_all_message_types() {
     let host_clone = Arc::clone(&host);
     let server_task = tokio::spawn(async move { host_clone.handshake_as_server(&keypair).await });
     let viewer_clone = Arc::clone(&viewer);
+    let viewer_kp = KeyPair::generate();
     let client_task = tokio::spawn(async move {
         viewer_clone
-            .handshake_as_client(&pubkey, DEFAULT_HANDSHAKE_TIMEOUT)
+            .handshake_as_client(&pubkey, &viewer_kp, DEFAULT_HANDSHAKE_TIMEOUT)
             .await
     });
 
@@ -154,9 +155,10 @@ async fn encrypted_wrong_pubkey_fails() {
         tokio::spawn(async move { host_clone.handshake_as_server(&real_keypair).await });
     let viewer_clone = Arc::clone(&viewer);
     let fake_pubkey = fake_keypair.public;
+    let viewer_kp = KeyPair::generate();
     let client_task = tokio::spawn(async move {
         viewer_clone
-            .handshake_as_client(&fake_pubkey, DEFAULT_HANDSHAKE_TIMEOUT)
+            .handshake_as_client(&fake_pubkey, &viewer_kp, DEFAULT_HANDSHAKE_TIMEOUT)
             .await
     });
 
