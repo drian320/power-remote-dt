@@ -45,5 +45,18 @@ fn into_packet(frame: EncodedH265Frame) -> EncodedPacket {
 }
 
 fn map_err(err: MediaError) -> EncodeError {
-    EncodeError::Backend(err.to_string())
+    match &err {
+        // MediaError::UnsupportedFormat is the one media-win variant
+        // that semantically matches EncodeError::FormatMismatch.
+        // All other variants (including DeviceRemoved, which is
+        // recoverable-but-fatal) currently collapse to Backend(...)
+        // because EncodeError has no dedicated DeviceLost variant.
+        // A follow-up task should add EncodeError::DeviceLost so the
+        // L1 host wiring can distinguish "recreate device" from
+        // "transient encode failure".
+        MediaError::UnsupportedFormat { .. } => {
+            EncodeError::FormatMismatch(err.to_string())
+        }
+        _ => EncodeError::Backend(err.to_string()),
+    }
 }

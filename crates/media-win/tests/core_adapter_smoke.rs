@@ -7,7 +7,7 @@
 #![cfg(windows)]
 
 use prdt_media_core::Encoder;
-use prdt_media_win::{HwHevcEncoder, MfH265Encoder};
+use prdt_media_win::HwHevcEncoder;
 
 /// Compile-time witness that `HwHevcEncoder` implements
 /// `prdt_media_core::Encoder<Frame = D3d11Texture>`. If this stops
@@ -19,8 +19,7 @@ fn hwencoder_witness_compiles() {
     fn _f(e: &mut HwHevcEncoder) {
         _witness_hwencoder_impls_encoder(e);
     }
-    // No body needed — the witness check is at compile time.
-    // Keep this assertion so the test runner reports the test
-    // result instead of skipping silently.
-    assert_eq!(std::mem::size_of::<&MfH265Encoder>(), std::mem::size_of::<usize>());
+    // No runtime assertion needed — the compile-time witness above is the
+    // entire value of this test. The test function must exist so it appears
+    // in `cargo test` output and is not silently absent from CI results.
 }
