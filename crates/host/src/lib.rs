@@ -38,6 +38,21 @@ use tracing::{info, warn};
 
 use status::SharedStatus;
 
+/// Returns the default path for the host's long-term private key file.
+/// Prefers the OS-conventional data directory (`%APPDATA%\prdt\` on
+/// Windows, `~/.local/share/prdt/` on Linux, `~/Library/Application
+/// Support/prdt/` on macOS) and creates the directory on demand. Falls
+/// back to `host-key.bin` in the current working directory if no data
+/// dir is available (rare — typically only on stripped-down systems).
+pub fn default_host_key_path() -> std::path::PathBuf {
+    if let Some(base) = dirs::data_local_dir() {
+        let dir = base.join("prdt");
+        let _ = std::fs::create_dir_all(&dir);
+        return dir.join("host-key.bin");
+    }
+    std::path::PathBuf::from("host-key.bin")
+}
+
 const FILE_RECV_DIR: &str = "prdt-received";
 const FILE_SEND_DIR: &str = "prdt-outgoing";
 const FILE_SEND_SENT_SUBDIR: &str = "sent";
@@ -64,8 +79,8 @@ pub struct Args {
     /// Path to host's long-term private key file (32 bytes). Generated on
     /// first run if the file doesn't exist; print the public key to stdout
     /// so the viewer can pin it via `--host-pubkey`.
-    #[arg(long, default_value = "host-key.bin")]
-    key_file: std::path::PathBuf,
+    #[arg(long, default_value_os_t = default_host_key_path())]
+    pub key_file: std::path::PathBuf,
 
     /// Directory the host watches for outgoing files. Any file dropped into
     /// this dir is streamed to the connected viewer and then moved to

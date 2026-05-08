@@ -87,6 +87,15 @@ use winit::keyboard::PhysicalKey;
 use winit::platform::scancode::PhysicalKeyExtScancode;
 use winit::window::{Window, WindowId};
 
+pub fn default_viewer_key_path() -> std::path::PathBuf {
+    if let Some(base) = dirs::data_local_dir() {
+        let dir = base.join("prdt");
+        let _ = std::fs::create_dir_all(&dir);
+        return dir.join("viewer-key.bin");
+    }
+    std::path::PathBuf::from("viewer-key.bin")
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "prdt-viewer", about = "power-remote-dt viewer")]
 pub struct Args {
@@ -219,7 +228,7 @@ pub struct Args {
 
     /// Path to the viewer's long-term identity key. Generated on first use if
     /// missing. The host uses the matching pubkey to identify this viewer.
-    #[arg(long, default_value = "viewer-key.bin")]
+    #[arg(long, default_value_os_t = default_viewer_key_path())]
     pub viewer_key_file: std::path::PathBuf,
 }
 
