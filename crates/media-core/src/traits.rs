@@ -24,6 +24,8 @@ pub trait Encoder: Send {
         timestamp_us: u64,
     ) -> Result<EncodedPacket, EncodeError>;
 
+    /// Adjust the target output bitrate in bits per second. Best-effort —
+    /// the encoder clamps to its supported range; no error is returned.
     fn set_target_bitrate(&mut self, bps: u32);
     fn backend_name(&self) -> &'static str;
 }

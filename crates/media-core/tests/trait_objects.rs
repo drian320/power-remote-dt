@@ -25,8 +25,8 @@ impl Encoder for DummyEncoder {
 }
 
 #[test]
-fn dummy_encoder_round_trip() {
-    let mut enc = DummyEncoder;
+fn encoder_is_dyn_compatible() {
+    let mut enc: Box<dyn Encoder<Frame = ()>> = Box::new(DummyEncoder);
     let p = enc.encode(&(), false, 12_345).expect("encode");
     assert_eq!(p.timestamp_us, 12_345);
     assert!(!p.is_keyframe);
