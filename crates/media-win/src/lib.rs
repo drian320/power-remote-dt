@@ -16,6 +16,7 @@ pub mod nvenc;
 pub mod pipeline;
 pub mod platform;
 pub mod synthetic;
+pub mod core_adapter;
 
 #[cfg(feature = "i420-upload")]
 pub use cpu_i420_upload::CpuI420Uploader;

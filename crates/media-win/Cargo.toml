@@ -6,8 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-prdt-protocol = { path = "../protocol" }
+prdt-media-core = { path = "../media-core" }
 prdt-media-sw = { path = "../media-sw", optional = true }
+prdt-protocol = { path = "../protocol" }
 async-trait = "0.1"
 thiserror = { workspace = true }
 tracing = { workspace = true }
