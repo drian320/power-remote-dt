@@ -18,7 +18,7 @@ use prdt_media_sw::Openh264EncoderConfig;
 /// producer construction; Phase 2 just wires up the type.
 pub enum VideoEncoderBackend {
     Hw(HwHevcEncoder),
-    SwH264(Openh264Encoder),
+    SwH264(Box<Openh264Encoder>),
 }
 
 impl VideoEncoderBackend {
@@ -62,7 +62,7 @@ mod tests {
             max_fps: 30.0,
         };
         let enc = Openh264Encoder::new(cfg).expect("encoder");
-        let backend = VideoEncoderBackend::SwH264(enc);
+        let backend = VideoEncoderBackend::SwH264(Box::new(enc));
         assert_eq!(backend.backend_name(), "openh264");
         assert!(backend.is_h264());
     }

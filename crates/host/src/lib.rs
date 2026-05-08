@@ -452,7 +452,7 @@ pub async fn run_host(
                 DxgiNvencProducer::with_encoder(&dev, &output, enc).context("hw producer")?,
             ),
             VideoEncoderBackend::SwH264(enc) => Box::new(
-                DxgiSwProducer::with_encoder(&dev, &output, enc).context("sw producer")?,
+                DxgiSwProducer::with_encoder(&dev, &output, *enc).context("sw producer")?,
             ),
         };
 
@@ -465,7 +465,7 @@ pub async fn run_host(
         let cancel_video = cancel.clone();
         let cancel_video_propagate = cancel.clone();
         let handshake_complete_at = std::time::Instant::now();
-        let mut video = tokio::spawn(async move {
+        let video = tokio::spawn(async move {
             let mut frames_sent = 0u64;
             let mut send_errors = 0u64;
             let mut last_log = std::time::Instant::now();
@@ -539,7 +539,7 @@ pub async fn run_host(
         let audio_transport = Arc::clone(&transport);
         let cancel_audio = cancel.clone();
         let cancel_audio_propagate = cancel.clone();
-        let mut audio_task = tokio::spawn(async move {
+        let audio_task = tokio::spawn(async move {
             let mut encoder = match OpusEncoder::new() {
                 Ok(e) => e,
                 Err(e) => {
@@ -593,7 +593,7 @@ pub async fn run_host(
         let cancel_input = cancel.clone();
         let cancel_input_propagate = cancel.clone();
         let last_ka_input = Arc::clone(&last_keepalive);
-        let mut input = tokio::spawn(async move {
+        let input = tokio::spawn(async move {
             let mut ft_rx = TransferReceiver::new(FILE_RECV_DIR, DEFAULT_MAX_TRANSFER_BYTES);
             loop {
                 tokio::select! {
@@ -665,7 +665,7 @@ pub async fn run_host(
         let clip_last_remote = Arc::clone(&last_remote_clipboard);
         let cancel_clip = cancel.clone();
         let cancel_clip_propagate = cancel.clone();
-        let mut clip_task = tokio::spawn(async move {
+        let clip_task = tokio::spawn(async move {
             let mut last_sent: Option<String> = None;
             let mut last_seq = clipboard_sequence_number();
             loop {
@@ -717,7 +717,7 @@ pub async fn run_host(
         let outgoing_dir = args.outgoing_dir.clone();
         let cancel_outgoing = cancel.clone();
         let cancel_outgoing_propagate = cancel.clone();
-        let mut outgoing_task = tokio::spawn(async move {
+        let outgoing_task = tokio::spawn(async move {
             let sent_dir = outgoing_dir.join(FILE_SEND_SENT_SUBDIR);
             loop {
                 tokio::select! {
@@ -740,7 +740,7 @@ pub async fn run_host(
                                 continue;
                             }
                             let name = path.file_name().and_then(|s| s.to_str());
-                            if name.map_or(true, |n| n.starts_with('.')) {
+                            if name.is_none_or(|n| n.starts_with('.')) {
                                 continue;
                             }
                             info!(path = %path.display(), "sending outgoing file to viewer");
@@ -770,7 +770,7 @@ pub async fn run_host(
             cancel_outgoing_propagate.cancel();
         });
 
-        let mut watchdog = watchdog::spawn_watchdog(cancel.clone(), Arc::clone(&last_keepalive));
+        let watchdog = watchdog::spawn_watchdog(cancel.clone(), Arc::clone(&last_keepalive));
 
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -891,7 +891,7 @@ fn pick_encoder(
                 max_fps: 60.0,
             };
             let enc = Openh264Encoder::new(cfg).context("Openh264Encoder::new")?;
-            Ok(VideoEncoderBackend::SwH264(enc))
+            Ok(VideoEncoderBackend::SwH264(Box::new(enc)))
         }
         other => anyhow::bail!("unknown --encoder {other:?} (valid: auto, nvenc, mf, openh264)"),
     }
