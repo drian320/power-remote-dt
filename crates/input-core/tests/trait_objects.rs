@@ -28,7 +28,7 @@ impl ClipboardProvider for DummyClipboard {
         self.seq = self.seq.wrapping_add(1);
         Ok(())
     }
-    fn sequence_number(&self) -> u64 {
+    fn sequence_number(&mut self) -> u64 {
         self.seq
     }
     fn backend_name(&self) -> &'static str {

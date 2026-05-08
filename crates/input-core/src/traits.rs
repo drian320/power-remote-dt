@@ -19,14 +19,17 @@ pub trait ClipboardProvider: Send {
     /// Monotonic counter that bumps each time the user changes the
     /// system clipboard. Used by the host's clipboard-sync poller to
     /// avoid round-tripping unchanged content.
-    fn sequence_number(&self) -> u64;
+    fn sequence_number(&mut self) -> u64;
 
     fn backend_name(&self) -> &'static str;
 }
 
 /// Returns the bounding rect of the host's combined virtual desktop in
-/// the same coordinate system the host backend's `InputInjector`
-/// expects for absolute pointer events.
+/// host-screen-space coordinates (origin = top-left of the primary
+/// monitor, matches `MonitorRect` from `prdt_protocol`). This is the
+/// coordinate space that `InputInjector::inject` expects for
+/// `MouseMove { absolute: true }` events. Viewer code must map its
+/// own window coordinates into this space before injecting.
 pub trait VirtualDesktopGeometry: Send {
     fn virtual_desktop_rect(&self) -> MonitorRect;
 }

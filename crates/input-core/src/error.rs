@@ -6,6 +6,8 @@ pub enum InjectError {
     Backend(String),
     #[error("permission denied (uinput / portal access not granted): {0}")]
     PermissionDenied(String),
+    #[error("no input injection backend available on this platform/compositor: {0}")]
+    BackendUnavailable(String),
 }
 
 #[derive(Debug, Error)]
