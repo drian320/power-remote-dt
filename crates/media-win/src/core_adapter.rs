@@ -46,17 +46,60 @@ fn into_packet(frame: EncodedH265Frame) -> EncodedPacket {
 
 fn map_err(err: MediaError) -> EncodeError {
     match &err {
-        // MediaError::UnsupportedFormat is the one media-win variant
-        // that semantically matches EncodeError::FormatMismatch.
-        // All other variants (including DeviceRemoved, which is
-        // recoverable-but-fatal) currently collapse to Backend(...)
-        // because EncodeError has no dedicated DeviceLost variant.
-        // A follow-up task should add EncodeError::DeviceLost so the
-        // L1 host wiring can distinguish "recreate device" from
-        // "transient encode failure".
+        // MediaError::UnsupportedFormat semantically matches
+        // EncodeError::FormatMismatch.
         MediaError::UnsupportedFormat { .. } => {
             EncodeError::FormatMismatch(err.to_string())
         }
+        // MediaError::DeviceRemoved means TDR / driver crash / hot-unplug —
+        // the entire D3D11 device and every resource bound to it are gone.
+        // Surfacing this as EncodeError::DeviceLost lets host wiring
+        // distinguish "recreate device" from "transient encode failure".
+        MediaError::DeviceRemoved { .. } => {
+            EncodeError::DeviceLost(err.to_string())
+        }
         _ => EncodeError::Backend(err.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_format_maps_to_format_mismatch() {
+        let err = MediaError::UnsupportedFormat { fmt: "RGBA32F" };
+        match map_err(err) {
+            EncodeError::FormatMismatch(_) => {}
+            other => panic!("expected FormatMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn device_removed_maps_to_device_lost() {
+        let err = MediaError::DeviceRemoved {
+            context: "Present",
+            reason: 0x887A0005,
+        };
+        match map_err(err) {
+            EncodeError::DeviceLost(s) => {
+                assert!(s.contains("device removed"));
+                assert!(s.contains("Present"));
+            }
+            other => panic!("expected DeviceLost, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn other_errors_map_to_backend() {
+        let err = MediaError::NoAdapter {
+            requested: "nvidia".into(),
+        };
+        match map_err(err) {
+            EncodeError::Backend(s) => {
+                assert!(s.contains("no suitable adapter"));
+            }
+            other => panic!("expected Backend, got {other:?}"),
+        }
     }
 }

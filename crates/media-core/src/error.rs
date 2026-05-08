@@ -14,6 +14,12 @@ pub enum EncodeError {
     Backend(String),
     #[error("input frame format mismatch: {0}")]
     FormatMismatch(String),
+    /// The underlying GPU device is gone (TDR, driver crash, hot-unplug,
+    /// hybrid-GPU switch). The encoder and every resource bound to its
+    /// device are unusable; callers must tear down and recreate the
+    /// device + encoder before retrying.
+    #[error("device lost — recreate device and encoder: {0}")]
+    DeviceLost(String),
 }
 
 #[derive(Debug, Error)]
