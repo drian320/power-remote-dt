@@ -1,0 +1,13 @@
+[package]
+name = "prdt-media-linux"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+prdt-media-core = { path = "../media-core" }
+prdt-protocol = { path = "../protocol" }

@@ -6,6 +6,7 @@ members = [
     "crates/input-core",
     "crates/transport",
     "crates/media-win",
+    "crates/media-linux",
     "crates/input-win",
     "crates/host",
     "crates/viewer",
