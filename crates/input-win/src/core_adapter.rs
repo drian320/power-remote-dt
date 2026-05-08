@@ -1,6 +1,11 @@
 //! Adapter shim: implements `prdt_input_core` traits on the existing
 //! `SendInputInjector` (input injection), the function-style clipboard
 //! API (wrapped in a stateful struct), and `virtual_desktop_rect()`.
+//!
+//! L0 only — host / viewer code is not yet rewired to consume the
+//! `prdt_input_core` traits. This module exists so the trait surface
+//! is exercised on Windows (smoke tests below) and so the L1 Linux
+//! work has a precedent to mirror.
 
 use prdt_input_core::{
     ClipboardError as CoreClipboardError, ClipboardProvider, InjectError as CoreInjectError,
@@ -30,37 +35,29 @@ fn map_inject_err(err: WinInjectError) -> CoreInjectError {
     }
 }
 
-/// Stateful adapter around the function-style clipboard API. Holds the
-/// last-observed sequence number so polling consumers can use a single
-/// owner instead of calling the free function directly.
-#[derive(Default)]
-pub struct Win32Clipboard {
-    last_seq: u64,
-}
+/// Adapter wrapping the function-style Windows clipboard API behind
+/// the cross-platform `prdt_input_core::ClipboardProvider` trait. Holds
+/// no per-instance state — every call delegates straight to the
+/// underlying Win32 helpers.
+#[derive(Debug, Default)]
+pub struct Win32Clipboard;
 
 impl Win32Clipboard {
     pub fn new() -> Self {
-        Self {
-            last_seq: clipboard_sequence_number() as u64,
-        }
+        Self
     }
 }
 
 impl ClipboardProvider for Win32Clipboard {
     fn read_text(&mut self) -> Result<String, CoreClipboardError> {
-        self.last_seq = clipboard_sequence_number() as u64;
         read_clipboard_text().map_err(map_clipboard_err)
     }
 
     fn write_text(&mut self, text: &str) -> Result<(), CoreClipboardError> {
-        write_clipboard_text(text).map_err(map_clipboard_err)?;
-        self.last_seq = clipboard_sequence_number() as u64;
-        Ok(())
+        write_clipboard_text(text).map_err(map_clipboard_err)
     }
 
     fn sequence_number(&mut self) -> u64 {
-        // Always read fresh — the underlying Win32 counter is monotonic
-        // per-session, so we don't need to cache.
         clipboard_sequence_number() as u64
     }
 
