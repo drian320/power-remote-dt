@@ -4,6 +4,7 @@
 
 pub mod capturer;
 pub mod clipboard;
+pub mod core_adapter;
 pub mod desktop;
 pub mod injector;
 
@@ -12,5 +13,6 @@ pub use clipboard::{
     clipboard_sequence_number, read_clipboard_text, write_clipboard_text, ClipboardError,
     MAX_CLIPBOARD_BYTES,
 };
+pub use core_adapter::{Win32Clipboard, Win32VirtualDesktop};
 pub use desktop::virtual_desktop_rect;
 pub use injector::{InjectError, SendInputInjector};
