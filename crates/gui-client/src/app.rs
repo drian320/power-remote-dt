@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use clap::Parser as _;
 use prdt_gui_common::Config;
 use tokio::runtime;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -26,16 +27,24 @@ pub struct ClientApp {
     pubkey_b64: Option<String>,
     pubkey_load_error: Option<String>,
     listener: Option<ListenerState>,
+    /// Last status line shown under the listener controls (start/stop result,
+    /// or the error returned by the host task when it exits).
+    host_status: Option<String>,
 
     // Connect
     peer_host: String,
     peer_pubkey: String,
-    last_connect_status: Option<String>,
+    /// Last status line shown under the Connect button.
+    connect_status: Option<String>,
 }
 
 struct ListenerState {
     cancel: CancellationToken,
-    join: tokio::task::JoinHandle<anyhow::Result<()>>,
+    /// Wrapper task; `()` because the actual `Result<()>` is forwarded via the
+    /// oneshot channel. Kept so we can poll `is_finished()` for the running
+    /// indicator and to ensure we observe the wrapper's completion.
+    join: tokio::task::JoinHandle<()>,
+    result_rx: Option<oneshot::Receiver<anyhow::Result<()>>>,
 }
 
 impl ClientApp {
@@ -52,9 +61,10 @@ impl ClientApp {
             pubkey_b64: None,
             pubkey_load_error: None,
             listener: None,
+            host_status: None,
             peer_host: "127.0.0.1:9000".to_string(),
             peer_pubkey: String::new(),
-            last_connect_status: None,
+            connect_status: None,
         };
         app.refresh_pubkey();
         app
@@ -95,15 +105,35 @@ impl ClientApp {
             .is_some_and(|s| !s.join.is_finished())
     }
 
+    /// Pre-flight UDP bind check. Returns Err with a friendly message when the
+    /// port is already in use. Best-effort: there's a race between this drop
+    /// and `run_host`'s real bind, but in practice it catches the common case
+    /// of "I forgot to stop the previous host" cleanly.
+    fn pre_flight_bind(addr_str: &str) -> Result<(), String> {
+        let addr: std::net::SocketAddr = addr_str
+            .parse()
+            .map_err(|e| format!("invalid bind address {addr_str:?}: {e}"))?;
+        match std::net::UdpSocket::bind(addr) {
+            Ok(_socket) => Ok(()),
+            Err(e) => Err(format!("port {} unavailable: {e}", addr.port())),
+        }
+    }
+
     fn start_listener(&mut self) {
         if self.is_listening() {
             return;
         }
+        let cfg = self.cfg.lock().unwrap().clone();
+
+        // Pre-flight: surface "port in use" before we even spawn the task.
+        if let Err(msg) = Self::pre_flight_bind(&cfg.host.bind) {
+            self.host_status = Some(format!("cannot start: {msg}"));
+            return;
+        }
+
         // Build prdt-host Args from defaults + GUI config. Construct via
         // parse_from so all clap defaults apply, then override known fields.
         let mut argv: Vec<std::ffi::OsString> = vec!["prdt-host".into()];
-        // Bind / bitrate / monitor / key_file come from gui-common Config.
-        let cfg = self.cfg.lock().unwrap().clone();
         argv.push("--bind".into());
         argv.push(cfg.host.bind.clone().into());
         argv.push("--monitor".into());
@@ -119,39 +149,74 @@ impl ClientApp {
         let args = match prdt_host::Args::try_parse_from(&argv) {
             Ok(a) => a,
             Err(e) => {
-                self.last_connect_status = Some(format!("invalid host args: {e}"));
+                self.host_status = Some(format!("invalid host args: {e}"));
                 return;
             }
         };
 
         let cancel = CancellationToken::new();
         let cancel_for_task = cancel.clone();
-        let join = self
-            .rt_handle
-            .spawn(async move { prdt_host::run_host(args, None, cancel_for_task).await });
-        self.listener = Some(ListenerState { cancel, join });
-        // After a successful start, host will (re)generate host-key.bin if needed.
-        // Refresh pubkey on next ui tick — egui repaints frequently so we just
-        // mark for refresh by clearing the error; the next refresh_pubkey call
-        // will pick up the new file.
+        let (result_tx, result_rx) = oneshot::channel();
+        let join = self.rt_handle.spawn(async move {
+            let res = prdt_host::run_host(args, None, cancel_for_task).await;
+            // Receiver may be gone if the GUI has already moved on; ignore.
+            let _ = result_tx.send(res);
+        });
+        self.listener = Some(ListenerState {
+            cancel,
+            join,
+            result_rx: Some(result_rx),
+        });
+        self.host_status = Some("starting listener…".into());
     }
 
     fn stop_listener(&mut self) {
         if let Some(state) = self.listener.take() {
             state.cancel.cancel();
-            // Don't await here; the task will wind down on the runtime.
-            // Drop the join handle and let it run to completion in background.
+            // Detach: let the wrapper task wind down on the runtime. We don't
+            // need the result here — Stop is user-initiated.
             let _ = self.rt_handle.spawn(async move {
                 let _ = state.join.await;
             });
+            self.host_status = Some("listener stopped".into());
         }
+    }
+
+    /// Drain the listener result without awaiting. Called every frame; once
+    /// the task finishes (gracefully or with error), we capture the message
+    /// and clear `self.listener` so the UI flips back to "Idle".
+    fn drain_listener_result(&mut self) {
+        let Some(state) = self.listener.as_mut() else {
+            return;
+        };
+        if !state.join.is_finished() {
+            return;
+        }
+        // The wrapper task is finished; it should have already sent on the
+        // oneshot. try_recv reflects that without blocking.
+        let msg = match state.result_rx.take() {
+            Some(mut rx) => match rx.try_recv() {
+                Ok(Ok(())) => "listener exited cleanly".to_string(),
+                Ok(Err(e)) => format!("listener error: {e:#}"),
+                Err(oneshot::error::TryRecvError::Empty) => {
+                    // Shouldn't happen since join is finished. Be defensive.
+                    "listener task ended (no result)".to_string()
+                }
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    "listener task ended (sender dropped)".to_string()
+                }
+            },
+            None => "listener task ended".to_string(),
+        };
+        self.host_status = Some(msg);
+        self.listener = None;
     }
 
     fn spawn_connect(&mut self) {
         let exe = match std::env::current_exe() {
             Ok(p) => p,
             Err(e) => {
-                self.last_connect_status = Some(format!("current_exe: {e}"));
+                self.connect_status = Some(format!("current_exe: {e}"));
                 return;
             }
         };
@@ -165,11 +230,10 @@ impl ClientApp {
         }
         match cmd.spawn() {
             Ok(child) => {
-                self.last_connect_status =
-                    Some(format!("launched viewer (pid {})", child.id()));
+                self.connect_status = Some(format!("launched viewer (pid {})", child.id()));
             }
             Err(e) => {
-                self.last_connect_status = Some(format!("spawn failed: {e}"));
+                self.connect_status = Some(format!("spawn failed: {e}"));
             }
         }
     }
@@ -177,7 +241,11 @@ impl ClientApp {
 
 impl eframe::App for ClientApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Tab bar
+        // Drain any finished listener result before drawing so the UI shows
+        // the cause (port-in-use, bind failure, etc.) instead of silently
+        // flipping back to Idle.
+        self.drain_listener_result();
+
         egui::TopBottomPanel::top("client_tabs").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.tab, Tab::ThisDevice, "This Device");
@@ -247,9 +315,17 @@ impl ClientApp {
             }
         });
 
-        if let Some(status) = &self.last_connect_status {
+        if let Some(status) = &self.host_status {
             ui.add_space(8.0);
-            ui.label(status);
+            // Errors get red highlighting for quick triage.
+            if status.starts_with("listener error")
+                || status.starts_with("cannot start")
+                || status.starts_with("invalid host args")
+            {
+                ui.colored_label(egui::Color32::LIGHT_RED, status);
+            } else {
+                ui.label(status);
+            }
         }
     }
 
@@ -269,9 +345,13 @@ impl ClientApp {
             self.spawn_connect();
         }
 
-        if let Some(status) = &self.last_connect_status {
+        if let Some(status) = &self.connect_status {
             ui.add_space(8.0);
-            ui.label(status);
+            if status.starts_with("spawn failed") || status.starts_with("current_exe") {
+                ui.colored_label(egui::Color32::LIGHT_RED, status);
+            } else {
+                ui.label(status);
+            }
         }
     }
 }
