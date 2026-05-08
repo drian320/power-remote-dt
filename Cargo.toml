@@ -8,6 +8,7 @@ members = [
     "crates/media-win",
     "crates/media-linux",
     "crates/input-win",
+    "crates/input-linux",
     "crates/host",
     "crates/viewer",
     "crates/latency-bench",
