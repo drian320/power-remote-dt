@@ -80,10 +80,11 @@ impl ClientApp {
         app
     }
 
-    /// Read host-key.bin (default path) and derive the pubkey for display.
+    /// Read the host key file (OS-conventional default path) and derive the pubkey for display.
     /// On miss the pubkey is None until the host listener generates one.
     fn refresh_pubkey(&mut self) {
-        let path = std::path::Path::new("host-key.bin");
+        let resolved = prdt_host::default_host_key_path();
+        let path = resolved.as_path();
         if !path.exists() {
             self.pubkey_b64 = None;
             self.pubkey_load_error = None;
@@ -187,9 +188,9 @@ impl ClientApp {
             state.cancel.cancel();
             // Detach: let the wrapper task wind down on the runtime. We don't
             // need the result here — Stop is user-initiated.
-            let _ = self.rt_handle.spawn(async move {
+            drop(self.rt_handle.spawn(async move {
                 let _ = state.join.await;
-            });
+            }));
             self.host_status = Some("listener stopped".into());
         }
         // Drop any consent state. Dropping `pending_consent` closes its

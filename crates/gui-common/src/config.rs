@@ -46,6 +46,15 @@ fn default_encoder_choice() -> String {
     "auto".into()
 }
 
+fn default_host_key_path() -> std::path::PathBuf {
+    if let Some(base) = dirs::data_local_dir() {
+        let dir = base.join("prdt");
+        let _ = std::fs::create_dir_all(&dir);
+        return dir.join("host-key.bin");
+    }
+    std::path::PathBuf::from("host-key.bin")
+}
+
 impl Default for HostConfig {
     fn default() -> Self {
         Self {
@@ -55,7 +64,7 @@ impl Default for HostConfig {
             outgoing_dir: PathBuf::from("prdt-outgoing"),
             signaling_url: String::new(),
             host_id_file: PathBuf::from("host-id.txt"),
-            key_file: PathBuf::from("host-key.bin"),
+            key_file: default_host_key_path(),
             auto_start: false,
             encoder: "auto".into(),
         }
