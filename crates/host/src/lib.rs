@@ -124,6 +124,16 @@ pub struct Args {
     /// rejected in headless mode. Created on first GUI-accepted unknown peer.
     #[arg(long, default_value = "known-peer-ids")]
     pub known_peers_file: std::path::PathBuf,
+
+    /// Disable the consent gate entirely: every successful Noise handshake is
+    /// accepted regardless of known-peer-ids contents, with no GUI prompt and
+    /// no persistence. Intended for CI / scripted setups where the operator
+    /// has out-of-band confidence in who can reach the bind address.
+    /// SECURITY: anyone who can complete the Noise handshake (i.e. anyone
+    /// with a viewer key — by default, anyone) gets in. Use only on isolated
+    /// networks or behind another auth layer.
+    #[arg(long)]
+    pub silent_allow: bool,
 }
 
 #[derive(Debug)]
@@ -314,7 +324,14 @@ pub async fn run_host(
             "Noise handshake complete — encrypted channel established"
         );
 
-        // Consent gate: known-peer-ids check + optional GUI prompt.
+        // Consent gate: known-peer-ids check + optional GUI prompt. Bypassed
+        // when --silent-allow is set (CI / scripted use only — see Args docs).
+        if args.silent_allow {
+            info!(
+                peer=%peer_pubkey.to_base64(),
+                "silent-allow enabled; skipping consent gate"
+            );
+        } else {
         let known = match prdt_crypto::KnownPeers::load_or_default(&args.known_peers_file) {
             Ok(k) => k,
             Err(e) => {
@@ -377,6 +394,7 @@ pub async fn run_host(
         } else {
             info!(peer=%peer_pubkey.to_base64(), "peer is in known-peer-ids; auto-accepted");
         }
+        } // end of !silent_allow branch
 
         // Wait for Hello, send HelloAck. Session ID is random per host start so
         // a reconnect from a viewer that had the old ID cached gets treated as a
