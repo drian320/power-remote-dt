@@ -118,11 +118,32 @@ pub struct Args {
     /// Override the GUI config file location (default: %APPDATA%/prdt/config.toml).
     #[arg(long)]
     config: Option<std::path::PathBuf>,
+
+    /// Path to known-peer-ids file. Each line: `<label> <pubkey-b64>`. Peers
+    /// listed here connect silently; unknown peers are prompted via GUI or
+    /// rejected in headless mode. Created on first GUI-accepted unknown peer.
+    #[arg(long, default_value = "known-peer-ids")]
+    pub known_peers_file: std::path::PathBuf,
 }
+
+#[derive(Debug)]
+pub struct ConsentRequest {
+    pub peer_pubkey: prdt_crypto::PubKey,
+    pub responder: tokio::sync::oneshot::Sender<ConsentDecision>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsentDecision {
+    Accept,
+    Reject,
+}
+
+pub type ConsentSender = tokio::sync::mpsc::UnboundedSender<ConsentRequest>;
 
 pub async fn run_host(
     args: Args,
     _status: Option<SharedStatus>,
+    consent_tx: Option<ConsentSender>,
     _cancel: CancellationToken,
 ) -> Result<()> {
     // Load or generate the host keypair.
@@ -292,9 +313,70 @@ pub async fn run_host(
             peer = %peer_pubkey.to_base64(),
             "Noise handshake complete — encrypted channel established"
         );
-        // peer_pubkey will be consumed by PR5b.3/5b.4 (consent gating).
-        // Suppress unused-warning for now without renaming the binding.
-        let _ = &peer_pubkey;
+
+        // Consent gate: known-peer-ids check + optional GUI prompt.
+        let known = match prdt_crypto::KnownPeers::load_or_default(&args.known_peers_file) {
+            Ok(k) => k,
+            Err(e) => {
+                warn!(?e, path=?args.known_peers_file, "failed to load known-peer-ids; rejecting session");
+                continue;
+            }
+        };
+        if !known.contains(&peer_pubkey) {
+            let decision = match &consent_tx {
+                Some(tx) => {
+                    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+                    let req = ConsentRequest {
+                        peer_pubkey,
+                        responder: resp_tx,
+                    };
+                    if tx.send(req).is_err() {
+                        warn!("consent channel closed; rejecting unknown peer");
+                        continue;
+                    }
+                    match resp_rx.await {
+                        Ok(d) => d,
+                        Err(_) => {
+                            warn!("consent responder dropped; rejecting unknown peer");
+                            continue;
+                        }
+                    }
+                }
+                None => {
+                    warn!(
+                        peer=%peer_pubkey.to_base64(),
+                        "unknown peer connected and no consent channel (headless without --silent-allow); rejecting"
+                    );
+                    continue;
+                }
+            };
+            match decision {
+                ConsentDecision::Reject => {
+                    info!(peer=%peer_pubkey.to_base64(), "consent rejected; resetting session");
+                    continue;
+                }
+                ConsentDecision::Accept => {
+                    // Persist so future connections from this peer are silent.
+                    let mut updated = known;
+                    updated.insert(peer_pubkey, peer_pubkey.to_base64());
+                    if let Err(e) = updated.save(&args.known_peers_file) {
+                        warn!(
+                            ?e,
+                            path=?args.known_peers_file,
+                            "failed to persist known-peer-ids; session continues but won't be remembered"
+                        );
+                    } else {
+                        info!(
+                            peer=%peer_pubkey.to_base64(),
+                            path=?args.known_peers_file,
+                            "added peer to known-peer-ids"
+                        );
+                    }
+                }
+            }
+        } else {
+            info!(peer=%peer_pubkey.to_base64(), "peer is in known-peer-ids; auto-accepted");
+        }
 
         // Wait for Hello, send HelloAck. Session ID is random per host start so
         // a reconnect from a viewer that had the old ID cached gets treated as a
@@ -705,7 +787,7 @@ pub fn run_with_args(args: Args) -> Result<()> {
     let args_arc = std::sync::Arc::new(args.clone());
     let run_host_fn: prdt_gui_host::RunHostFn = std::sync::Arc::new(move |cancel| {
         let args = args_arc.clone();
-        tokio::spawn(async move { run_host((*args).clone(), None, cancel).await })
+        tokio::spawn(async move { run_host((*args).clone(), None, None, cancel).await })
     });
     prdt_gui_host::run_host_gui(env!("CARGO_PKG_NAME"), args.config.clone(), run_host_fn)
 }
@@ -714,7 +796,7 @@ pub fn run_with_args(args: Args) -> Result<()> {
 async fn run_cli(args: Args) -> Result<()> {
     init_tracing();
     prdt_gui_common::install_panic_hook(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
-    run_host(args, None, tokio_util::sync::CancellationToken::new()).await
+    run_host(args, None, None, tokio_util::sync::CancellationToken::new()).await
 }
 
 fn init_tracing() {

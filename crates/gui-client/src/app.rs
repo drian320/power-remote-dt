@@ -36,6 +36,14 @@ pub struct ClientApp {
     peer_pubkey: String,
     /// Last status line shown under the Connect button.
     connect_status: Option<String>,
+
+    /// Receiver for incoming consent requests from the host listener task.
+    /// Polled in `update()` each frame; first request becomes `pending_consent`.
+    consent_rx: Option<tokio::sync::mpsc::UnboundedReceiver<prdt_host::ConsentRequest>>,
+    /// The dialog currently being shown to the user. Holds the responder
+    /// oneshot — dropping the Option without sending is treated as Reject by
+    /// `host`'s `resp_rx.await` (Closed → continue / reject).
+    pending_consent: Option<prdt_host::ConsentRequest>,
 }
 
 struct ListenerState {
@@ -65,6 +73,8 @@ impl ClientApp {
             peer_host: "127.0.0.1:9000".to_string(),
             peer_pubkey: String::new(),
             connect_status: None,
+            consent_rx: None,
+            pending_consent: None,
         };
         app.refresh_pubkey();
         app
@@ -157,11 +167,13 @@ impl ClientApp {
         let cancel = CancellationToken::new();
         let cancel_for_task = cancel.clone();
         let (result_tx, result_rx) = oneshot::channel();
+        let (consent_tx, consent_rx) = tokio::sync::mpsc::unbounded_channel();
         let join = self.rt_handle.spawn(async move {
-            let res = prdt_host::run_host(args, None, cancel_for_task).await;
+            let res = prdt_host::run_host(args, None, Some(consent_tx), cancel_for_task).await;
             // Receiver may be gone if the GUI has already moved on; ignore.
             let _ = result_tx.send(res);
         });
+        self.consent_rx = Some(consent_rx);
         self.listener = Some(ListenerState {
             cancel,
             join,
@@ -180,6 +192,10 @@ impl ClientApp {
             });
             self.host_status = Some("listener stopped".into());
         }
+        // Drop any consent state. Dropping `pending_consent` closes its
+        // responder oneshot, which the host treats as a reject.
+        self.consent_rx = None;
+        self.pending_consent = None;
     }
 
     /// Drain the listener result without awaiting. Called every frame; once
@@ -245,6 +261,13 @@ impl eframe::App for ClientApp {
         // the cause (port-in-use, bind failure, etc.) instead of silently
         // flipping back to Idle.
         self.drain_listener_result();
+
+        // Draw the consent dialog (if any) before tabs so it sits over
+        // both. Pulls one request off the channel when idle; subsequent
+        // requests stay buffered in the unbounded channel and surface in
+        // arrival order as each dialog is dismissed.
+        self.poll_consent_channel();
+        self.draw_consent_dialog(ctx);
 
         egui::TopBottomPanel::top("client_tabs").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -325,6 +348,60 @@ impl ClientApp {
                 ui.colored_label(egui::Color32::LIGHT_RED, status);
             } else {
                 ui.label(status);
+            }
+        }
+    }
+
+    /// Pull at most one consent request off the channel when no dialog is
+    /// already up. Multiple in-flight unknown peers are rare and stay
+    /// buffered in the unbounded channel until the user dismisses the
+    /// current dialog.
+    fn poll_consent_channel(&mut self) {
+        if self.pending_consent.is_some() {
+            return;
+        }
+        if let Some(rx) = self.consent_rx.as_mut() {
+            if let Ok(req) = rx.try_recv() {
+                self.pending_consent = Some(req);
+            }
+        }
+    }
+
+    fn draw_consent_dialog(&mut self, ctx: &egui::Context) {
+        if self.pending_consent.is_none() {
+            return;
+        }
+        let mut decision: Option<prdt_host::ConsentDecision> = None;
+        egui::Window::new("Incoming connection")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                let req = self.pending_consent.as_ref().unwrap();
+                ui.label("An unknown viewer is requesting to connect:");
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label("pubkey:");
+                    ui.monospace(req.peer_pubkey.to_base64());
+                });
+                ui.add_space(8.0);
+                ui.label(
+                    "Accepting will add this peer to known-peer-ids — \
+                     future connections from this pubkey will be silent.",
+                );
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Reject").clicked() {
+                        decision = Some(prdt_host::ConsentDecision::Reject);
+                    }
+                    if ui.button("Accept and remember").clicked() {
+                        decision = Some(prdt_host::ConsentDecision::Accept);
+                    }
+                });
+            });
+        if let Some(d) = decision {
+            if let Some(req) = self.pending_consent.take() {
+                let _ = req.responder.send(d);
             }
         }
     }

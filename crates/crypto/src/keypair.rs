@@ -6,7 +6,7 @@ use x25519_dalek::{PublicKey, StaticSecret};
 #[derive(Debug, Clone)]
 pub struct PrivKey(pub [u8; 32]);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PubKey(pub [u8; 32]);
 
 #[derive(Debug, Clone)]
