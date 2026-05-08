@@ -1,0 +1,25 @@
+[package]
+name = "prdt-gui-client"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+prdt-gui-common = { path = "../gui-common" }
+eframe = { workspace = true }
+egui = { workspace = true }
+anyhow = "1"
+tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+prdt-host = { path = "../host" }
+prdt-viewer = { path = "../viewer" }
+prdt-gui-host = { path = "../gui-host" }
+prdt-crypto = { path = "../crypto" }
+clap = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

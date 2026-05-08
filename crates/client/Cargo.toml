@@ -17,6 +17,7 @@ clap = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 prdt-host = { path = "../host" }
 prdt-viewer = { path = "../viewer" }
+prdt-gui-client = { path = "../gui-client" }
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"

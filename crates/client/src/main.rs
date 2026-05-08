@@ -17,7 +17,7 @@ use clap::{Parser, Subcommand};
 )]
 struct Cli {
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -44,12 +44,14 @@ fn main() -> anyhow::Result<()> {
     use clap::Parser as _;
 
     match Cli::parse().cmd {
-        Cmd::Host { args } => {
+        // No subcommand → unified GUI (RustDesk-style: one window, two tabs).
+        None => prdt_gui_client::run_client_gui(None),
+        Some(Cmd::Host { args }) => {
             let argv = std::iter::once(OsString::from("prdt-host")).chain(args);
             let host_args = prdt_host::Args::parse_from(argv);
             prdt_host::run_with_args(host_args)
         }
-        Cmd::Connect { args } | Cmd::Viewer { args } => {
+        Some(Cmd::Connect { args }) | Some(Cmd::Viewer { args }) => {
             let argv = std::iter::once(OsString::from("prdt-viewer")).chain(args);
             let viewer_args = prdt_viewer::Args::parse_from(argv);
             prdt_viewer::run_with_args(viewer_args)
