@@ -123,9 +123,37 @@ pub struct CustomUdpTransport {
     send_nonce: AtomicU64,
 }
 
+/// SO_RCVBUF target for the UDP socket. The viewer can spend ~100ms in NVDEC /
+/// D3D11 setup between Noise handshake and the recv-loop draining packets,
+/// during which the host has already produced a large IDR (~80KB at 1080p
+/// 20Mbps) plus several P-frames. With Windows' default ~64KB UDP recv buffer
+/// the IDR's chunks get dropped, the assembler can't reconstruct it, NVDEC
+/// never sees a sequence header, and decode stays at zero forever. 4MB is
+/// sized to absorb several seconds of 30Mbps video on top of the IDR while
+/// the consumer warms up; OS will silently clamp if `net.ipv4.udp_rmem_max`
+/// (Linux) / per-socket maximum (Windows) is smaller, which is fine.
+const UDP_RCVBUF_TARGET: usize = 4 * 1024 * 1024;
+
+/// Build a tokio `UdpSocket` whose underlying file descriptor has SO_RCVBUF
+/// set to [`UDP_RCVBUF_TARGET`]. Returns `Err` if the OS rejects the bind;
+/// SO_RCVBUF setting is best-effort — failures are logged and ignored, since
+/// the socket is still functional with the default size.
+fn bind_with_rcvbuf(addr: SocketAddr) -> std::io::Result<UdpSocket> {
+    use socket2::{Domain, Protocol, Socket as Sock2, Type};
+    let domain = if addr.is_ipv6() { Domain::IPV6 } else { Domain::IPV4 };
+    let sock = Sock2::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+    sock.set_nonblocking(true)?;
+    if let Err(e) = sock.set_recv_buffer_size(UDP_RCVBUF_TARGET) {
+        tracing::warn!(?e, target = UDP_RCVBUF_TARGET, "set_recv_buffer_size failed; using default");
+    }
+    sock.bind(&addr.into())?;
+    let std_sock: std::net::UdpSocket = sock.into();
+    UdpSocket::from_std(std_sock)
+}
+
 impl CustomUdpTransport {
     pub async fn bind(addr: SocketAddr, cfg: UdpTransportConfig) -> Result<Self, TransportError> {
-        let socket = Socket::Direct(Arc::new(UdpSocket::bind(addr).await?));
+        let socket = Socket::Direct(Arc::new(bind_with_rcvbuf(addr)?));
         let fec = FecCodec::new(cfg.fec_k, cfg.fec_m)?;
         Ok(Self {
             socket,
