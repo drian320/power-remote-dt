@@ -20,6 +20,7 @@ members = [
     "crates/gui-viewer",
     "crates/viewer-overlay",
     "crates/media-sw",
+    "crates/client",
 ]
 
 [workspace.package]

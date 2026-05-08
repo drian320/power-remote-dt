@@ -17,8 +17,5 @@ url = { workspace = true }
 serde = { workspace = true }
 anyhow = "1"
 
-[target.'cfg(windows)'.build-dependencies]
-winres = "0.1"
-
 [dev-dependencies]
 tempfile = "3"

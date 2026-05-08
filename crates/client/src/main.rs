@@ -1,0 +1,63 @@
+//! `prdt` — unified CLI dispatcher.
+//!
+//! Subcommands forward all trailing args verbatim to the underlying lib
+//! entrypoints, so `prdt host --bind 0.0.0.0:9000 ...` is identical in behavior
+//! to running the legacy `prdt-host.exe --bind 0.0.0.0:9000 ...`. The bin
+//! shims for the legacy names remain for one release as a compat layer.
+
+use std::ffi::OsString;
+
+use clap::{Parser, Subcommand};
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "prdt",
+    about = "power-remote-dt unified client",
+    disable_help_subcommand = true
+)]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand, Debug)]
+enum Cmd {
+    /// Run as host (capture + encode + serve).
+    Host {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+    /// Connect to a host as viewer.
+    Connect {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+    /// Compatibility alias for `connect`.
+    Viewer {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+}
+
+#[cfg(windows)]
+fn main() -> anyhow::Result<()> {
+    use clap::Parser as _;
+
+    match Cli::parse().cmd {
+        Cmd::Host { args } => {
+            let argv = std::iter::once(OsString::from("prdt-host")).chain(args);
+            let host_args = prdt_host::Args::parse_from(argv);
+            prdt_host::run_with_args(host_args)
+        }
+        Cmd::Connect { args } | Cmd::Viewer { args } => {
+            let argv = std::iter::once(OsString::from("prdt-viewer")).chain(args);
+            let viewer_args = prdt_viewer::Args::parse_from(argv);
+            prdt_viewer::run_with_args(viewer_args)
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn main() -> anyhow::Result<()> {
+    anyhow::bail!("prdt currently only supports Windows hosts/viewers");
+}

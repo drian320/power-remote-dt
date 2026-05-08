@@ -15,25 +15,9 @@ fn main() {
 
     println!("cargo:rerun-if-changed=build.rs");
 
-    // Phase 4 G4: embed Windows version resource + icon into prdt-host.exe.
-    #[cfg(target_os = "windows")]
-    {
-        let icon = std::path::Path::new("resources/prdt-icon.ico");
-        let mut res = winres::WindowsResource::new();
-        res.set("FileDescription", "Power Remote Desktop (Host)");
-        res.set("ProductName", "Power Remote Desktop");
-        if icon.exists() {
-            res.set_icon(icon.to_str().expect("ascii icon path"));
-        } else {
-            println!(
-                "cargo:warning=prdt-host: {} missing; building without icon (Task 5 generates it)",
-                icon.display()
-            );
-        }
-        if let Err(e) = res.compile() {
-            println!("cargo:warning=winres compile failed: {e}");
-        }
-    }
+    // Note: Windows version resource embedding moved to crates/client/build.rs
+    // (the prdt.exe bin) so that linking the gui-host lib into multiple bins
+    // (prdt-host, prdt) doesn't produce CVT1100 duplicate-VERSION errors.
 }
 
 /// Write a 32×32 RGBA PNG of the given color to `assets/<name>`.

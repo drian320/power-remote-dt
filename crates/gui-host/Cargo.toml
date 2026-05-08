@@ -34,8 +34,5 @@ winreg = { workspace = true }
 [build-dependencies]
 image = { workspace = true }
 
-[target.'cfg(windows)'.build-dependencies]
-winres = "0.1"
-
 [dev-dependencies]
 tempfile = "3"

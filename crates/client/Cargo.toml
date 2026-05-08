@@ -1,0 +1,22 @@
+[package]
+name = "prdt-client"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "prdt"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+prdt-host = { path = "../host" }
+prdt-viewer = { path = "../viewer" }
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"

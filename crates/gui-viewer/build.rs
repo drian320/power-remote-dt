@@ -1,23 +1,8 @@
-//! Phase 4 G4 — embed Windows version resource + icon into prdt-viewer.exe.
+//! Note: previously embedded a Windows version resource via winres into
+//! prdt-viewer.exe. That responsibility moved to crates/client/build.rs
+//! (the prdt.exe bin). Embedding here caused CVT1100 duplicate-VERSION
+//! when both prdt-host and prdt-viewer libs were linked into one bin.
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    #[cfg(target_os = "windows")]
-    {
-        let icon = std::path::PathBuf::from("../gui-host/resources/prdt-icon.ico");
-        let mut res = winres::WindowsResource::new();
-        res.set("FileDescription", "Power Remote Desktop (Viewer)");
-        res.set("ProductName", "Power Remote Desktop");
-        if icon.exists() {
-            res.set_icon(icon.to_str().expect("ascii icon path"));
-        } else {
-            println!(
-                "cargo:warning=prdt-viewer: {} missing; building without icon",
-                icon.display()
-            );
-        }
-        if let Err(e) = res.compile() {
-            println!("cargo:warning=winres compile failed: {e}");
-        }
-    }
 }
