@@ -18,9 +18,7 @@ use platform::{
     pick_default_output, read_clipboard_text, virtual_desktop_rect, write_clipboard_text,
     MAX_CLIPBOARD_BYTES,
 };
-use prdt_protocol::{wire::AudioPacket, Codec, ControlMessage};
-#[cfg(windows)]
-use prdt_protocol::MonitorRect;
+use prdt_protocol::{wire::AudioPacket, Codec, ControlMessage, MonitorRect};
 
 use prdt_transport::{
     host_handshake, now_monotonic_us, CustomUdpTransport, ReceivedMessage, Transport,
@@ -411,7 +409,19 @@ pub async fn run_host(
             output.desktop_rect.bottom,
         );
         #[cfg(target_os = "linux")]
-        let monitor_rect = vd_rect;
+        let monitor_rect = {
+            // Match the X11 capturer's clamp (encoder max 3840x2160 on
+            // multi-monitor WSLg). Without this the viewer scales mouse
+            // input to a rect bigger than what the host actually captures.
+            use prdt_media_linux::x11_capture::{MAX_CAPTURE_H, MAX_CAPTURE_W};
+            let clipped_right = vd_rect.left.saturating_add(
+                ((vd_rect.right - vd_rect.left) as u32).min(MAX_CAPTURE_W) as i32,
+            );
+            let clipped_bottom = vd_rect.top.saturating_add(
+                ((vd_rect.bottom - vd_rect.top) as u32).min(MAX_CAPTURE_H) as i32,
+            );
+            MonitorRect::new(vd_rect.left, vd_rect.top, clipped_right, clipped_bottom)
+        };
         info!(
             monitor = ?monitor_rect,
             virtual_desktop = ?vd_rect,
@@ -543,13 +553,14 @@ pub async fn run_host(
 
         let audio_transport = Arc::clone(&transport);
         let cancel_audio = cancel.clone();
-        let cancel_audio_propagate = cancel.clone();
+        // Audio is optional. Its failure must NOT cancel the session — video +
+        // input must continue. (Pre-L1.5b this code propagated cancel; that
+        // killed every WSLg session because ALSA has no default device there.)
         let audio_task = tokio::spawn(async move {
             let mut encoder = match OpusEncoder::new() {
                 Ok(e) => e,
                 Err(e) => {
-                    warn!(?e, "opus encoder init");
-                    cancel_audio_propagate.cancel();
+                    warn!(?e, "opus encoder init failed; continuing without audio");
                     return;
                 }
             };
@@ -578,12 +589,11 @@ pub async fn run_host(
                                     warn!(?e, "send_audio");
                                 }
                             }
-                            None => break, // channel closed, exit task
+                            None => break, // channel closed (e.g. capture init failed); exit silently
                         }
                     }
                 }
             }
-            cancel_audio_propagate.cancel();
         });
 
         // Shared "last clipboard text we received from peer" — used by the
