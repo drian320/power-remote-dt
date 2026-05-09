@@ -21,10 +21,45 @@ pub enum ClipboardError {
 
 #[cfg(windows)]
 pub mod win;
+#[cfg(windows)]
+pub use win::{
+    build_video_producer, clipboard_sequence_number, dispatch_input, pick_default_output,
+    read_clipboard_text, virtual_desktop_rect, write_clipboard_text, OutputDescriptor,
+    MAX_CLIPBOARD_BYTES,
+};
+// Internal Windows-only types still used by lib.rs (e.g. tests). Removed in T7.
+#[cfg(windows)]
+pub use win::{DxgiSwProducer, VideoEncoderBackend};
 
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::{
+    build_video_producer, clipboard_sequence_number, dispatch_input, pick_default_output,
+    read_clipboard_text, virtual_desktop_rect, write_clipboard_text, OutputDescriptor,
+    MAX_CLIPBOARD_BYTES,
+};
 
-// Cfg-aliased re-exports added in T4/T5 once both modules' factory
-// surfaces exist. For now, leave only the error types public from
-// this module.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dispatch_error_round_trip() {
+        let e = DispatchError::Backend("uinput closed".into());
+        assert_eq!(e.to_string(), "input dispatch backend error: uinput closed");
+    }
+
+    #[test]
+    fn clipboard_error_variants_match_l0() {
+        assert_eq!(ClipboardError::NoText.to_string(), "no text content available");
+        assert_eq!(
+            ClipboardError::TooLarge(70_000).to_string(),
+            "clipboard payload too large: 70000 bytes"
+        );
+        assert_eq!(
+            ClipboardError::Backend("xfixes drop".into()).to_string(),
+            "clipboard backend error: xfixes drop"
+        );
+    }
+}
