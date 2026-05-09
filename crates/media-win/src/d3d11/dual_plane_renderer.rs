@@ -87,9 +87,13 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET {
 
 /// YUV→BGRA renderer for the NVDEC zero-copy dual-plane path.
 pub struct DualPlaneYuvRenderer {
+    #[allow(dead_code)]
     dev: D3d11Device,
+    #[allow(dead_code)]
     vs: ID3D11VertexShader,
+    #[allow(dead_code)]
     ps: ID3D11PixelShader,
+    #[allow(dead_code)]
     sampler: ID3D11SamplerState,
 }
 
