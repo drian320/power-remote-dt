@@ -414,8 +414,13 @@ use prdt_protocol::{InputEvent, MonitorRect, VideoProducer};
 pub const MAX_CLIPBOARD_BYTES: usize = _INPUT_WIN_MAX;
 
 /// Per-OS opaque output descriptor. Windows holds the real `OutputInfo`;
-/// Linux holds `()`.
+/// Linux holds a unit struct `OutputDescriptor`.
 pub type OutputDescriptor = OutputInfo;
+
+/// Human-readable name for the output; used in the "host starting" log.
+pub fn output_display_name(d: &OutputDescriptor) -> &str {
+    &d.device_name
+}
 
 /// Pick the default output (monitor) for capture. Internally enumerates
 /// adapters + outputs and returns the first.

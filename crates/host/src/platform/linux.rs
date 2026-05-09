@@ -19,11 +19,18 @@ use std::sync::Once;
 pub const MAX_CLIPBOARD_BYTES: usize = _INPUT_LINUX_MAX;
 
 /// Linux has no opaque output descriptor — X11 root window is implicit.
-pub type OutputDescriptor = ();
+/// A unit struct (not `= ()`) avoids the `clippy::let_unit_value` lint
+/// at the `let output = pick_default_output(...)` call-site in lib.rs.
+pub struct OutputDescriptor;
 
 /// Pick the default output. On Linux the X11 root is always used.
 pub fn pick_default_output(_args: &crate::Args) -> anyhow::Result<OutputDescriptor> {
-    Ok(())
+    Ok(OutputDescriptor)
+}
+
+/// Human-readable name for the output; used in the "host starting" log.
+pub fn output_display_name(_d: &OutputDescriptor) -> &'static str {
+    "x11-root"
 }
 
 /// Build a boxed `VideoProducer` for the Linux SW path. Args from the

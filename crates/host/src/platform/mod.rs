@@ -23,10 +23,14 @@ pub enum ClipboardError {
 pub mod win;
 #[cfg(windows)]
 pub use win::{
-    build_video_producer, clipboard_sequence_number, dispatch_input, pick_default_output,
-    read_clipboard_text, virtual_desktop_rect, write_clipboard_text, OutputDescriptor,
+    build_video_producer, clipboard_sequence_number, dispatch_input, output_display_name,
+    pick_default_output, read_clipboard_text, virtual_desktop_rect, write_clipboard_text,
     MAX_CLIPBOARD_BYTES,
 };
+// OutputDescriptor is re-exported for downstream callers that need to name
+// the type explicitly (e.g. GUI-host wrappers). lib.rs uses it opaquely.
+#[cfg(windows)]
+pub use win::OutputDescriptor;
 // Internal Windows-only types still used by lib.rs (e.g. tests). Removed in T7.
 #[cfg(windows)]
 pub use win::{DxgiSwProducer, VideoEncoderBackend};
@@ -35,8 +39,8 @@ pub use win::{DxgiSwProducer, VideoEncoderBackend};
 pub mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::{
-    build_video_producer, clipboard_sequence_number, dispatch_input, pick_default_output,
-    read_clipboard_text, virtual_desktop_rect, write_clipboard_text, OutputDescriptor,
+    build_video_producer, clipboard_sequence_number, dispatch_input, output_display_name,
+    pick_default_output, read_clipboard_text, virtual_desktop_rect, write_clipboard_text,
     MAX_CLIPBOARD_BYTES,
 };
 

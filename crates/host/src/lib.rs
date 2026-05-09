@@ -14,8 +14,9 @@ use prdt_audio::{LoopbackCapture, OpusEncoder};
 use prdt_crypto::KeyPair;
 use prdt_filetransfer::{send_file, TransferReceiver, DEFAULT_MAX_TRANSFER_BYTES};
 use platform::{
-    build_video_producer, clipboard_sequence_number, dispatch_input, pick_default_output,
-    read_clipboard_text, virtual_desktop_rect, write_clipboard_text, MAX_CLIPBOARD_BYTES,
+    build_video_producer, clipboard_sequence_number, dispatch_input, output_display_name,
+    pick_default_output, read_clipboard_text, virtual_desktop_rect, write_clipboard_text,
+    MAX_CLIPBOARD_BYTES,
 };
 use prdt_protocol::{wire::AudioPacket, Codec, ControlMessage};
 #[cfg(windows)]
@@ -193,6 +194,7 @@ pub async fn run_host(
 
     info!(
         monitor = args.monitor,
+        device_name = output_display_name(&output),
         bitrate_mbps = args.bitrate_mbps,
         encoder = %args.encoder,
         "host starting"
@@ -453,7 +455,7 @@ pub async fn run_host(
             &args.encoder,
             &output,
             bitrate_bps,
-            60, // hard-coded 60 fps; existing host doesn't thread fps through this site
+            60, // TODO(L2): thread fps from Args::fps when --fps flag is added
             req.codec,
         )
         .context("build_video_producer")?;
