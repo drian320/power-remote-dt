@@ -1,21 +1,19 @@
-//! Linux media backend — empty skeleton for L1.
+//! Linux media backend — XShm capture + OpenH264 SW encode/decode +
+//! VideoProducer adapter. See `docs/superpowers/specs/2026-05-09-l1-linux-poc-design.md`.
 //!
-//! This crate compiles to an empty library on non-Linux targets. On
-//! Linux it will provide screen-capture (X11 / xdg-desktop-portal +
-//! PipeWire) and encode/decode (VAAPI / NVENC Linux / software)
-//! implementations of `prdt_media_core` traits in L1+.
-//!
-//! L0 deliverable: crate exists and is wired into the workspace so
-//! the L1 implementer has a place to write code without restructuring
-//! the workspace mid-flight.
+//! The crate compiles to an empty library on non-Linux targets.
 
 #![cfg(target_os = "linux")]
 #![allow(dead_code)]
 
-// Intentionally empty in L0. L1 will add:
+pub mod error;
+pub mod frame;
+// Subsequent tasks will add:
 //   pub mod x11_capture;
-//   pub mod portal_capture;
-//   pub mod vaapi_encode;
-//   pub mod nvenc_linux;
-//   pub mod ffmpeg_decode;
-//   pub mod core_adapter;  // impls of prdt_media_core traits
+//   pub mod sw_pipeline;
+//   pub mod i420_to_bgra;
+//   pub mod linux_sw_producer;
+//   pub mod core_adapter;
+
+pub use error::LinuxMediaError;
+pub use frame::BgraFrame;
