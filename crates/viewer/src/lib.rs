@@ -1,5 +1,3 @@
-#![cfg(windows)]
-
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -9,21 +7,14 @@ use clap::Parser;
 use prdt_audio::{AudioPlayback, OpusDecoder};
 use prdt_crypto::{KeyPair, KnownHosts, PubKey};
 use prdt_filetransfer::{send_file, TransferReceiver, DEFAULT_MAX_TRANSFER_BYTES};
-use prdt_input_win::{
-    clipboard_sequence_number, read_clipboard_text, write_clipboard_text, RawInputCapturer,
-    MAX_CLIPBOARD_BYTES,
-};
-#[cfg(prdt_nvdec_bindings)]
-use prdt_media_win::NvdecD3d11Consumer;
-use prdt_media_win::{
-    pick_default_adapter, CpuI420Uploader, D3d11Device, MfD3d11Consumer, Nv12Renderer, SwapChain,
-};
-use prdt_media_sw::Openh264Decoder;
-use prdt_media_sw::traits::SwH264Decoder;
-use prdt_protocol::{frame::Codec, ControlMessage, InputEvent, MonitorRect, VideoConsumer};
+use prdt_protocol::{frame::Codec, ControlMessage, InputEvent, MonitorRect};
+#[cfg(windows)]
+use prdt_protocol::VideoConsumer;
 
+#[cfg(windows)]
 #[allow(dead_code)] // wired into ViewerApp in Task 3
 mod overlay_ipc;
+#[cfg(windows)]
 #[allow(dead_code)] // wired into ViewerApp in Task 3
 mod overlay_supervisor;
 
@@ -31,12 +22,13 @@ mod latency;
 use latency::LatencyProbe;
 
 mod platform;
-
-#[cfg(windows)]
-use platform::win::{
-    extract_hwnd, PlatformConsumer as ViewerConsumer, PlatformFrame as LatestFrame,
-    PlatformRender as ViewerRender, WinRenderer as ViewerRenderer,
+use platform::{
+    build_consumer, build_render, clipboard_sequence_number, map_winit_mouse_button,
+    physical_key_to_scancode, present_frame, read_clipboard_text, resize_renderer,
+    write_clipboard_text, PlatformConsumer, PlatformFrame, PlatformRender, RenderError,
+    MAX_CLIPBOARD_BYTES,
 };
+
 use prdt_transport::{
     viewer_handshake, CustomUdpTransport, HelloRequest, ReceivedMessage, Transport,
     UdpTransportConfig, DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_HELLO_RETRIES, DEFAULT_HELLO_TIMEOUT,
@@ -47,8 +39,6 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::PhysicalKey;
-use winit::platform::scancode::PhysicalKeyExtScancode;
 use winit::window::{Window, WindowId};
 
 pub fn default_viewer_key_path() -> std::path::PathBuf {
@@ -371,7 +361,7 @@ struct ViewerShared {
     /// shared monotonic clock). The render thread pops this, presents, and
     /// feeds `host_ts_us` into the LatencyProbe to close the glass-to-glass
     /// measurement loop.
-    latest_texture: Arc<Mutex<Option<(LatestFrame, u64)>>>,
+    latest_frame: Arc<Mutex<Option<(PlatformFrame, u64)>>>,
     /// Stream dimensions negotiated from HelloAck (and later refined by the
     /// decoder's reported texture size).
     stream_width: Mutex<u32>,
@@ -400,10 +390,10 @@ struct ViewerApp {
     req_w: u32,
     req_h: u32,
     shared: Arc<ViewerShared>,
-    render: Option<ViewerRender>,
-    dev: D3d11Device,
+    render: Option<PlatformRender>,
     decoder: String,
     /// True when invoked with --headless; overlay is suppressed in that mode.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     headless: bool,
     // The tokio runtime running the UDP / decode worker thread; kept alive
     // for the duration of the event loop.
@@ -413,8 +403,10 @@ struct ViewerApp {
     /// `event_loop.exit()` so the next iteration tears down cleanly.
     should_exit: bool,
     /// Phase 4 G2: overlay supervisor. None when --headless or when init failed.
+    #[cfg(windows)]
     overlay: Option<overlay_supervisor::OverlaySupervisor>,
     /// Last time we wrote stats.json. Throttled to 1 Hz in about_to_wait.
+    #[cfg(windows)]
     last_overlay_tick: std::time::Instant,
     /// Set by overlay control polling when the user clicked Disconnect.
     /// Checked in about_to_wait to call event_loop.exit().
@@ -445,44 +437,27 @@ impl ApplicationHandler for ViewerApp {
         };
         info!("window created ok");
 
-        info!("extracting HWND");
-        let hwnd = match extract_hwnd(&window) {
-            Ok(h) => h,
-            Err(e) => {
-                warn!(?e, "failed to extract HWND");
-                event_loop.exit();
-                return;
-            }
-        };
-        info!("HWND extracted");
-
         let size = window.inner_size();
         info!(
             width = size.width,
             height = size.height,
-            "creating swapchain"
+            "creating render state"
         );
-        let swap =
-            match SwapChain::new_for_hwnd(&self.dev, hwnd, size.width.max(1), size.height.max(1)) {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!(?e, "failed to create swapchain");
-                    event_loop.exit();
-                    return;
-                }
-            };
-        info!("swapchain created");
-
-        self.render = Some(ViewerRender {
-            window: Arc::clone(&window),
-            dev: self.dev.clone(),
-            swap,
-            renderer: None,
-        });
+        let render = match build_render(Arc::clone(&window), size.width.max(1), size.height.max(1))
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(?e, "build_render failed");
+                event_loop.exit();
+                return;
+            }
+        };
+        self.render = Some(render);
         window.request_redraw();
         info!("resumed done, first redraw requested");
 
         // Phase 4 G2: spawn overlay supervisor (skipped in --headless mode).
+        #[cfg(windows)]
         if !self.headless {
             match overlay_supervisor::OverlaySupervisor::new() {
                 Ok(s) => {
@@ -507,31 +482,20 @@ impl ApplicationHandler for ViewerApp {
             }
             WindowEvent::Resized(PhysicalSize { width, height }) => {
                 if let Some(r) = self.render.as_mut() {
-                    if let Err(e) = r.swap.resize(width.max(1), height.max(1)) {
-                        warn!(?e, "swapchain resize failed");
+                    if let Err(e) = resize_renderer(r, width.max(1), height.max(1)) {
+                        warn!(?e, "resize_renderer failed");
                     }
-                    if let Some(rn) = r.renderer.as_mut() {
-                        match rn {
-                            ViewerRenderer::Mf(rmf) => {
-                                rmf.resize_output(width.max(1), height.max(1));
-                            }
-                            #[cfg(prdt_nvdec_bindings)]
-                            ViewerRenderer::Nvdec(_) => {
-                                // DualPlaneYuvRenderer is dimension-agnostic;
-                                // no resize needed.
-                            }
-                        }
-                    }
-                    r.window.request_redraw();
+                    r.window().request_redraw();
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 if let Some(r) = self.render.as_ref() {
-                    self.emit_mouse_move(position, &r.swap);
+                    let win_size = r.window().inner_size();
+                    self.emit_mouse_move(position, win_size.width, win_size.height);
                 }
             }
             WindowEvent::MouseInput { button, state, .. } => {
-                if let Some(btn) = RawInputCapturer::map_winit_mouse_button(button) {
+                if let Some(btn) = map_winit_mouse_button(button) {
                     let pressed = matches!(state, ElementState::Pressed);
                     let _ = self.shared.input_tx.send(InputEvent::MouseButton {
                         button: btn,
@@ -558,10 +522,18 @@ impl ApplicationHandler for ViewerApp {
                     == winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Escape)
                     && event.state == ElementState::Pressed
                 {
-                    if let Some(s) = self.overlay.as_mut() {
-                        if let Err(e) = s.spawn_if_idle() {
-                            warn!(?e, "overlay spawn failed");
+                    #[cfg(windows)]
+                    {
+                        if let Some(s) = self.overlay.as_mut() {
+                            if let Err(e) = s.spawn_if_idle() {
+                                warn!(?e, "overlay spawn failed");
+                            }
                         }
+                    }
+                    #[cfg(target_os = "linux")]
+                    {
+                        info!("Esc pressed; quick-disconnecting (overlay deferred to L2 on Linux)");
+                        event_loop.exit();
                     }
                     return;
                 }
@@ -594,6 +566,7 @@ impl ApplicationHandler for ViewerApp {
         }
 
         // Phase 4 G2: 1 Hz overlay tick — write stats.json + poll control.json.
+        #[cfg(windows)]
         if self.last_overlay_tick.elapsed() >= std::time::Duration::from_secs(1) {
             self.last_overlay_tick = std::time::Instant::now();
             if let Some(ref s) = self.overlay {
@@ -621,9 +594,9 @@ impl ApplicationHandler for ViewerApp {
         // and the latency task only touches this slot every ~1s.
         if let Some(r) = self.render.as_ref() {
             if let Some(title) = self.shared.status_title.lock().unwrap().take() {
-                r.window.set_title(&title);
+                r.window().set_title(&title);
             }
-            r.window.request_redraw();
+            r.window().request_redraw();
         }
     }
 
@@ -633,9 +606,9 @@ impl ApplicationHandler for ViewerApp {
 }
 
 impl ViewerApp {
-    fn emit_mouse_move(&self, position: PhysicalPosition<f64>, swap: &SwapChain) {
-        let window_w = (swap.width() as f64).max(1.0);
-        let window_h = (swap.height() as f64).max(1.0);
+    fn emit_mouse_move(&self, position: PhysicalPosition<f64>, win_w: u32, win_h: u32) {
+        let window_w = (win_w as f64).max(1.0);
+        let window_h = (win_h as f64).max(1.0);
         let monitor = *self.shared.host_monitor_rect.lock().unwrap();
         let vd = *self.shared.host_virtual_desktop_rect.lock().unwrap();
         let (abs_x, abs_y) =
@@ -651,130 +624,26 @@ impl ViewerApp {
         let Some(render) = self.render.as_mut() else {
             return;
         };
-
-        // Pull the latest decoded texture, if any.
-        let maybe_tex = self.shared.latest_texture.lock().unwrap().take();
+        let maybe_frame = self.shared.latest_frame.lock().unwrap().take();
         let mut presented_host_ts: Option<u64> = None;
-
-        if let Some((tex, host_ts_us)) = maybe_tex {
-            // Lazily build the renderer once we know the decoded frame size
-            // (for MF/NV12) or on first frame (for NVDEC dual-plane, which is
-            // dimension-agnostic).
-            let needs_new = match (&tex, render.renderer.as_ref()) {
-                (LatestFrame::Nv12(nv12), Some(ViewerRenderer::Mf(rmf))) => {
-                    rmf.input_size() != (nv12.width(), nv12.height())
+        if let Some((frame, host_ts_us)) = maybe_frame {
+            if let Err(e) = present_frame(render, &frame, &self.decoder) {
+                if matches!(e, RenderError::DeviceLost(_)) {
+                    tracing::error!(?e, "present_frame device-lost; viewer cannot continue");
+                    self.should_exit = true;
                 }
-                (_, None) => true,
-                // Variant mismatch (e.g. DualPlane frame but Mf renderer still
-                // cached from a previous session) — treat as needs rebuild.
-                #[allow(unreachable_patterns)]
-                _ => true,
-            };
-            if needs_new {
-                let (iw, ih) = match &tex {
-                    LatestFrame::Nv12(nv12) => (nv12.width(), nv12.height()),
-                    #[cfg(prdt_nvdec_bindings)]
-                    LatestFrame::DualPlane(dp) => (dp.width, dp.height),
-                };
-                let new_renderer = if self.decoder == "nvdec" {
-                    #[cfg(prdt_nvdec_bindings)]
-                    {
-                        match prdt_media_win::DualPlaneYuvRenderer::new(&self.dev) {
-                            Ok(r) => Some(ViewerRenderer::Nvdec(r)),
-                            Err(e) => {
-                                warn!(?e, "DualPlaneYuvRenderer::new failed");
-                                return;
-                            }
-                        }
-                    }
-                    #[cfg(not(prdt_nvdec_bindings))]
-                    {
-                        match Nv12Renderer::new(
-                            &self.dev,
-                            iw,
-                            ih,
-                            render.swap.width(),
-                            render.swap.height(),
-                        ) {
-                            Ok(r) => Some(ViewerRenderer::Mf(r)),
-                            Err(e) => {
-                                warn!(?e, "Nv12Renderer::new failed");
-                                return;
-                            }
-                        }
-                    }
-                } else {
-                    match Nv12Renderer::new(
-                        &self.dev,
-                        iw,
-                        ih,
-                        render.swap.width(),
-                        render.swap.height(),
-                    ) {
-                        Ok(r) => Some(ViewerRenderer::Mf(r)),
-                        Err(e) => {
-                            warn!(?e, "Nv12Renderer::new failed");
-                            return;
-                        }
-                    }
-                };
-                render.renderer = new_renderer;
-                // Cache the observed stream size so input scaling remains sane.
-                *self.shared.stream_width.lock().unwrap() = iw;
-                *self.shared.stream_height.lock().unwrap() = ih;
-            }
-
-            if let Some(r) = render.renderer.as_ref() {
-                #[allow(unreachable_patterns)]
-                match (r, &tex) {
-                    (ViewerRenderer::Mf(rmf), LatestFrame::Nv12(nv12_tex)) => {
-                        if let Err(e) = rmf.render(nv12_tex, &render.swap) {
-                            warn!(?e, "Nv12Renderer::render failed");
-                        }
-                    }
-                    #[cfg(prdt_nvdec_bindings)]
-                    (ViewerRenderer::Nvdec(rnv), LatestFrame::DualPlane(dpl)) => {
-                        // `dpl: &Arc<DualPlaneFrame>` — deref through the
-                        // Arc to hand the renderer a plain `&DualPlaneFrame`.
-                        if let Err(e) = rnv.render(dpl.as_ref(), &render.swap) {
-                            warn!(?e, "DualPlaneYuvRenderer::render failed");
-                        }
-                    }
-                    _ => {
-                        warn!("internal: renderer/frame variant mismatch");
-                    }
-                }
+                warn!(?e, "present_frame failed");
             }
             presented_host_ts = Some(host_ts_us);
         }
-
-        match render.swap.present(true) {
-            Ok(()) => {
-                if let Some(ts) = presented_host_ts {
-                    self.shared.latency.record_present_for_host_ts(ts);
-                }
-            }
-            Err(e) if e.is_device_removed() => {
-                // TDR / driver crash / hybrid-GPU swap. Every D3D11 resource
-                // is now dead. In-place recovery would require rebuilding
-                // the device, swapchain, renderer, decoder, and all their
-                // upstream references. For Phase 0 we log with the reason
-                // HRESULT and ask winit to exit so the user can just restart
-                // (systemd-style). Plan 4 F7 will add in-place recreation.
-                tracing::error!(
-                    ?e,
-                    "D3D11 device removed — viewer cannot continue; \
-                     restart the process. Common causes: NVIDIA driver \
-                     TDR, driver crash, hybrid-GPU switch, hot-unplug.",
-                );
-                self.should_exit = true;
-            }
-            Err(e) => warn!(?e, "Present failed"),
+        if let Some(ts) = presented_host_ts {
+            self.shared.latency.record_present_for_host_ts(ts);
         }
     }
 
     // Phase 4 G2: label helpers used by build_stats_payload.
 
+    #[cfg(windows)]
     fn host_label_for_overlay(&self) -> String {
         if let Some(id) = self.host_id_for_label() {
             return id;
@@ -785,6 +654,7 @@ impl ViewerApp {
         "(unknown)".to_string()
     }
 
+    #[cfg(windows)]
     fn overlay_decoder_label(&self) -> String {
         self.decoder.clone()
     }
@@ -792,12 +662,14 @@ impl ViewerApp {
     /// Returns the signaling host_id stored on the struct, if any.
     /// ViewerApp does not carry args directly; host_id was passed into
     /// spawn_worker_tasks and is not retained on the struct. Fall back None.
+    #[cfg(windows)]
     fn host_id_for_label(&self) -> Option<String> {
         None // host_id not retained on struct; host_label falls through to addr
     }
 
     /// Returns the direct-connect host address stored on the struct, if any.
     /// Same situation: not retained. Fall back None.
+    #[cfg(windows)]
     fn host_addr_for_label(&self) -> Option<String> {
         None // direct_host not retained on struct; reported as "(unknown)"
     }
@@ -831,6 +703,7 @@ fn format_status_title(snap: &latency::LatencySnapshot) -> String {
 }
 
 /// Build the IPC stats payload from current viewer state.
+#[cfg(windows)]
 fn build_stats_payload(app: &ViewerApp) -> overlay_ipc::StatsPayload {
     let snap = app.shared.latency.snapshot();
     let present = snap.present;
@@ -898,10 +771,7 @@ fn map_cursor_to_virtual_desktop(
     (abs_x, abs_y)
 }
 
-fn physical_key_to_scancode(key: PhysicalKey) -> Option<u32> {
-    PhysicalKeyExtScancode::to_scancode(key)
-}
-
+#[cfg(windows)]
 fn apply_connect_args(args: &mut Args, c: prdt_gui_viewer::ConnectArgs) {
     // Map ConnectArgs into the existing Args fields. Each ConnectArgs
     // value either replaces the corresponding Args field or is ignored
@@ -930,7 +800,7 @@ pub fn run_main() -> Result<()> {
     run_with_args(Args::parse())
 }
 
-pub fn run_with_args(mut args: Args) -> Result<()> {
+pub fn run_with_args(#[cfg_attr(target_os = "linux", allow(unused_mut))] mut args: Args) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -938,8 +808,10 @@ pub fn run_with_args(mut args: Args) -> Result<()> {
         .init();
 
     // Phase 4 G5: install crash reporter (writes JSON dump + tracing error).
+    #[cfg(windows)]
     prdt_gui_common::install_panic_hook(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
 
+    #[cfg(windows)]
     if !args.headless {
         match prdt_gui_viewer::run_viewer_launcher(args.config.clone())
             .map_err(|e| anyhow::anyhow!(e))?
@@ -948,6 +820,10 @@ pub fn run_with_args(mut args: Args) -> Result<()> {
             prdt_gui_viewer::LaunchOutcome::Connect(c) => apply_connect_args(&mut args, *c),
         }
     }
+    // On Linux there is no GUI launcher path yet (deferred to L2). The
+    // CLI is the only entry; --headless is implicitly always-true.
+    #[cfg(target_os = "linux")]
+    let _ = &args.config; // silence unused-field warning until L2 wires the launcher
     let (req_w, req_h) = parse_resolution(&args.resolution)?;
     // Normalize --host-id: accept 9-digit numeric IDs with or without dashes
     // so both `--host-id 123456789` and `--host-id 123-456-789` resolve to the
@@ -996,18 +872,12 @@ pub fn run_with_args(mut args: Args) -> Result<()> {
     let viewer_kp: KeyPair = load_or_create_viewer_key(&args.viewer_key_file)?;
     info!(viewer_pubkey = %viewer_kp.public.to_base64(), "viewer identity");
 
-    // D3D11 device. Created on the main thread, cloned into the worker so the
-    // decoder uses the same device (required for zero-copy texture handoff).
-    let adapter = pick_default_adapter().context("no GPU adapter")?;
-    let dev = D3d11Device::create(&adapter).context("D3D11 device")?;
-
     info!(
         host = ?args.host,
         signaling_url = ?args.signaling_url,
         host_id = ?normalized_host_id,
         resolution = %args.resolution,
         fps = args.fps,
-        adapter = %dev.adapter().name,
         "viewer starting"
     );
 
@@ -1017,7 +887,7 @@ pub fn run_with_args(mut args: Args) -> Result<()> {
     let (file_drop_tx, file_drop_rx) = mpsc::unbounded_channel::<std::path::PathBuf>();
 
     let shared = Arc::new(ViewerShared {
-        latest_texture: Arc::new(Mutex::new(None)),
+        latest_frame: Arc::new(Mutex::new(None)),
         stream_width: Mutex::new(req_w),
         stream_height: Mutex::new(req_h),
         // Pre-handshake defaults: assume captured monitor == primary ==
@@ -1042,7 +912,6 @@ pub fn run_with_args(mut args: Args) -> Result<()> {
     // Spawn the network + decode tasks.
     spawn_worker_tasks(
         runtime.handle().clone(),
-        dev.clone(),
         Arc::clone(&shared),
         input_rx,
         file_drop_rx,
@@ -1074,12 +943,13 @@ pub fn run_with_args(mut args: Args) -> Result<()> {
         req_h,
         shared,
         render: None,
-        dev,
         decoder: args.decoder.clone(),
         headless: args.headless,
         _runtime: runtime,
         should_exit: false,
+        #[cfg(windows)]
         overlay: None,
+        #[cfg(windows)]
         last_overlay_tick: std::time::Instant::now(),
         disconnect_requested: false,
     };
@@ -1094,7 +964,6 @@ pub fn run_with_args(mut args: Args) -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 fn spawn_worker_tasks(
     handle: tokio::runtime::Handle,
-    dev: D3d11Device,
     shared: Arc<ViewerShared>,
     mut input_rx: mpsc::UnboundedReceiver<InputEvent>,
     mut file_drop_rx: mpsc::UnboundedReceiver<std::path::PathBuf>,
@@ -1342,7 +1211,7 @@ fn spawn_worker_tasks(
         // before consumer construction so we can fail fast with a
         // precise message if the host's negotiated codec disagrees with
         // --decoder / --codec.
-        let mut decoder_choice = match choose_decoder(&decoder, ack.negotiated_codec, codec_arg) {
+        let decoder_choice = match choose_decoder(&decoder, ack.negotiated_codec, codec_arg) {
             Ok(c) => c,
             Err(msg) => {
                 tracing::error!(error = %msg, "negotiation guard rejected handshake");
@@ -1351,66 +1220,43 @@ fn spawn_worker_tasks(
             }
         };
 
-        // Build consumer — explicit 3-way match. NVDEC may fall back
-        // to MF if the bindings aren't compiled in (preserves prior
-        // behavior of `--decoder nvdec` on builds without CUDA).
-        let consumer: Arc<tokio::sync::Mutex<ViewerConsumer>> = match decoder_choice {
-            DecoderChoice::Nvdec => {
-                #[cfg(prdt_nvdec_bindings)]
-                {
-                    match NvdecD3d11Consumer::new(&dev, ack.neg_width, ack.neg_height) {
-                        Ok(nv) => Arc::new(tokio::sync::Mutex::new(ViewerConsumer::Nvdec(nv))),
-                        Err(e) => {
-                            warn!(%e, "NVDEC unavailable; falling back to MF decoder");
-                            decoder_choice = DecoderChoice::Mf;
-                            Arc::new(tokio::sync::Mutex::new(ViewerConsumer::Mf(
-                                MfD3d11Consumer::new(&dev, ack.neg_width, ack.neg_height)
-                                    .unwrap_or_else(|err| {
-                                        warn!(?err, "MfD3d11Consumer::new failed");
-                                        panic!("no decoder could be initialized")
-                                    }),
-                            )))
-                        }
-                    }
+        // T7: build consumer through the platform factory. The Windows
+        // path needs a D3D11 device; Linux's CPU path takes none.
+        #[cfg(windows)]
+        let consumer: Arc<tokio::sync::Mutex<PlatformConsumer>> = {
+            let adapter = match prdt_media_win::pick_default_adapter() {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::error!(error = %e, "pick_default_adapter");
+                    return;
                 }
-                #[cfg(not(prdt_nvdec_bindings))]
-                {
-                    warn!(
-                        "negotiated H.265 but NVDEC bindings are not compiled in; \
-                         falling back to MF"
-                    );
-                    decoder_choice = DecoderChoice::Mf;
-                    Arc::new(tokio::sync::Mutex::new(ViewerConsumer::Mf(
-                        MfD3d11Consumer::new(&dev, ack.neg_width, ack.neg_height)
-                            .unwrap_or_else(|err| {
-                                warn!(?err, "MfD3d11Consumer::new failed");
-                                panic!("no decoder could be initialized")
-                            }),
-                    )))
+            };
+            let dev = match prdt_media_win::D3d11Device::create(&adapter) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::error!(error = %e, "D3d11Device::create");
+                    return;
+                }
+            };
+            match build_consumer(&decoder, ack.negotiated_codec, ack.neg_width, ack.neg_height, &dev) {
+                Ok(c) => Arc::new(tokio::sync::Mutex::new(c)),
+                Err(e) => {
+                    tracing::error!(error = %e, "build_consumer");
+                    return;
                 }
             }
-            DecoderChoice::Mf => Arc::new(tokio::sync::Mutex::new(ViewerConsumer::Mf(
-                MfD3d11Consumer::new(&dev, ack.neg_width, ack.neg_height).unwrap_or_else(|err| {
-                    warn!(?err, "MfD3d11Consumer::new failed");
-                    panic!("no decoder could be initialized")
-                }),
-            ))),
-            DecoderChoice::Openh264 => {
-                let openh264 = Openh264Decoder::new().unwrap_or_else(|err| {
-                    tracing::error!(?err, "Openh264Decoder::new failed");
-                    panic!("openh264 decoder init failed")
-                });
-                let uploader = CpuI420Uploader::new(&dev, ack.neg_width, ack.neg_height)
-                    .unwrap_or_else(|err| {
-                        tracing::error!(?err, "CpuI420Uploader::new failed");
-                        panic!("openh264 uploader init failed")
-                    });
-                Arc::new(tokio::sync::Mutex::new(ViewerConsumer::Openh264 {
-                    decoder: openh264,
-                    uploader,
-                    latest_texture: None,
-                    needs_idr: true,
-                }))
+        };
+        #[cfg(target_os = "linux")]
+        let consumer: Arc<tokio::sync::Mutex<PlatformConsumer>> = match build_consumer(
+            &decoder,
+            ack.negotiated_codec,
+            ack.neg_width,
+            ack.neg_height,
+        ) {
+            Ok(c) => Arc::new(tokio::sync::Mutex::new(c)),
+            Err(e) => {
+                tracing::error!(error = %e, "build_consumer");
+                return;
             }
         };
         info!(
@@ -1515,64 +1361,92 @@ fn spawn_worker_tasks(
                         let nal_len = frame.nal_units.len();
                         recv_shared.latency.record_recv(seq, host_ts_us);
                         let mut c = recv_consumer.lock().await;
-                        let submit_result: std::result::Result<(), String> = match &mut *c {
-                            ViewerConsumer::Mf(m) => m
-                                .submit(frame)
-                                .await
-                                .map_err(|e| format!("{e:?}")),
-                            #[cfg(prdt_nvdec_bindings)]
-                            ViewerConsumer::Nvdec(n) => n
-                                .submit(frame)
-                                .await
-                                .map_err(|e| format!("{e:?}")),
-                            ViewerConsumer::Openh264 {
-                                decoder,
-                                uploader,
-                                latest_texture,
-                                needs_idr,
-                            } => {
-                                // OpenH264 accepts the entire access unit
-                                // at once. If the host hasn't sent a
-                                // keyframe yet (post-reset), the decoder
-                                // will silently return None until the
-                                // next IDR arrives, which is fine.
-                                match decoder.decode(&frame.nal_units) {
-                                    Ok(Some(i420)) => {
-                                        match uploader.upload(&i420) {
+
+                        #[cfg(windows)]
+                        {
+                            let submit_result: std::result::Result<(), String> = match &mut *c {
+                                PlatformConsumer::Mf(m) => m
+                                    .submit(frame)
+                                    .await
+                                    .map_err(|e| format!("{e:?}")),
+                                #[cfg(prdt_nvdec_bindings)]
+                                PlatformConsumer::Nvdec(n) => n
+                                    .submit(frame)
+                                    .await
+                                    .map_err(|e| format!("{e:?}")),
+                                PlatformConsumer::Openh264 {
+                                    decoder,
+                                    uploader,
+                                    latest_texture,
+                                    needs_idr,
+                                } => {
+                                    // OpenH264 accepts the entire access unit
+                                    // at once. If the host hasn't sent a
+                                    // keyframe yet (post-reset), the decoder
+                                    // will silently return None until the
+                                    // next IDR arrives, which is fine.
+                                    match decoder.decode(&frame.nal_units) {
+                                        Ok(Some(i420)) => match uploader.upload(&i420) {
                                             Ok(tex) => {
                                                 *latest_texture = Some(tex);
                                                 *needs_idr = false;
                                                 Ok(())
                                             }
                                             Err(e) => Err(format!("upload: {e}")),
-                                        }
+                                        },
+                                        Ok(None) => Ok(()),
+                                        Err(e) => Err(format!("decode: {e}")),
                                     }
-                                    Ok(None) => Ok(()),
-                                    Err(e) => Err(format!("decode: {e}")),
+                                }
+                            };
+                            if let Err(e) = submit_result {
+                                warn!(error = %e, seq, is_kf, nal_len, "consumer.submit error");
+                                continue;
+                            }
+                            let frame_opt: Option<PlatformFrame> = match &mut *c {
+                                PlatformConsumer::Mf(m) => {
+                                    m.take_latest_texture().map(PlatformFrame::Nv12)
+                                }
+                                #[cfg(prdt_nvdec_bindings)]
+                                PlatformConsumer::Nvdec(n) => {
+                                    n.take_latest_dual_plane().map(PlatformFrame::DualPlane)
+                                }
+                                PlatformConsumer::Openh264 { latest_texture, .. } => {
+                                    latest_texture.take().map(PlatformFrame::Nv12)
+                                }
+                            };
+                            if let Some(frame) = frame_opt {
+                                tex_count += 1;
+                                recv_shared.latency.record_decoded(seq);
+                                *recv_shared.latest_frame.lock().unwrap() =
+                                    Some((frame, host_ts_us));
+                            }
+                        }
+
+                        #[cfg(target_os = "linux")]
+                        {
+                            use prdt_media_sw::traits::SwH264Decoder as _;
+                            let PlatformConsumer::Openh264 {
+                                decoder,
+                                latest,
+                                needs_idr,
+                            } = &mut *c;
+                            match decoder.decode(&frame.nal_units) {
+                                Ok(Some(i420)) => {
+                                    let arc = std::sync::Arc::new(i420);
+                                    *latest = Some(std::sync::Arc::clone(&arc));
+                                    *needs_idr = false;
+                                    tex_count += 1;
+                                    recv_shared.latency.record_decoded(seq);
+                                    *recv_shared.latest_frame.lock().unwrap() =
+                                        Some((PlatformFrame::I420(arc), host_ts_us));
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    warn!(error = %e, seq, is_kf, nal_len, "linux openh264 decode failed");
+                                    continue;
                                 }
                             }
-                        };
-                        if let Err(e) = submit_result {
-                            warn!(error = %e, seq, is_kf, nal_len, "consumer.submit error");
-                            continue;
-                        }
-                        let frame_opt: Option<LatestFrame> = match &mut *c {
-                            ViewerConsumer::Mf(m) => {
-                                m.take_latest_texture().map(LatestFrame::Nv12)
-                            }
-                            #[cfg(prdt_nvdec_bindings)]
-                            ViewerConsumer::Nvdec(n) => {
-                                n.take_latest_dual_plane().map(LatestFrame::DualPlane)
-                            }
-                            ViewerConsumer::Openh264 { latest_texture, .. } => {
-                                latest_texture.take().map(LatestFrame::Nv12)
-                            }
-                        };
-                        if let Some(frame) = frame_opt {
-                            tex_count += 1;
-                            recv_shared.latency.record_decoded(seq);
-                            *recv_shared.latest_texture.lock().unwrap() =
-                                Some((frame, host_ts_us));
                         }
                     }
                     Ok(ReceivedMessage::Control(ControlMessage::Bye)) => {

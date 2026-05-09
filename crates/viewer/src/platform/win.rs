@@ -82,6 +82,15 @@ pub struct PlatformRender {
     pub(crate) renderer: Option<WinRenderer>,
 }
 
+impl PlatformRender {
+    /// Borrow the underlying window. Used by lib.rs to call
+    /// `request_redraw`, `set_title`, `inner_size`, etc., without leaking
+    /// the platform-specific render-state internals.
+    pub fn window(&self) -> &Window {
+        &self.window
+    }
+}
+
 /// Extract the raw Win32 `HWND` from a winit `Window`. Required for
 /// `SwapChain::new_for_hwnd`. Migrated verbatim from lib.rs.
 pub(crate) fn extract_hwnd(window: &Window) -> Result<HWND> {

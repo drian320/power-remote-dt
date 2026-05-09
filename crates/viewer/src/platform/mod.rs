@@ -3,6 +3,7 @@
 
 use thiserror::Error;
 
+#[allow(dead_code)] // DeviceLost is only constructed on Windows
 #[derive(Debug, Error)]
 pub enum RenderError {
     #[error("renderer init failed: {0}")]
@@ -13,6 +14,7 @@ pub enum RenderError {
     DeviceLost(String),
 }
 
+#[allow(dead_code)] // Decode is reserved for future codec-error mapping
 #[derive(Debug, Error)]
 pub enum ConsumerError {
     #[error("decoder error: {0}")]
@@ -46,6 +48,7 @@ pub use win::{
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "linux")]
+#[allow(unused_imports)] // virtual_desktop_rect is reserved for L2 multi-monitor work
 pub use linux::{
     build_consumer, build_render, clipboard_sequence_number, present_frame, read_clipboard_text,
     resize_renderer, virtual_desktop_rect, write_clipboard_text,

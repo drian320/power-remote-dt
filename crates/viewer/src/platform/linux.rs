@@ -16,7 +16,6 @@ use prdt_input_linux::{
     MAX_CLIPBOARD_BYTES as _INPUT_LINUX_MAX,
 };
 use prdt_media_linux::i420_to_bgra::i420_to_bgra;
-use prdt_media_sw::traits::SwH264Decoder as _;
 use prdt_media_sw::{I420Frame, Openh264Decoder};
 use prdt_protocol::{frame::Codec, MonitorRect};
 use winit::window::Window;
@@ -52,6 +51,15 @@ pub struct PlatformRender {
     scratch_bgra: Vec<u8>,
     /// Cached stream/surface dimensions to gate redundant resize calls.
     last_size: (u32, u32),
+}
+
+impl PlatformRender {
+    /// Borrow the underlying window. Used by lib.rs to call
+    /// `request_redraw`, `set_title`, `inner_size`, etc., without leaking
+    /// the platform-specific render-state internals.
+    pub fn window(&self) -> &Window {
+        &self.window
+    }
 }
 
 /// Build the Linux render state. Called by lib.rs in `resumed()`.
@@ -188,6 +196,7 @@ pub fn clipboard_sequence_number() -> u32 {
 }
 
 /// Return the host's virtual desktop rect via XRandR.
+#[allow(dead_code)] // exposed via `platform::virtual_desktop_rect`; lib.rs uses it on Windows only
 pub fn virtual_desktop_rect() -> MonitorRect {
     _input_linux_virtual_desktop_rect()
 }
@@ -196,9 +205,19 @@ pub fn virtual_desktop_rect() -> MonitorRect {
 mod tests {
     use super::*;
 
+    fn expect_err(r: Result<PlatformConsumer, super::super::ConsumerError>) -> super::super::ConsumerError {
+        // Manual destructure: PlatformConsumer doesn't derive Debug because
+        // Openh264Decoder doesn't, and we'd rather not bolt it onto a foreign
+        // type just to satisfy `unwrap_err()`'s `T: Debug` bound.
+        match r {
+            Ok(_) => panic!("expected build_consumer to fail"),
+            Err(e) => e,
+        }
+    }
+
     #[test]
     fn linux_build_consumer_rejects_h265() {
-        let err = build_consumer("auto", Codec::H265, 1920, 1080).unwrap_err();
+        let err = expect_err(build_consumer("auto", Codec::H265, 1920, 1080));
         assert!(
             err.to_string().contains("Linux supports openh264+H264 only"),
             "unexpected error string: {err}"
@@ -207,9 +226,9 @@ mod tests {
 
     #[test]
     fn linux_build_consumer_rejects_hw_decoder_args() {
-        let err = build_consumer("nvdec", Codec::H264, 1920, 1080).unwrap_err();
+        let err = expect_err(build_consumer("nvdec", Codec::H264, 1920, 1080));
         assert!(err.to_string().contains("unsupported decoder/codec on Linux"));
-        let err = build_consumer("mf", Codec::H264, 1920, 1080).unwrap_err();
+        let err = expect_err(build_consumer("mf", Codec::H264, 1920, 1080));
         assert!(err.to_string().contains("unsupported decoder/codec on Linux"));
     }
 

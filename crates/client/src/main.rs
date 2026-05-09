@@ -59,9 +59,9 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-/// Linux dispatcher: only `prdt host` works on Linux for L1.5a. The GUI
-/// (`None`) and viewer paths remain Windows-only — they're deferred to
-/// L2 per the plan §3 scope. Invoking either on Linux exits with an
+/// Linux dispatcher: `prdt host` and `prdt connect` / `prdt viewer` work
+/// on Linux as of L1.5b. The GUI (`None`) remains Windows-only — deferred
+/// to L2 per the plan §3 scope. Invoking GUI on Linux exits with an
 /// informative non-zero status.
 #[cfg(target_os = "linux")]
 fn main() -> anyhow::Result<()> {
@@ -70,17 +70,18 @@ fn main() -> anyhow::Result<()> {
     match Cli::parse().cmd {
         None => Err(anyhow::anyhow!(
             "GUI mode is not yet implemented on Linux (deferred to L2). \
-             Use `prdt host` to run the Linux host CLI."
+             Use `prdt host` or `prdt connect` to run the Linux CLI."
         )),
         Some(Cmd::Host { args }) => {
             let argv = std::iter::once(OsString::from("prdt-host")).chain(args);
             let host_args = prdt_host::Args::parse_from(argv);
             prdt_host::run_with_args(host_args)
         }
-        Some(Cmd::Connect { .. }) | Some(Cmd::Viewer { .. }) => Err(anyhow::anyhow!(
-            "Viewer mode is not yet implemented on Linux (deferred to L2). \
-             Use `prdt host` to run the Linux host CLI."
-        )),
+        Some(Cmd::Connect { args }) | Some(Cmd::Viewer { args }) => {
+            let argv = std::iter::once(OsString::from("prdt-viewer")).chain(args);
+            let viewer_args = prdt_viewer::Args::parse_from(argv);
+            prdt_viewer::run_with_args(viewer_args)
+        }
     }
 }
 
