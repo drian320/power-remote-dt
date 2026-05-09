@@ -1,7 +1,5 @@
 #![cfg(windows)]
 
-mod dxgi_sw_producer;
-mod encoder_dispatch;
 mod platform;
 mod status;
 mod watchdog;
@@ -28,8 +26,7 @@ use prdt_media_win::{
 };
 use prdt_protocol::{wire::AudioPacket, Codec, ControlMessage, MonitorRect, VideoProducer};
 
-use dxgi_sw_producer::DxgiSwProducer;
-use encoder_dispatch::VideoEncoderBackend;
+use platform::win::{DxgiSwProducer, VideoEncoderBackend};
 use prdt_transport::{
     host_handshake, now_monotonic_us, CustomUdpTransport, ReceivedMessage, Transport,
     UdpTransportConfig,
