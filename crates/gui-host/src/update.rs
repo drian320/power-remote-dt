@@ -94,6 +94,7 @@ pub async fn check_async() -> CheckStatus {
 /// Download an MSI to a temp path and hand off to msiexec for in-place
 /// upgrade. The current process should exit shortly after this returns Ok
 /// — msiexec needs the old binary to be unloaded to overwrite it.
+#[allow(unreachable_code)] // Ok(()) after non-windows early-return; pre-existing on master
 pub async fn install_async(download_url: String) -> Result<(), UpdateError> {
     let download_url_for_log = download_url.clone();
     let result: Result<std::path::PathBuf, UpdateError> = tokio::task::spawn_blocking(move || {

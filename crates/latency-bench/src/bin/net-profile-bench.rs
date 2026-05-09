@@ -282,6 +282,7 @@ struct ConfigStats {
     video_loss_ppm: u64,
 }
 
+#[allow(clippy::manual_checked_ops)] // pre-existing on master, surfaced by L1.5a Linux compilation
 fn aggregate(cfg: &Cfg, stats: &RunStats) -> ConfigStats {
     let (input_p50_us, input_p95_us, input_p99_us) = if stats.input_lags.is_empty() {
         (0, 0, 0)

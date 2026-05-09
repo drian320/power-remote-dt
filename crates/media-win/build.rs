@@ -1,7 +1,12 @@
 use std::env;
+#[allow(unused_imports)] // only used in #[cfg(target_os = "windows")] fns; pre-existing on master
 use std::path::PathBuf;
 
 fn main() {
+    // Register the custom cfg unconditionally so the unexpected_cfgs lint
+    // doesn't complain on non-Windows targets (pre-existing; surfaced by L1.5a).
+    println!("cargo::rustc-check-cfg=cfg(prdt_nvdec_bindings)");
+
     // Only run on Windows.
     let target = env::var("TARGET").unwrap_or_default();
     if !target.contains("windows") {
@@ -11,9 +16,6 @@ fn main() {
     println!("cargo:rerun-if-env-changed=NV_CODEC_SDK_PATH");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rerun-if-changed=build.rs");
-    // Register the custom cfg we emit from generate_nvdec_bindings so the
-    // unexpected_cfgs lint doesn't complain on consumers.
-    println!("cargo::rustc-check-cfg=cfg(prdt_nvdec_bindings)");
 
     #[cfg(target_os = "windows")]
     {
