@@ -8,8 +8,8 @@
 
 pub mod error;
 pub mod frame;
+pub mod x11_capture;
 // Subsequent tasks will add:
-//   pub mod x11_capture;
 //   pub mod sw_pipeline;
 //   pub mod i420_to_bgra;
 //   pub mod linux_sw_producer;
