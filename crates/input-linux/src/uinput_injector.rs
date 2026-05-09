@@ -337,11 +337,13 @@ mod tests {
     #[test]
     fn scancode_out_of_range_skipped_silently() {
         // We can't hit DEVICES init in unit tests (needs /dev/uinput),
-        // so verify the early-return path through a manual check: any
-        // scancode > KEY_MAX should be dropped before any ioctl.
-        // (This is enforced in `write_event` — verified here as a
-        // logic statement rather than an end-to-end run.)
-        assert!(0x10000 > KEY_MAX);
+        // so verify the early-return invariant via a const_assert-style
+        // comparison: 0x10000 (a representative out-of-range scancode)
+        // must exceed KEY_MAX (0x2FF) so write_event's early `return Ok`
+        // branch fires before any ioctl. const fn ensures the check is
+        // resolved at compile time without tripping clippy's
+        // assertions_on_constants lint.
+        const _: () = assert!(0x10000 > KEY_MAX);
     }
 
     #[test]

@@ -53,51 +53,53 @@ fn make_pacer(fps: u32) -> Interval {
 #[async_trait::async_trait]
 impl VideoProducer for LinuxSwProducer {
     async fn next_frame(&mut self) -> Result<EncodedFrame, ProducerError> {
-        loop {
-            self.pacer.tick().await;
+        // SW path on Linux has no transient retry conditions (no DXGI
+        // access-lost equivalent), so the body is straight-line. If
+        // L2 introduces e.g. PipeWire stream-restart we'll wrap this
+        // in a retry loop.
+        self.pacer.tick().await;
 
-            // Sync capture. If this fails permanently, propagate as
-            // Capture error.
-            self.capture
-                .grab_into(&mut self.bgra_buf)
-                .map_err(|e| ProducerError::Capture(e.to_string()))?;
+        // Sync capture. If this fails permanently, propagate as
+        // Capture error.
+        self.capture
+            .grab_into(&mut self.bgra_buf)
+            .map_err(|e| ProducerError::Capture(e.to_string()))?;
 
-            let bgra = std::mem::take(&mut self.bgra_buf);
-            let width = self.width;
-            let height = self.height;
-            let force_idr = std::mem::take(&mut self.idr_pending);
-            let ts_us = now_monotonic_us();
+        let bgra = std::mem::take(&mut self.bgra_buf);
+        let width = self.width;
+        let height = self.height;
+        let force_idr = std::mem::take(&mut self.idr_pending);
+        let ts_us = now_monotonic_us();
 
-            let mut enc = self
-                .encoder
-                .take()
-                .expect("encoder taken twice; producer state corrupted");
-            let join = tokio::task::spawn_blocking(move || {
-                let frame = crate::frame::BgraFrame {
-                    width,
-                    height,
-                    stride: width * 4,
-                    bgra,
-                    capture_ts_us: ts_us,
-                };
-                let result = enc.encode(&frame, force_idr, ts_us);
-                (enc, frame.bgra, result)
-            })
-            .await
-            .map_err(|e| ProducerError::Other(format!("spawn_blocking join: {e}")))?;
-            let (enc_back, bgra_back, encode_result) = join;
-            self.encoder = Some(enc_back);
-            self.bgra_buf = bgra_back;
+        let mut enc = self
+            .encoder
+            .take()
+            .expect("encoder taken twice; producer state corrupted");
+        let join = tokio::task::spawn_blocking(move || {
+            let frame = crate::frame::BgraFrame {
+                width,
+                height,
+                stride: width * 4,
+                bgra,
+                capture_ts_us: ts_us,
+            };
+            let result = enc.encode(&frame, force_idr, ts_us);
+            (enc, frame.bgra, result)
+        })
+        .await
+        .map_err(|e| ProducerError::Other(format!("spawn_blocking join: {e}")))?;
+        let (enc_back, bgra_back, encode_result) = join;
+        self.encoder = Some(enc_back);
+        self.bgra_buf = bgra_back;
 
-            let frame = encode_result.map_err(|e| ProducerError::Encode(e.to_string()))?;
+        let frame = encode_result.map_err(|e| ProducerError::Encode(e.to_string()))?;
 
-            let seq = self.seq;
-            self.seq += 1;
+        let seq = self.seq;
+        self.seq += 1;
 
-            // Spread the encoder's EncodedFrame, override seq with our
-            // producer-tracked counter (mirrors DxgiSwProducer).
-            return Ok(EncodedFrame { seq, ..frame });
-        }
+        // Spread the encoder's EncodedFrame, override seq with our
+        // producer-tracked counter (mirrors DxgiSwProducer).
+        Ok(EncodedFrame { seq, ..frame })
     }
 
     fn request_idr(&mut self) {

@@ -28,6 +28,7 @@ impl InputInjector for UinputInjector {
     }
 }
 
+#[derive(Default)]
 pub struct X11Clipboard;
 
 impl X11Clipboard {
@@ -58,11 +59,17 @@ pub struct X11VirtualDesktop {
     cached: MonitorRect,
 }
 
-impl X11VirtualDesktop {
-    pub fn new() -> Self {
+impl Default for X11VirtualDesktop {
+    fn default() -> Self {
         Self {
             cached: virtual_desktop_rect(),
         }
+    }
+}
+
+impl X11VirtualDesktop {
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
