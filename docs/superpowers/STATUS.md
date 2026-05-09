@@ -131,13 +131,13 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
 - 合計 ~8 週分の作業を完了、Phase 4 完了
 
 #### B2. Phase 1 — Linux サポート
-- **状態 (2026-05-09)**: **L0 (trait extraction) + L1 (platform crates) 完了**。host/viewer 配線は L1.5 (TBD)
-  - L0: `crates/media-core` (Capturer / Encoder / Decoder + EncodedPacket)、`crates/input-core` (InputInjector / ClipboardProvider / VirtualDesktopGeometry) + L0 follow-up 3 件 (`EncodeError::DeviceLost`、host clippy 8 件、`dirs` ベース key path 移行) すべて master へ landed
-  - L1 (`phase-l1-linux-poc` ブランチ): `crates/media-linux` 完全実装(XShm capture + plain XGetImage fallback + `prdt-media-sw` (OpenH264) encode/decode + I420→BGRA + `LinuxSwProducer`(impl `prdt_protocol::VideoProducer`、60Hz `tokio::time::interval` pacer + `spawn_blocking` encode、`DxgiSwProducer` Linux 双子) + L0 trait adapter)、`crates/input-linux` 完全実装(`/dev/uinput` raw nix ioctl 経由 mouse + keyboard、scancode passthrough、X11 _CLIPBOARD selection sync + XFixes-based sequence (own write 非 bump)、RandR virtual desktop rect (0,0)-collapse + L0 trait adapter)。`cargo check + clippy --target x86_64-unknown-linux-gnu` グリーン、29 unit tests + 4 ignored (X11/uinput integration、WSLg で実機検証成功)。spec `2026-05-09-l1-linux-poc-design.md`、plan `2026-05-09-l1-linux-poc.md`、smoke `2026-05-09-l1-linux-poc-manual-smoke.md`
-  - 副次成果(`2830a3e`): pre-existing Windows-only コードの Linux build blocker 2 件修正 — `media-win/build.rs` の `bindgen::Builder` を `#[cfg(target_os = "windows")]` で gate、`latency-bench/src/bin/bench-matrix.rs` の `#![cfg(windows)]` 全体 gate を per-item に分解 + non-Windows `fn main` stub
-- **L1 で deferred → L1.5 候補**: host/viewer の Linux 配線。`crates/host/src/lib.rs` (1034 行) は L0 status doc 通り全体が暗黙の Windows-only(`D3d11Device`、`DxgiNvencProducer`、`HwHevcEncoder`、`MfH265Encoder`、`prdt_input_win::*` を unguarded で使用)で、L1 plan の前提「`#[cfg(windows)]` sibling 追加」モデルが成立しない。L1.5 で host/viewer を `windows_impl` / `linux_impl` mod に分離する大規模 refactor が必要(別 plan を書く)
-- **L2 候補**: Wayland portal capture (`org.freedesktop.portal.ScreenCast`) + libei + wl-clipboard、VAAPI HW encode (Intel/AMD)、NVENC/NVDEC on Linux、cross-OS scancode normalization (wire-protocol 整合)、multi-monitor non-zero-origin、cursor capture/合成、複数 distro 検証
-- **元の見積もり**: 大(3-4 週)。**実績**: L0 完了 + L1 platform crates 完了で plan 比 ~50%。残 50% (host wiring + Wayland + HW codec + packaging) は段階的に L1.5/L2/L3 へ
+- **状態 (2026-05-09)**: **L0 + L1 platform crates + L1.5a host wiring 完了**。viewer 配線 + Linux↔Linux end-to-end smoke は L1.5b (TBD)
+  - L0: traits 抽出 + skeleton crates + L0 follow-ups (master)
+  - L1: `prdt-media-linux` + `prdt-input-linux` 完全実装 + 29 unit tests + 4 ignored integration (`phase-l1-platform-crates-complete`)
+  - **L1.5a (`phase-l1.5a-host-wiring-complete`)**: `crates/host/src/{encoder_dispatch.rs, dxgi_sw_producer.rs}` を `platform/win.rs` に統合、`platform/{mod,linux}.rs` 新設、`lib.rs` を `platform::*` 経由に rewire。`prdt_protocol::VideoProducer` trait に `backend_name()` 追加。`Cmd::Gui` を Windows-only に gate。`crates/host/tests/linux_startup_smoke.rs` (`#[ignore]`、WSLg 必要) で host が起動 + handshake + capture + input dispatch することを検証。`cargo check + clippy` 両ターゲット green
+- **L1.5b 候補**: viewer Linux 配線(`crates/viewer/src/lib.rs` 2029 行の Windows D3D11/DualPlaneRenderer/NVDEC/MF を `viewer/src/platform/win.rs` に隔離 + softbuffer + I420→BGRA で Linux 描画)。完了時 Linux↔Linux end-to-end smoke 可
+- **L2 候補**: Wayland portal capture / libei / wl-clipboard、VAAPI HW encode、NVENC/NVDEC on Linux、cross-OS scancode normalization、multi-monitor non-zero-origin、cursor capture/合成、複数 distro 検証、`Cmd::Gui` Linux 対応
+- **元の見積もり**: 大(3-4 週)。**実績 (L0 + L1 + L1.5a)**: ~70%。残 30% (viewer + HW codec + Wayland + packaging) は L1.5b/L2/L3 へ
 
 ### **C. 計測 / 観測 系(blocker 解消用)**
 
