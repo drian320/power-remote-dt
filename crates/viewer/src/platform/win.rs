@@ -128,6 +128,7 @@ pub fn clipboard_sequence_number() -> u32 {
 }
 
 /// Return the host's combined virtual desktop rectangle in screen-space coords.
+#[allow(dead_code)] // exposed via `platform::virtual_desktop_rect`; reserved for L2 multi-monitor
 pub fn virtual_desktop_rect() -> MonitorRect {
     _input_win_virtual_desktop_rect()
 }

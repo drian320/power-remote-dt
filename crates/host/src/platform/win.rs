@@ -11,8 +11,8 @@ use std::time::Duration;
 use anyhow::Context as _;
 use prdt_media_sw::{bgra_to_i420, Openh264Encoder, Openh264EncoderConfig, SwH264Encoder};
 use prdt_media_win::{
-    AcquiredFrame, D3d11Device, D3d11Texture, DesktopDuplication, HwHevcEncoder, MediaError,
-    OutputInfo, TextureFormat,
+    AcquiredFrame, D3d11Device, D3d11Texture, DesktopDuplication, Hevc265Encoder as _,
+    HwHevcEncoder, MediaError, OutputInfo, TextureFormat,
 };
 use prdt_protocol::{now_monotonic_us, EncodedFrame, ProducerError, VideoProducer};
 
@@ -256,10 +256,9 @@ impl VideoProducer for DxgiSwProducer {
 
 // === Migrated from lib.rs ===
 
-use prdt_media_sw::{Openh264Encoder, Openh264EncoderConfig};
 #[cfg(prdt_nvenc_bindings)]
 use prdt_media_win::NvencEncoder;
-use prdt_media_win::{HwHevcEncoder, MfH265Encoder, NvencEncoderConfig};
+use prdt_media_win::{MfH265Encoder, NvencEncoderConfig};
 use prdt_protocol::Codec;
 
 /// Resolve `--encoder` to a concrete backend. The `auto` selector picks
@@ -386,7 +385,7 @@ fn resolve_encoder_choice<'a>(
 /// What we advertise in HelloAck `host_supported_codecs` based on the
 /// `--encoder` flag. An explicit choice locks us to a single codec; `auto`
 /// advertises the full HW set so the viewer's preference wins.
-pub(super) fn supported_codecs_for_encoder_arg(
+pub(crate) fn supported_codecs_for_encoder_arg(
     args_encoder: &str,
     adapter: &prdt_media_win::AdapterInfo,
 ) -> Vec<Codec> {
@@ -408,7 +407,6 @@ pub(super) fn supported_codecs_for_encoder_arg(
 
 // === Factory surface (cfg-transparent re-exports via platform/mod.rs) ===
 
-use anyhow::Context as _;
 use prdt_input_win::{
     clipboard_sequence_number as _input_win_clipboard_sequence_number,
     read_clipboard_text as _input_win_read_clipboard_text,
@@ -417,9 +415,9 @@ use prdt_input_win::{
     MAX_CLIPBOARD_BYTES as _INPUT_WIN_MAX,
 };
 use prdt_media_win::{
-    dxgi::enumerate_outputs_for_adapter, pick_default_adapter, DxgiNvencProducer, OutputInfo,
+    dxgi::enumerate_outputs_for_adapter, pick_default_adapter, DxgiNvencProducer,
 };
-use prdt_protocol::{InputEvent, MonitorRect, VideoProducer};
+use prdt_protocol::{InputEvent, MonitorRect};
 
 /// Re-exported max clipboard bytes; identical value across OSes.
 pub const MAX_CLIPBOARD_BYTES: usize = _INPUT_WIN_MAX;
@@ -483,7 +481,9 @@ pub fn build_video_producer(
 
 /// Inject one input event into the kernel via SendInput.
 pub fn dispatch_input(event: InputEvent) -> Result<(), super::DispatchError> {
-    SendInputInjector::send(event).map_err(|e| super::DispatchError::Backend(e.to_string()))
+    SendInputInjector::new()
+        .inject(event)
+        .map_err(|e| super::DispatchError::Backend(e.to_string()))
 }
 
 /// Read the user's primary clipboard text channel.
