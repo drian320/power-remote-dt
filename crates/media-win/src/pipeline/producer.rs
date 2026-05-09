@@ -11,6 +11,7 @@ use crate::encoder_trait::{Hevc265Encoder, HwHevcEncoder};
 use crate::error::MediaError;
 #[cfg(prdt_nvenc_bindings)]
 use crate::nvenc::NvencEncoder;
+#[cfg(prdt_nvenc_bindings)]
 use crate::nvenc::NvencEncoderConfig;
 
 pub struct DxgiNvencProducer {
