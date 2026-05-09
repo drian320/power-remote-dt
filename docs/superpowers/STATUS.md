@@ -131,13 +131,13 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
 - 合計 ~8 週分の作業を完了、Phase 4 完了
 
 #### B2. Phase 1 — Linux サポート
-- **状態 (2026-05-09)**: **L0 + L1 platform crates + L1.5a host wiring 完了**。viewer 配線 + Linux↔Linux end-to-end smoke は L1.5b (TBD)
+- **状態 (2026-05-09)**: **L0 + L1 platform crates + L1.5a host wiring + L1.5b viewer wiring 完了**。Linux↔Linux end-to-end smoke 可
   - L0: traits 抽出 + skeleton crates + L0 follow-ups (master)
   - L1: `prdt-media-linux` + `prdt-input-linux` 完全実装 + 29 unit tests + 4 ignored integration (`phase-l1-platform-crates-complete`)
-  - **L1.5a (`phase-l1.5a-host-wiring-complete`)**: `crates/host/src/{encoder_dispatch.rs, dxgi_sw_producer.rs}` を `platform/win.rs` に統合、`platform/{mod,linux}.rs` 新設、`lib.rs` を `platform::*` 経由に rewire。`prdt_protocol::VideoProducer` trait に `backend_name()` 追加。`Cmd::Gui` を Windows-only に gate。`crates/host/tests/linux_startup_smoke.rs` (`#[ignore]`、WSLg 必要) で host が起動 + handshake + capture + input dispatch することを検証。`cargo check + clippy` 両ターゲット green
-- **L1.5b 候補**: viewer Linux 配線(`crates/viewer/src/lib.rs` 2029 行の Windows D3D11/DualPlaneRenderer/NVDEC/MF を `viewer/src/platform/win.rs` に隔離 + softbuffer + I420→BGRA で Linux 描画)。完了時 Linux↔Linux end-to-end smoke 可
-- **L2 候補**: Wayland portal capture / libei / wl-clipboard、VAAPI HW encode、NVENC/NVDEC on Linux、cross-OS scancode normalization、multi-monitor non-zero-origin、cursor capture/合成、複数 distro 検証、`Cmd::Gui` Linux 対応
-- **元の見積もり**: 大(3-4 週)。**実績 (L0 + L1 + L1.5a)**: ~70%。残 30% (viewer + HW codec + Wayland + packaging) は L1.5b/L2/L3 へ
+  - L1.5a (`phase-l1.5a-host-wiring-complete`): host `lib.rs` を `platform::*` 経由に rewire + Linux client が `prdt host` をルート
+  - **L1.5b (`phase-l1.5b-viewer-wiring-complete`)**: viewer `lib.rs` (2029 行) を `platform/{mod,win,linux,input_map}.rs` に分解。`LatestFrame`/`ViewerConsumer`/`ViewerRenderer` を `PlatformFrame`/`PlatformConsumer`/`PlatformRender` に rename + 平台別に分割。Linux 側は softbuffer + `prdt_media_linux::i420_to_bgra` で CPU 描画、`prdt_media_sw::Openh264Decoder` で SW H.264 decode。Linux client が `prdt connect` をルート。`crates/viewer/tests/linux_connect_smoke.rs` (`#[ignore]`、WSLg 必要) で viewer boot 検証 (1 passed)。`cargo check + clippy` 両ターゲット green、9-step manual smoke (Linux↔Linux WSLg) で 1-7 通る予定 (T9 では未実行)。
+- **L2 候補**: Wayland portal capture / libei / wl-clipboard、VAAPI HW encode/decode、NVENC/NVDEC on Linux、cross-OS scancode normalization、multi-monitor non-zero-origin、cursor capture/合成、複数 distro 検証、`Cmd::Gui` Linux 対応、Linux viewer overlay child process、audio default-on on Linux、`prdt_input_win::RawInputCapturer::map_winit_mouse_button` cleanup、viewer cooperative shutdown (CancellationToken plumbing)
+- **元の見積もり**: 大(3-4 週)。**実績 (L0 + L1 + L1.5a + L1.5b)**: ~80%。残 20% (HW codec + Wayland + packaging) は L2/L3 へ
 
 ### **C. 計測 / 観測 系(blocker 解消用)**
 
