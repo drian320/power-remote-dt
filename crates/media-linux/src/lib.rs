@@ -12,8 +12,7 @@ pub mod x11_capture;
 pub mod sw_pipeline;
 pub mod i420_to_bgra;
 pub mod linux_sw_producer;
-// Subsequent tasks will add:
-//   pub mod core_adapter;
+pub mod core_adapter;
 
 pub use error::LinuxMediaError;
 pub use frame::BgraFrame;
