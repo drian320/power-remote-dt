@@ -30,6 +30,8 @@ mod overlay_supervisor;
 mod latency;
 use latency::LatencyProbe;
 
+mod platform;
+
 /// Per-decoder decoded frame. The viewer thread receives one of these per
 /// frame and dispatches to the matching renderer.
 enum LatestFrame {
