@@ -1,0 +1,102 @@
+name: Release
+on:
+  push:
+    tags:
+      - 'phase-*'
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch or tag to build (defaults to the workflow''s ref)'
+        required: false
+        default: ''
+
+jobs:
+  release-linux:
+    name: Build Linux x86_64 release binary
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Install Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libglib2.0-dev libdbus-1-dev \
+            libxcb-shm0-dev libxcb-randr0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libwayland-dev libssl-dev \
+            libgtk-3-dev libpango1.0-dev libcairo2-dev \
+            libgdk-pixbuf-2.0-dev libatk1.0-dev libayatana-appindicator3-dev \
+            libasound2-dev
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build prdt (unified host+viewer client, release profile)
+        run: |
+          cargo build \
+            --release \
+            -p prdt-client \
+            --target x86_64-unknown-linux-gnu
+
+      - name: Stage artifact
+        run: |
+          mkdir -p artifacts
+          cp target/x86_64-unknown-linux-gnu/release/prdt artifacts/prdt-linux-x86_64
+          chmod +x artifacts/prdt-linux-x86_64
+          (cd artifacts && sha256sum prdt-linux-x86_64 > prdt-linux-x86_64.sha256)
+          ls -la artifacts/
+          file artifacts/prdt-linux-x86_64
+          ldd  artifacts/prdt-linux-x86_64
+
+      - name: Upload workflow artifact (always)
+        uses: actions/upload-artifact@v4
+        with:
+          name: prdt-linux-x86_64
+          path: artifacts/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Create / update GitHub Release (only on tag push)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/prdt-linux-x86_64
+            artifacts/prdt-linux-x86_64.sha256
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            Linux x86_64 build of `prdt` (the unified host+viewer client) for tag `${{ github.ref_name }}`.
+
+            **Install on a Linux box:**
+            ```bash
+            curl -L -o prdt https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/prdt-linux-x86_64
+            chmod +x prdt
+            ./prdt --help
+            ```
+
+            **Run as host** (capture + serve):
+            ```bash
+            ./prdt host --bind 0.0.0.0:9000 --encoder openh264 --silent-allow
+            ```
+
+            **Run as viewer** (connect to a host):
+            ```bash
+            ./prdt connect --host <HOST_IP>:9000 \
+                           --host-pubkey <PUBKEY_FROM_HOST_STDOUT> \
+                           --decoder openh264 --codec h264
+            ```
+
+            Built on `ubuntu-22.04`. Runtime deps: `libasound2`, `libstdc++6`, `libwayland-client0` (any modern desktop Linux).
