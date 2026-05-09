@@ -207,4 +207,8 @@ impl VideoProducer for DxgiSwProducer {
             enc.set_target_bitrate(bps);
         }
     }
+
+    fn backend_name(&self) -> &'static str {
+        "openh264-sw"
+    }
 }

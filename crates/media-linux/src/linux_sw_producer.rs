@@ -111,6 +111,10 @@ impl VideoProducer for LinuxSwProducer {
             e.set_target_bitrate(bps);
         }
     }
+
+    fn backend_name(&self) -> &'static str {
+        "linux-x11shm-openh264"
+    }
 }
 
 #[cfg(test)]

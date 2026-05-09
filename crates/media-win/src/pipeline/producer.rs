@@ -183,4 +183,8 @@ impl VideoProducer for DxgiNvencProducer {
         // Phase 0 Plan 2c: bitrate is fixed at construction time. Reconfigure
         // via NvencEncoder::reconfigure will be wired in Plan 3+.
     }
+
+    fn backend_name(&self) -> &'static str {
+        self.encoder.backend_name()
+    }
 }
