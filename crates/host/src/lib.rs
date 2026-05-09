@@ -2,6 +2,7 @@
 
 mod dxgi_sw_producer;
 mod encoder_dispatch;
+mod platform;
 mod status;
 mod watchdog;
 

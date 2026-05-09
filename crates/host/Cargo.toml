@@ -38,3 +38,10 @@ tokio-util = { version = "0.7", features = ["rt"] }
 prdt-gui-host = { path = "../gui-host" }
 prdt-gui-common = { path = "../gui-common" }
 async-trait = "0.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+prdt-media-linux = { path = "../media-linux" }
+prdt-input-linux = { path = "../input-linux" }
+prdt-media-sw = { path = "../media-sw" }
+tokio-util = { version = "0.7", features = ["rt"] }
+async-trait = "0.1"
