@@ -2,9 +2,10 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
-    // Register the cfg name so the unexpected_cfgs lint doesn't fire on
+    // Register the cfg names so the unexpected_cfgs lint doesn't fire on
     // consumers regardless of whether the bindings are actually compiled.
     println!("cargo::rustc-check-cfg=cfg(prdt_nvdec_bindings)");
+    println!("cargo::rustc-check-cfg=cfg(prdt_nvenc_bindings)");
 
     // Mirror prdt-media-win/build.rs: emit `prdt_nvdec_bindings` when both
     // NV_CODEC_SDK_PATH and CUDA_PATH point at usable directories. Without

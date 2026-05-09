@@ -136,8 +136,6 @@ pub fn virtual_desktop_rect() -> MonitorRect {
 // Set 2: Renderer build / present / resize
 // ---------------------------------------------------------------------------
 
-use anyhow::Context as _;
-
 /// Build the per-OS render state. lib.rs calls this in `resumed()`.
 pub fn build_render(
     window: Arc<Window>,

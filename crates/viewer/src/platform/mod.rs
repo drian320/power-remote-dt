@@ -39,6 +39,7 @@ pub use input_map::{map_winit_mouse_button, physical_key_to_scancode};
 #[cfg(windows)]
 pub mod win;
 #[cfg(windows)]
+#[allow(unused_imports)] // virtual_desktop_rect is reserved for L2 multi-monitor work
 pub use win::{
     build_consumer, build_render, clipboard_sequence_number, present_frame, read_clipboard_text,
     resize_renderer, virtual_desktop_rect, write_clipboard_text, PlatformConsumer, PlatformFrame,

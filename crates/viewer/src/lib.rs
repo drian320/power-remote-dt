@@ -1360,6 +1360,7 @@ fn spawn_worker_tasks(
 
                         #[cfg(windows)]
                         {
+                            use prdt_media_sw::SwH264Decoder as _;
                             let submit_result: std::result::Result<(), String> = match &mut *c {
                                 PlatformConsumer::Mf(m) => m
                                     .submit(frame)
