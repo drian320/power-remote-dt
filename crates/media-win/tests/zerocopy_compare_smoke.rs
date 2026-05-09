@@ -24,7 +24,7 @@
 // The zero-copy benefit shows up in GPU memory bandwidth (no PCIe round-trip),
 // not in the take_latest_* call itself.
 
-#![cfg(all(windows, prdt_nvdec_bindings))]
+#![cfg(all(windows, prdt_nvdec_bindings, prdt_nvenc_bindings))]
 
 use std::time::Instant;
 

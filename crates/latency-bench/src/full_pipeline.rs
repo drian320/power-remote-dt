@@ -12,9 +12,11 @@ use std::time::{Duration, Instant};
 use prdt_media_sw::traits::{SwH264Decoder, SwH264Encoder};
 use prdt_media_sw::{make_counter_i420, Openh264Decoder, Openh264Encoder, Openh264EncoderConfig};
 use prdt_media_win::synthetic::make_counter_texture;
+#[cfg(prdt_nvenc_bindings)]
+use prdt_media_win::NvencEncoder;
 use prdt_media_win::{
     pick_default_adapter, D3d11Device, Hevc265Encoder, HwHevcEncoder, MfD3d11Consumer,
-    MfH265Encoder, NvdecD3d11Consumer, NvencEncoder, NvencEncoderConfig,
+    MfH265Encoder, NvdecD3d11Consumer, NvencEncoderConfig,
 };
 use prdt_protocol::{now_monotonic_us, ConsumerError, EncodedFrame, VideoConsumer};
 use prdt_transport::{InProcTransport, LoopbackOptions, ReceivedMessage, Transport};
@@ -249,9 +251,14 @@ pub async fn run_for_matrix(cfg: &FullPipelineConfig) -> anyhow::Result<RunStats
         gop_length: cfg.fps * 2,
     };
     let mut encoder: HwHevcEncoder = match cfg.encoder {
+        #[cfg(prdt_nvenc_bindings)]
         EncoderBackend::Nvenc => NvencEncoder::new(&dev, &enc_cfg)
             .map_err(|e| anyhow::anyhow!("NvencEncoder::new: {e}"))?
             .into(),
+        #[cfg(not(prdt_nvenc_bindings))]
+        EncoderBackend::Nvenc => {
+            anyhow::bail!("nvenc backend not built (NV_CODEC_SDK_PATH unset at build time)")
+        }
         EncoderBackend::Mf => MfH265Encoder::new(&dev, &enc_cfg)
             .map_err(|e| anyhow::anyhow!("MfH265Encoder::new: {e}"))?
             .into(),

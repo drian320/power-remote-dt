@@ -257,7 +257,9 @@ impl VideoProducer for DxgiSwProducer {
 // === Migrated from lib.rs ===
 
 use prdt_media_sw::{Openh264Encoder, Openh264EncoderConfig};
-use prdt_media_win::{HwHevcEncoder, MfH265Encoder, NvencEncoder, NvencEncoderConfig};
+#[cfg(prdt_nvenc_bindings)]
+use prdt_media_win::NvencEncoder;
+use prdt_media_win::{HwHevcEncoder, MfH265Encoder, NvencEncoderConfig};
 use prdt_protocol::Codec;
 
 /// Resolve `--encoder` to a concrete backend. The `auto` selector picks
@@ -283,16 +285,24 @@ pub(super) fn pick_encoder(
                     negotiated_codec
                 );
             }
-            let cfg = NvencEncoderConfig {
-                width,
-                height,
-                fps_numerator: 60,
-                fps_denominator: 1,
-                bitrate_bps,
-                gop_length: 60,
-            };
-            let enc = NvencEncoder::new(dev, &cfg).context("NvencEncoder::new")?;
-            Ok(VideoEncoderBackend::Hw(HwHevcEncoder::from(enc)))
+            #[cfg(prdt_nvenc_bindings)]
+            {
+                let cfg = NvencEncoderConfig {
+                    width,
+                    height,
+                    fps_numerator: 60,
+                    fps_denominator: 1,
+                    bitrate_bps,
+                    gop_length: 60,
+                };
+                let enc = NvencEncoder::new(dev, &cfg).context("NvencEncoder::new")?;
+                return Ok(VideoEncoderBackend::Hw(HwHevcEncoder::from(enc)));
+            }
+            #[cfg(not(prdt_nvenc_bindings))]
+            {
+                let _ = (dev, width, height, bitrate_bps);
+                anyhow::bail!("nvenc backend not built (NV_CODEC_SDK_PATH unset at build time)")
+            }
         }
         "mf" => {
             if negotiated_codec != Codec::H265 {
@@ -347,7 +357,10 @@ fn resolve_encoder_choice<'a>(
             Codec::H264 => "openh264",
             Codec::H265 => {
                 if adapter.is_nvidia() {
-                    "nvenc"
+                    #[cfg(prdt_nvenc_bindings)]
+                    return "nvenc";
+                    #[cfg(not(prdt_nvenc_bindings))]
+                    return "mf";
                 } else {
                     "mf"
                 }
@@ -356,7 +369,10 @@ fn resolve_encoder_choice<'a>(
             // bail with a clear "encoder=X but negotiated codec=Y" error.
             _ => {
                 if adapter.is_nvidia() {
-                    "nvenc"
+                    #[cfg(prdt_nvenc_bindings)]
+                    return "nvenc";
+                    #[cfg(not(prdt_nvenc_bindings))]
+                    return "mf";
                 } else {
                     "mf"
                 }

@@ -44,12 +44,14 @@ pub trait Hevc265Encoder: Send {
 }
 
 use crate::mf::MfH265Encoder;
+#[cfg(prdt_nvenc_bindings)]
 use crate::nvenc::NvencEncoder;
 
 /// Runtime-dispatched HW H.265 encoder. Used by the producer layer so
 /// the rest of the pipeline (transport, decoder selection, etc.) does
 /// not care which backend is in use.
 pub enum HwHevcEncoder {
+    #[cfg(prdt_nvenc_bindings)]
     Nvenc(Box<NvencEncoder>),
     Mf(Box<MfH265Encoder>),
 }
@@ -62,6 +64,7 @@ impl Hevc265Encoder for HwHevcEncoder {
         timestamp_us: u64,
     ) -> Result<EncodedH265Frame, MediaError> {
         match self {
+            #[cfg(prdt_nvenc_bindings)]
             Self::Nvenc(e) => e.encode(texture, force_idr, timestamp_us),
             Self::Mf(e) => e.encode(texture, force_idr, timestamp_us),
         }
@@ -69,6 +72,7 @@ impl Hevc265Encoder for HwHevcEncoder {
 
     fn set_target_bitrate(&mut self, bps: u32) {
         match self {
+            #[cfg(prdt_nvenc_bindings)]
             Self::Nvenc(e) => e.set_target_bitrate(bps),
             Self::Mf(e) => e.set_target_bitrate(bps),
         }
@@ -76,12 +80,14 @@ impl Hevc265Encoder for HwHevcEncoder {
 
     fn backend_name(&self) -> &'static str {
         match self {
+            #[cfg(prdt_nvenc_bindings)]
             Self::Nvenc(e) => e.backend_name(),
             Self::Mf(e) => e.backend_name(),
         }
     }
 }
 
+#[cfg(prdt_nvenc_bindings)]
 impl From<NvencEncoder> for HwHevcEncoder {
     fn from(e: NvencEncoder) -> Self {
         Self::Nvenc(Box::new(e))

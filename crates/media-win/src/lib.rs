@@ -32,6 +32,10 @@ pub use encoder_trait::{EncodedH265Frame, Hevc265Encoder, HwHevcEncoder};
 pub use error::{MediaError, Result};
 pub use mf::{H265Decoder, MfH265Encoder};
 pub use nvdec::NvdecD3d11Consumer;
-pub use nvenc::{NvEncLibrary, NvencEncoder, NvencEncoderConfig};
-pub use pipeline::{DxgiNvencProducer, MfD3d11Consumer};
+pub use nvenc::NvencEncoderConfig;
+#[cfg(prdt_nvenc_bindings)]
+pub use nvenc::{NvEncLibrary, NvencEncoder};
+#[cfg(prdt_nvenc_bindings)]
+pub use pipeline::DxgiNvencProducer;
+pub use pipeline::MfD3d11Consumer;
 pub use platform::MmcssScope;

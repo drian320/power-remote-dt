@@ -25,6 +25,7 @@
 //!   NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER = VER(1)
 //!   NV_ENCODE_API_FUNCTION_LIST_VER          = VER(2)
 
+#[cfg(prdt_nvenc_bindings)]
 use crate::nvenc::ffi;
 
 // NVENC ships `static const GUID ...` definitions inside its header, so the
@@ -35,6 +36,7 @@ use crate::nvenc::ffi;
 //
 //   NV_ENC_CODEC_HEVC_GUID = 790cdc88-4522-4d7b-9425-bda9975f7603
 //   NV_ENC_PRESET_P1_GUID  = fc0a8d3e-45f8-4cf8-80c7-29887159.0ebf
+#[cfg(prdt_nvenc_bindings)]
 pub(crate) const NV_ENC_CODEC_HEVC_GUID: ffi::GUID = ffi::GUID {
     Data1: 0x790cdc88,
     Data2: 0x4522,
@@ -42,6 +44,7 @@ pub(crate) const NV_ENC_CODEC_HEVC_GUID: ffi::GUID = ffi::GUID {
     Data4: [0x94, 0x25, 0xbd, 0xa9, 0x97, 0x5f, 0x76, 0x03],
 };
 
+#[cfg(prdt_nvenc_bindings)]
 pub(crate) const NV_ENC_PRESET_P1_GUID: ffi::GUID = ffi::GUID {
     Data1: 0xfc0a8d3e,
     Data2: 0x45f8,
@@ -76,11 +79,13 @@ impl Default for NvencEncoderConfig {
 
 /// Owned pair of initialize-params + encode-config. The params struct
 /// contains a raw pointer into `config`, so both must live together.
+#[cfg(prdt_nvenc_bindings)]
 pub struct InitParams {
     pub params: ffi::NV_ENC_INITIALIZE_PARAMS,
     pub config: Box<ffi::NV_ENC_CONFIG>,
 }
 
+#[cfg(prdt_nvenc_bindings)]
 impl InitParams {
     /// Build an initialized `NV_ENC_INITIALIZE_PARAMS` for HEVC + P1 + ULL.
     ///
@@ -133,57 +138,70 @@ impl InitParams {
 // NVENCAPI_VERSION) but not the per-struct `_VER` constants themselves, so we
 // reimplement the macro in Rust.
 
+#[cfg(prdt_nvenc_bindings)]
 const fn nv_enc_struct_version(struct_ver: u32) -> u32 {
     // NVENCAPI_VERSION is already MAJOR | (MINOR << 24) per bindgen output.
     ffi::NVENCAPI_VERSION | (struct_ver << 16) | (0x7u32 << 28)
 }
 
+#[cfg(prdt_nvenc_bindings)]
 pub(crate) fn nv_enc_initialize_params_ver() -> u32 {
     nv_enc_struct_version(7) | (1 << 31)
 }
 
+#[cfg(prdt_nvenc_bindings)]
 pub(crate) fn nv_enc_config_ver() -> u32 {
     nv_enc_struct_version(9) | (1 << 31)
 }
 
 /// Public alias so encoder.rs can reference the same value without
 /// duplicating the constant.
+#[cfg(prdt_nvenc_bindings)]
 pub fn nv_enc_config_ver_public() -> u32 {
     nv_enc_config_ver()
 }
 
+#[cfg(prdt_nvenc_bindings)]
 pub(crate) fn nv_enc_rc_params_ver() -> u32 {
     nv_enc_struct_version(1)
 }
 
+#[cfg(prdt_nvenc_bindings)]
 pub fn nv_enc_pic_params_ver() -> u32 {
     nv_enc_struct_version(7) | (1 << 31)
 }
 
+#[cfg(prdt_nvenc_bindings)]
 pub fn nv_enc_register_resource_ver() -> u32 {
     nv_enc_struct_version(5)
 }
 
+#[cfg(prdt_nvenc_bindings)]
 pub fn nv_enc_map_input_resource_ver() -> u32 {
     nv_enc_struct_version(4)
 }
 
+#[cfg(prdt_nvenc_bindings)]
 pub fn nv_enc_create_bitstream_buffer_ver() -> u32 {
     nv_enc_struct_version(1)
 }
 
+#[cfg(prdt_nvenc_bindings)]
 pub fn nv_enc_lock_bitstream_ver() -> u32 {
     nv_enc_struct_version(2) | (1 << 31)
 }
 
+#[cfg(prdt_nvenc_bindings)]
 pub fn nv_enc_open_encode_session_ex_params_ver() -> u32 {
     nv_enc_struct_version(1)
 }
 
+#[cfg(prdt_nvenc_bindings)]
 pub fn nv_encode_api_function_list_ver() -> u32 {
     nv_enc_struct_version(2)
 }
 
+#[cfg(prdt_nvenc_bindings)]
 pub fn nv_enc_preset_config_ver() -> u32 {
     nv_enc_struct_version(5) | (1 << 31)
 }
@@ -192,6 +210,7 @@ pub fn nv_enc_preset_config_ver() -> u32 {
 mod tests {
     use super::*;
 
+    #[cfg(prdt_nvenc_bindings)]
     #[test]
     fn struct_version_encodes_expected_bits() {
         let v = nv_enc_struct_version(1);
@@ -203,6 +222,7 @@ mod tests {
         assert_eq!((v >> 28) & 0xf, 0x7);
     }
 
+    #[cfg(prdt_nvenc_bindings)]
     #[test]
     fn build_init_params_hevc_ull() {
         let cfg = NvencEncoderConfig::default();

@@ -4,9 +4,10 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
-    // Register the custom cfg unconditionally so the unexpected_cfgs lint
+    // Register the custom cfgs unconditionally so the unexpected_cfgs lint
     // doesn't complain on non-Windows targets (pre-existing; surfaced by L1.5a).
     println!("cargo::rustc-check-cfg=cfg(prdt_nvdec_bindings)");
+    println!("cargo::rustc-check-cfg=cfg(prdt_nvenc_bindings)");
 
     // Only run on Windows.
     let target = env::var("TARGET").unwrap_or_default();
@@ -77,6 +78,7 @@ fn generate_nvenc_bindings() {
         .expect("bindgen failed");
 
     bindings.write_to_file(&out_path).expect("write bindings");
+    println!("cargo:rustc-cfg=prdt_nvenc_bindings");
 }
 
 /// Plan 2d: generate NVDEC (cuvid) bindings. Requires the NVIDIA Video

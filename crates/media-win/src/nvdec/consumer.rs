@@ -341,7 +341,7 @@ mod tests {
     /// dual-plane GPU frame of the expected dimensions and formats comes out.
     /// Proves the parser + decoder + CUDA-D3D11 zero-copy path works
     /// end-to-end against a real NVIDIA driver.
-    #[cfg(prdt_nvdec_bindings)]
+    #[cfg(all(prdt_nvdec_bindings, prdt_nvenc_bindings))]
     #[test]
     fn decode_single_nvenc_frame_round_trip() {
         use crate::nvenc::{NvencEncoder, NvencEncoderConfig};

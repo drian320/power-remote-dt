@@ -1,4 +1,5 @@
 //! DxgiNvencProducer - DXGI Desktop Duplication capture to NVENC H.265 encode.
+#![cfg(prdt_nvenc_bindings)]
 
 use std::time::Duration;
 
