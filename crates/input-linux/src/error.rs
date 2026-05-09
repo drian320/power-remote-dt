@@ -20,6 +20,8 @@ pub enum LinuxInputError {
     ClipboardTooLarge(usize),
     #[error("RandR returned no CRTCs")]
     NoCrtcs,
+    #[error("failed to spawn background thread: {0}")]
+    ThreadSpawn(std::io::Error),
 }
 
 impl From<LinuxInputError> for prdt_input_core::InjectError {

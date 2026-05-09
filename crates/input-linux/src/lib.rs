@@ -8,8 +8,8 @@
 
 pub mod error;
 pub mod uinput_injector;
+pub mod x11_clipboard;
 // Subsequent tasks add:
-//   pub mod x11_clipboard;
 //   pub mod x11_geometry;
 //   pub mod core_adapter;
 
@@ -17,3 +17,7 @@ pub use error::LinuxInputError;
 
 // Free-function production surface (host imports these via cfg):
 pub use uinput_injector::inject_event;
+
+pub use x11_clipboard::{
+    clipboard_sequence_number, read_clipboard_text, write_clipboard_text, MAX_CLIPBOARD_BYTES,
+};
