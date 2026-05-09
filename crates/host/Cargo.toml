@@ -24,6 +24,7 @@ clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = "1"
+thiserror = { workspace = true }
 dirs = { workspace = true }
 rand_core = { version = "0.6", features = ["getrandom"] }
 

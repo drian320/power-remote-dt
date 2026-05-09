@@ -1,5 +1,3 @@
-#![cfg(windows)]
-
 mod platform;
 mod status;
 mod watchdog;
@@ -15,18 +13,14 @@ use clap::Parser;
 use prdt_audio::{LoopbackCapture, OpusEncoder};
 use prdt_crypto::KeyPair;
 use prdt_filetransfer::{send_file, TransferReceiver, DEFAULT_MAX_TRANSFER_BYTES};
-use prdt_input_win::{
-    clipboard_sequence_number, read_clipboard_text, virtual_desktop_rect, write_clipboard_text,
-    SendInputInjector, MAX_CLIPBOARD_BYTES,
+use platform::{
+    build_video_producer, clipboard_sequence_number, dispatch_input, pick_default_output,
+    read_clipboard_text, virtual_desktop_rect, write_clipboard_text, MAX_CLIPBOARD_BYTES,
 };
-use prdt_media_win::{
-    dxgi::enumerate_outputs_for_adapter, pick_default_adapter, D3d11Device, DxgiNvencProducer,
-};
-use prdt_protocol::{wire::AudioPacket, Codec, ControlMessage, MonitorRect, VideoProducer};
+use prdt_protocol::{wire::AudioPacket, Codec, ControlMessage};
+#[cfg(windows)]
+use prdt_protocol::MonitorRect;
 
-use platform::win::{
-    pick_encoder, supported_codecs_for_encoder_arg, DxgiSwProducer, VideoEncoderBackend,
-};
 use prdt_transport::{
     host_handshake, now_monotonic_us, CustomUdpTransport, ReceivedMessage, Transport,
     UdpTransportConfig,
@@ -195,26 +189,10 @@ pub async fn run_host(
         keypair.public.to_base64()
     );
 
-    let adapter = pick_default_adapter().context("no GPU adapter")?;
-    let dev = D3d11Device::create(&adapter).context("D3D11 device")?;
-    let outputs = enumerate_outputs_for_adapter(&adapter).context("outputs")?;
-    if outputs.is_empty() {
-        anyhow::bail!("no display outputs found on adapter");
-    }
-    let output = outputs
-        .get(args.monitor as usize)
-        .with_context(|| {
-            format!(
-                "no output at index {} (available: 0..{})",
-                args.monitor,
-                outputs.len()
-            )
-        })?
-        .clone();
+    let output = pick_default_output(&args).context("pick_default_output")?;
 
     info!(
         monitor = args.monitor,
-        device_name = %output.device_name,
         bitrate_mbps = args.bitrate_mbps,
         encoder = %args.encoder,
         "host starting"
@@ -419,19 +397,34 @@ pub async fn run_host(
             u64::from_le_bytes(buf)
         };
         let bitrate_bps = args.bitrate_mbps.saturating_mul(1_000_000);
+        let vd_rect = virtual_desktop_rect();
+        // On Windows the per-monitor rect is the selected DXGI output;
+        // on Linux (single-monitor only per spec §3) it's the virtual
+        // desktop rect.
+        #[cfg(windows)]
         let monitor_rect = MonitorRect::new(
             output.desktop_rect.left,
             output.desktop_rect.top,
             output.desktop_rect.right,
             output.desktop_rect.bottom,
         );
-        let vd_rect = virtual_desktop_rect();
+        #[cfg(target_os = "linux")]
+        let monitor_rect = vd_rect;
         info!(
             monitor = ?monitor_rect,
             virtual_desktop = ?vd_rect,
             "advertising desktop geometry to viewer",
         );
-        let host_supported = supported_codecs_for_encoder_arg(&args.encoder, &adapter);
+        // Codec advertisement: Windows queries the GPU adapter to decide
+        // between HW (H.265) and SW (H.264); Linux is SW-only (H.264).
+        #[cfg(windows)]
+        let host_supported = {
+            let adapter = prdt_media_win::pick_default_adapter()
+                .context("pick_default_adapter for codec advertisement")?;
+            crate::platform::win::supported_codecs_for_encoder_arg(&args.encoder, &adapter)
+        };
+        #[cfg(target_os = "linux")]
+        let host_supported: Vec<Codec> = vec![Codec::H264];
         let req = match host_handshake(
             &*transport,
             session_id,
@@ -453,21 +446,18 @@ pub async fn run_host(
         info!(?req, "handshake complete");
 
         // Build producer after handshake so the viewer's negotiated codec
-        // selects between the HW (H.265) and SW (H.264) paths.
-        let width = (output.desktop_rect.right - output.desktop_rect.left) as u32;
-        let height = (output.desktop_rect.bottom - output.desktop_rect.top) as u32;
-        let backend =
-            pick_encoder(&args.encoder, &adapter, &dev, width, height, bitrate_bps, req.codec)
-                .context("encoder")?;
-        info!(backend = backend.backend_name(), codec = req.codec.name(), "encoder ready");
-        let mut producer: Box<dyn VideoProducer> = match backend {
-            VideoEncoderBackend::Hw(enc) => Box::new(
-                DxgiNvencProducer::with_encoder(&dev, &output, enc).context("hw producer")?,
-            ),
-            VideoEncoderBackend::SwH264(enc) => Box::new(
-                DxgiSwProducer::with_encoder(&dev, &output, *enc).context("sw producer")?,
-            ),
-        };
+        // selects between the HW (H.265) and SW (H.264) paths. The factory
+        // internally creates the GPU device (Windows) or pipewire stream
+        // (Linux) and derives width/height from `output`.
+        let mut producer = build_video_producer(
+            &args.encoder,
+            &output,
+            bitrate_bps,
+            60, // hard-coded 60 fps; existing host doesn't thread fps through this site
+            req.codec,
+        )
+        .context("build_video_producer")?;
+        info!(backend = producer.backend_name(), codec = req.codec.name(), "encoder ready");
 
         let cancel = CancellationToken::new();
         let last_keepalive = Arc::new(AtomicU64::new(now_monotonic_us()));
@@ -601,7 +591,6 @@ pub async fn run_host(
 
         // Spawn input injection loop.
         let rx_input = Arc::clone(&transport);
-        let injector = SendInputInjector::new();
         let input_last_remote = Arc::clone(&last_remote_clipboard);
         let cancel_input = cancel.clone();
         let cancel_input_propagate = cancel.clone();
@@ -614,8 +603,8 @@ pub async fn run_host(
                     msg = rx_input.recv() => {
                         match msg {
                             Ok(ReceivedMessage::Input(ev)) => {
-                                if let Err(e) = injector.inject(ev) {
-                                    warn!(?e, "inject error");
+                                if let Err(e) = dispatch_input(ev) {
+                                    warn!(error = %e, "inject error");
                                 }
                             }
                             Ok(ReceivedMessage::Control(ControlMessage::KeepAlive)) => {
@@ -809,6 +798,7 @@ pub fn run_main() -> Result<()> {
     run_with_args(Args::parse())
 }
 
+#[cfg(windows)]
 pub fn run_with_args(args: Args) -> Result<()> {
     if args.headless {
         return run_cli(args);
@@ -823,9 +813,19 @@ pub fn run_with_args(args: Args) -> Result<()> {
     prdt_gui_host::run_host_gui(env!("CARGO_PKG_NAME"), args.config.clone(), run_host_fn)
 }
 
+/// On Linux the host is CLI-only for L1.5a — the GUI shell (`prdt-gui-host`)
+/// is a Windows-only dependency and the Linux GUI is deferred to L2 per
+/// the plan §3 scope. `run_with_args` therefore always invokes the
+/// headless CLI path on Linux regardless of `args.headless`.
+#[cfg(target_os = "linux")]
+pub fn run_with_args(args: Args) -> Result<()> {
+    run_cli(args)
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn run_cli(args: Args) -> Result<()> {
     init_tracing();
+    #[cfg(windows)]
     prdt_gui_common::install_panic_hook(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
     run_host(args, None, None, tokio_util::sync::CancellationToken::new()).await
 }
@@ -839,10 +839,15 @@ fn init_tracing() {
 }
 
 
-#[cfg(test)]
+// Tests below exercise Windows-specific encoder/adapter surfaces
+// (`pick_default_adapter`, `supported_codecs_for_encoder_arg`) and so are
+// gated to Windows. The cross-platform unit tests live in
+// `platform/mod.rs` and `platform/linux.rs`.
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
     use clap::Parser;
+    use platform::win::supported_codecs_for_encoder_arg;
 
     /// `--encoder openh264 --headless` must parse cleanly even on a
     /// machine with no NVENC SDK / no NVIDIA GPU. Pre-mortem #1 from

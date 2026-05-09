@@ -19,5 +19,8 @@ prdt-host = { path = "../host" }
 prdt-viewer = { path = "../viewer" }
 prdt-gui-client = { path = "../gui-client" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+prdt-host = { path = "../host" }
+
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
