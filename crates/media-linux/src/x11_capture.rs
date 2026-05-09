@@ -9,6 +9,14 @@ use x11rb::protocol::shm::ConnectionExt as _;
 use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat, Window};
 use x11rb::rust_connection::RustConnection;
 
+/// Maximum capture dimensions. Matches OpenH264's SW encoder limit
+/// (3840x2160 horizontal, 2160x3840 vertical). When the X11 root is
+/// larger than this (multi-monitor WSLg, large virtual desktops) the
+/// capturer clips to the top-left subrect.
+pub const MAX_CAPTURE_W: u32 = 3840;
+/// See [`MAX_CAPTURE_W`].
+pub const MAX_CAPTURE_H: u32 = 2160;
+
 pub struct X11ShmCapturer {
     conn: Arc<RustConnection>,
     root: Window,
@@ -43,8 +51,13 @@ impl X11ShmCapturer {
             .map_err(|e| LinuxMediaError::X11Connect(format!("get_geometry req: {e}")))?
             .reply()
             .map_err(|e| LinuxMediaError::X11Connect(format!("get_geometry reply: {e}")))?;
-        let width = geometry.width as u32;
-        let height = geometry.height as u32;
+        // Clip to OpenH264 SW-encoder max (3840x2160). On WSLg the X11 root
+        // is the entire virtual desktop, which can exceed this on multi-
+        // monitor setups (e.g. 7680x2160). Capturing the top-left subrect
+        // gives a working session at the cost of losing the right-side
+        // monitor — proper per-monitor selection is L2.
+        let width = (geometry.width as u32).min(MAX_CAPTURE_W);
+        let height = (geometry.height as u32).min(MAX_CAPTURE_H);
 
         // Probe MIT-SHM extension. Scope the Cookie so its borrow of
         // `conn` ends before we move `conn` into `Self`.
