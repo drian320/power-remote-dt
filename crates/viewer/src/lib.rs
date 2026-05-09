@@ -32,55 +32,17 @@ use latency::LatencyProbe;
 
 mod platform;
 
-/// Per-decoder decoded frame. The viewer thread receives one of these per
-/// frame and dispatches to the matching renderer.
-enum LatestFrame {
-    /// Single NV12 D3D11 texture from `MfD3d11Consumer::take_latest_texture`.
-    Nv12(prdt_media_win::D3d11Texture),
-    /// Dual-plane (R8 Y, R8G8 UV) frame from
-    /// `NvdecD3d11Consumer::take_latest_dual_plane`. Only constructed when
-    /// `prdt_nvdec_bindings` cfg is set.
-    ///
-    /// Wrapped in `Arc` because the decoder publishes via arc-swap; we
-    /// receive the same `Arc` the writer constructed, with no extra clone.
-    #[cfg(prdt_nvdec_bindings)]
-    DualPlane(std::sync::Arc<prdt_media_win::DualPlaneFrame>),
-}
-
-/// Decoder-selected consumer. Held behind the recv task's
-/// `Arc<tokio::sync::Mutex<...>>`.
-enum ViewerConsumer {
-    Mf(prdt_media_win::MfD3d11Consumer),
-    #[cfg(prdt_nvdec_bindings)]
-    Nvdec(prdt_media_win::NvdecD3d11Consumer),
-    /// Software H.264 path: OpenH264 decoder produces I420 on CPU,
-    /// `CpuI420Uploader` converts to NV12 and uploads into a D3D11
-    /// texture shaped like what `MfD3d11Consumer` returns. The recv
-    /// loop carries the most recently-uploaded texture in
-    /// `latest_texture` so it can be drained next to the MF case
-    /// without changing the renderer.
-    Openh264 {
-        decoder: Openh264Decoder,
-        uploader: CpuI420Uploader,
-        latest_texture: Option<prdt_media_win::D3d11Texture>,
-        needs_idr: bool,
-    },
-}
-
-/// Decoder-selected renderer. Held inside the event-loop's render code.
-enum ViewerRenderer {
-    Mf(prdt_media_win::Nv12Renderer),
-    #[cfg(prdt_nvdec_bindings)]
-    Nvdec(prdt_media_win::DualPlaneYuvRenderer),
-}
+#[cfg(windows)]
+use platform::win::{
+    extract_hwnd, PlatformConsumer as ViewerConsumer, PlatformFrame as LatestFrame,
+    PlatformRender as ViewerRender, WinRenderer as ViewerRenderer,
+};
 use prdt_transport::{
     viewer_handshake, CustomUdpTransport, HelloRequest, ReceivedMessage, Transport,
     UdpTransportConfig, DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_HELLO_RETRIES, DEFAULT_HELLO_TIMEOUT,
 };
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
-use windows::Win32::Foundation::HWND;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
@@ -432,15 +394,6 @@ struct ViewerShared {
     /// The latency task refreshes it once per second; the main thread
     /// applies it in `about_to_wait`. `None` until we have a first value.
     status_title: Mutex<Option<String>>,
-}
-
-/// Render state (main thread only).
-struct ViewerRender {
-    window: Arc<Window>,
-    #[allow(dead_code)]
-    dev: D3d11Device,
-    swap: SwapChain,
-    renderer: Option<ViewerRenderer>,
 }
 
 struct ViewerApp {
@@ -943,14 +896,6 @@ fn map_cursor_to_virtual_desktop(
     let abs_x = (((vd_px_x - vd.left as f64) / vd_w) * 65535.0).clamp(0.0, 65535.0) as i32;
     let abs_y = (((vd_px_y - vd.top as f64) / vd_h) * 65535.0).clamp(0.0, 65535.0) as i32;
     (abs_x, abs_y)
-}
-
-fn extract_hwnd(window: &Window) -> Result<HWND> {
-    let handle = window.window_handle().context("window_handle()")?.as_raw();
-    match handle {
-        RawWindowHandle::Win32(h) => Ok(HWND(h.hwnd.get() as *mut _)),
-        other => anyhow::bail!("unexpected window handle type: {:?}", other),
-    }
 }
 
 fn physical_key_to_scancode(key: PhysicalKey) -> Option<u32> {
