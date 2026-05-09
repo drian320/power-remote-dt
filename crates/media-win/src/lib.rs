@@ -35,7 +35,5 @@ pub use nvdec::NvdecD3d11Consumer;
 pub use nvenc::NvencEncoderConfig;
 #[cfg(prdt_nvenc_bindings)]
 pub use nvenc::{NvEncLibrary, NvencEncoder};
-#[cfg(prdt_nvenc_bindings)]
-pub use pipeline::DxgiNvencProducer;
-pub use pipeline::MfD3d11Consumer;
+pub use pipeline::{DxgiNvencProducer, MfD3d11Consumer};
 pub use platform::MmcssScope;

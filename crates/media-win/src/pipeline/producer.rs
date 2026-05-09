@@ -1,5 +1,4 @@
 //! DxgiNvencProducer - DXGI Desktop Duplication capture to NVENC H.265 encode.
-#![cfg(prdt_nvenc_bindings)]
 
 use std::time::Duration;
 
@@ -10,7 +9,9 @@ use crate::d3d11::D3d11Device;
 use crate::dxgi::{AcquiredFrame, DesktopDuplication, OutputInfo};
 use crate::encoder_trait::{Hevc265Encoder, HwHevcEncoder};
 use crate::error::MediaError;
-use crate::nvenc::{NvencEncoder, NvencEncoderConfig};
+#[cfg(prdt_nvenc_bindings)]
+use crate::nvenc::NvencEncoder;
+use crate::nvenc::NvencEncoderConfig;
 
 pub struct DxgiNvencProducer {
     dev: D3d11Device,
@@ -26,6 +27,11 @@ pub struct DxgiNvencProducer {
 impl DxgiNvencProducer {
     /// Create a producer for the given monitor. `bitrate_bps` is the NVENC
     /// target CBR bitrate.
+    ///
+    /// Only available when the NVIDIA Video Codec SDK was present at build
+    /// time (`prdt_nvenc_bindings` cfg). Use `with_encoder` to construct a
+    /// producer with a pre-built encoder (e.g. MF backend) regardless.
+    #[cfg(prdt_nvenc_bindings)]
     pub fn new(
         dev: &D3d11Device,
         output: &OutputInfo,
