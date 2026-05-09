@@ -40,8 +40,8 @@ unsafe impl Send for X11ShmCapturer {}
 
 impl X11ShmCapturer {
     pub fn new() -> Result<Self, LinuxMediaError> {
-        let (conn, screen_num) = x11rb::connect(None)
-            .map_err(|e| LinuxMediaError::X11Connect(e.to_string()))?;
+        let (conn, screen_num) =
+            x11rb::connect(None).map_err(|e| LinuxMediaError::X11Connect(e.to_string()))?;
         let conn = Arc::new(conn);
         let setup = conn.setup();
         let screen = &setup.roots[screen_num];

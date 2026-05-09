@@ -106,9 +106,8 @@ impl CpuI420Uploader {
             )));
         }
 
-        let nv12 = prdt_media_sw::i420_to_nv12(frame).map_err(|e| {
-            MediaError::Other(format!("i420_to_nv12: {e}"))
-        })?;
+        let nv12 = prdt_media_sw::i420_to_nv12(frame)
+            .map_err(|e| MediaError::Other(format!("i420_to_nv12: {e}")))?;
         let src_stride = frame.stride_y as usize;
         let h = self.height as usize;
         let w = self.width as usize;

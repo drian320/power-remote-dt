@@ -8,8 +8,7 @@ use prdt_input_win::{
     clipboard_sequence_number as _input_win_clipboard_sequence_number,
     read_clipboard_text as _input_win_read_clipboard_text,
     virtual_desktop_rect as _input_win_virtual_desktop_rect,
-    write_clipboard_text as _input_win_write_clipboard_text,
-    MAX_CLIPBOARD_BYTES as _INPUT_WIN_MAX,
+    write_clipboard_text as _input_win_write_clipboard_text, MAX_CLIPBOARD_BYTES as _INPUT_WIN_MAX,
 };
 use prdt_media_sw::Openh264Decoder;
 #[cfg(prdt_nvdec_bindings)]
@@ -208,18 +207,15 @@ pub fn present_frame(
         let new_renderer = if decoder_label == "nvdec" {
             #[cfg(prdt_nvdec_bindings)]
             {
-                let rn = prdt_media_win::DualPlaneYuvRenderer::new(&r.dev)
-                    .map_err(|e| super::RenderError::Init(
-                        format!("DualPlaneYuvRenderer::new: {e}"),
-                    ))?;
+                let rn = prdt_media_win::DualPlaneYuvRenderer::new(&r.dev).map_err(|e| {
+                    super::RenderError::Init(format!("DualPlaneYuvRenderer::new: {e}"))
+                })?;
                 WinRenderer::Nvdec(rn)
             }
             #[cfg(not(prdt_nvdec_bindings))]
             {
                 let rn = Nv12Renderer::new(&r.dev, iw, ih, r.swap.width(), r.swap.height())
-                    .map_err(|e| super::RenderError::Init(
-                        format!("Nv12Renderer::new: {e}"),
-                    ))?;
+                    .map_err(|e| super::RenderError::Init(format!("Nv12Renderer::new: {e}")))?;
                 WinRenderer::Mf(rn)
             }
         } else {
@@ -234,17 +230,15 @@ pub fn present_frame(
         #[allow(unreachable_patterns)]
         match (rn, f) {
             (WinRenderer::Mf(rmf), PlatformFrame::Nv12(nv12_tex)) => {
-                rmf.render(nv12_tex, &r.swap)
-                    .map_err(|e| super::RenderError::Present(
-                        format!("Nv12Renderer::render: {e}"),
-                    ))?;
+                rmf.render(nv12_tex, &r.swap).map_err(|e| {
+                    super::RenderError::Present(format!("Nv12Renderer::render: {e}"))
+                })?;
             }
             #[cfg(prdt_nvdec_bindings)]
             (WinRenderer::Nvdec(rnv), PlatformFrame::DualPlane(dpl)) => {
-                rnv.render(dpl.as_ref(), &r.swap)
-                    .map_err(|e| super::RenderError::Present(
-                        format!("DualPlaneYuvRenderer::render: {e}"),
-                    ))?;
+                rnv.render(dpl.as_ref(), &r.swap).map_err(|e| {
+                    super::RenderError::Present(format!("DualPlaneYuvRenderer::render: {e}"))
+                })?;
             }
             _ => {
                 tracing::warn!("internal: renderer/frame variant mismatch");
@@ -254,10 +248,12 @@ pub fn present_frame(
 
     match r.swap.present(true) {
         Ok(()) => Ok(()),
-        Err(e) if e.is_device_removed() => {
-            Err(super::RenderError::DeviceLost(format!("D3D11 device removed: {e}")))
-        }
-        Err(e) => Err(super::RenderError::Present(format!("SwapChain::present: {e}"))),
+        Err(e) if e.is_device_removed() => Err(super::RenderError::DeviceLost(format!(
+            "D3D11 device removed: {e}"
+        ))),
+        Err(e) => Err(super::RenderError::Present(format!(
+            "SwapChain::present: {e}"
+        ))),
     }
 }
 

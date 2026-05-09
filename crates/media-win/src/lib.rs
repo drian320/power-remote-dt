@@ -28,10 +28,10 @@ pub use d3d11::{
     D3d11Device, D3d11Texture, DualPlaneYuvRenderer, Nv12Renderer, SwapChain, TextureFormat,
 };
 pub use dxgi::{enumerate_outputs_for_adapter, AcquiredFrame, DesktopDuplication, OutputInfo};
+pub use encoder_trait::{EncodedH265Frame, Hevc265Encoder, HwHevcEncoder};
 pub use error::{MediaError, Result};
 pub use mf::{H265Decoder, MfH265Encoder};
 pub use nvdec::NvdecD3d11Consumer;
-pub use encoder_trait::{EncodedH265Frame, Hevc265Encoder, HwHevcEncoder};
 pub use nvenc::{NvEncLibrary, NvencEncoder, NvencEncoderConfig};
 pub use pipeline::{DxgiNvencProducer, MfD3d11Consumer};
 pub use platform::MmcssScope;

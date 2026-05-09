@@ -29,14 +29,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(args.log.clone())
         .init();
 
-    let store = Arc::new(
-        prdt_signaling_server::HostStore::open(&args.db)
-            .map_err(|e| -> Box<dyn std::error::Error> {
-                format!("open store {}: {e}", args.db.display()).into()
-            })?,
-    );
+    let store = Arc::new(prdt_signaling_server::HostStore::open(&args.db).map_err(
+        |e| -> Box<dyn std::error::Error> {
+            format!("open store {}: {e}", args.db.display()).into()
+        },
+    )?);
     let state = Arc::new(ServerState::with_store(store));
-    let cfg = ServerConfig { session_timeout: Duration::from_millis(args.session_timeout_ms) };
+    let cfg = ServerConfig {
+        session_timeout: Duration::from_millis(args.session_timeout_ms),
+    };
     let app = router(state, cfg);
 
     info!(bind = %args.bind, "server_started");

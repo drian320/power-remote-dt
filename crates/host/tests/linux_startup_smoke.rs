@@ -46,9 +46,7 @@ async fn linux_host_starts_without_panic() {
     // within the test's tokio runtime (that would panic with "cannot start a
     // runtime from within a runtime"). Use spawn_blocking to run it on a
     // dedicated OS thread pool thread instead.
-    let host_handle = tokio::task::spawn_blocking(move || {
-        prdt_host::run_with_args(args)
-    });
+    let host_handle = tokio::task::spawn_blocking(move || prdt_host::run_with_args(args));
 
     // Give the host ~500 ms to bind UDP, write the key file, and reach the
     // "waiting for Noise handshake" stage. No peer will connect, so the host

@@ -56,11 +56,7 @@ struct ListenerState {
 }
 
 impl ClientApp {
-    pub fn new(
-        cfg: Arc<Mutex<Config>>,
-        config_path: PathBuf,
-        rt_handle: runtime::Handle,
-    ) -> Self {
+    pub fn new(cfg: Arc<Mutex<Config>>, config_path: PathBuf, rt_handle: runtime::Handle) -> Self {
         let mut app = Self {
             cfg,
             config_path,
@@ -100,8 +96,10 @@ impl ClientApp {
             }
             Ok(other) => {
                 self.pubkey_b64 = None;
-                self.pubkey_load_error =
-                    Some(format!("host-key.bin is {} bytes, expected 32", other.len()));
+                self.pubkey_load_error = Some(format!(
+                    "host-key.bin is {} bytes, expected 32",
+                    other.len()
+                ));
             }
             Err(e) => {
                 self.pubkey_b64 = None;
@@ -267,9 +265,8 @@ impl eframe::App for ClientApp {
         // a few hundred ms after Start Listener is clicked. Poll for it each
         // frame while waiting so the user doesn't have to click "Refresh
         // Pubkey" manually. Tighter repaint cadence kicks in below.
-        let waiting_for_pubkey = self.is_listening()
-            && self.pubkey_b64.is_none()
-            && self.pubkey_load_error.is_none();
+        let waiting_for_pubkey =
+            self.is_listening() && self.pubkey_b64.is_none() && self.pubkey_load_error.is_none();
         if waiting_for_pubkey {
             self.refresh_pubkey();
         }

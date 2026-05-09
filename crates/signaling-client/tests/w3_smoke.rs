@@ -6,7 +6,9 @@
 use bytecodec::{DecodeExt, EncodeExt};
 use prdt_crypto::KeyPair;
 use prdt_protocol::{frame::Codec, MonitorRect};
-use prdt_signaling_client::{rendezvous_as_host, rendezvous_as_viewer, HostIdentity, RendezvousConfig};
+use prdt_signaling_client::{
+    rendezvous_as_host, rendezvous_as_viewer, HostIdentity, RendezvousConfig,
+};
 use prdt_signaling_proto::CandidateType;
 use prdt_signaling_server::{router, ServerConfig, ServerState};
 use prdt_transport::{
@@ -18,9 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use stun_codec::rfc5389::attributes::XorMappedAddress;
 use stun_codec::rfc5389::methods::BINDING;
-use stun_codec::{
-    define_attribute_enums, Message, MessageClass, MessageDecoder, MessageEncoder,
-};
+use stun_codec::{define_attribute_enums, Message, MessageClass, MessageDecoder, MessageEncoder};
 use tokio::net::UdpSocket;
 use url::Url;
 
@@ -37,11 +37,18 @@ async fn spawn_stun_reporting(report: SocketAddr) -> SocketAddr {
     tokio::spawn(async move {
         let mut buf = [0u8; 512];
         loop {
-            let Ok((n, src)) = socket.recv_from(&mut buf).await else { break };
+            let Ok((n, src)) = socket.recv_from(&mut buf).await else {
+                break;
+            };
             let mut dec = MessageDecoder::<Attribute>::new();
-            let Ok(Ok(req)) = dec.decode_from_bytes(&buf[..n]) else { continue };
-            if req.class() != MessageClass::Request || req.method() != BINDING { continue; }
-            let mut resp = Message::new(MessageClass::SuccessResponse, BINDING, req.transaction_id());
+            let Ok(Ok(req)) = dec.decode_from_bytes(&buf[..n]) else {
+                continue;
+            };
+            if req.class() != MessageClass::Request || req.method() != BINDING {
+                continue;
+            }
+            let mut resp =
+                Message::new(MessageClass::SuccessResponse, BINDING, req.transaction_id());
             resp.add_attribute(Attribute::from(XorMappedAddress::new(report)));
             let mut enc = MessageEncoder::<Attribute>::new();
             let bytes = enc.encode_into_bytes(resp).unwrap();
@@ -67,12 +74,20 @@ async fn w3_smoke_probe_plus_noise_plus_hello() {
 
     // Pre-bind both transports so we know their real loopback ports.
     let host_transport = Arc::new(
-        CustomUdpTransport::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap(), UdpTransportConfig::default())
-            .await.unwrap(),
+        CustomUdpTransport::bind(
+            "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+            UdpTransportConfig::default(),
+        )
+        .await
+        .unwrap(),
     );
     let viewer_transport = Arc::new(
-        CustomUdpTransport::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap(), UdpTransportConfig::default())
-            .await.unwrap(),
+        CustomUdpTransport::bind(
+            "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+            UdpTransportConfig::default(),
+        )
+        .await
+        .unwrap(),
     );
     let host_real = host_transport.local_addr().unwrap();
     let viewer_real = viewer_transport.local_addr().unwrap();
@@ -102,14 +117,23 @@ async fn w3_smoke_probe_plus_noise_plus_hello() {
                 turn_url: None,
                 aggregation_window: Duration::from_millis(300),
             },
-            HostIdentity { pubkey_b64: host_pub_b64 },
+            HostIdentity {
+                pubkey_b64: host_pub_b64,
+            },
             host_real,
-        ).await.expect("host rendezvous");
+        )
+        .await
+        .expect("host rendezvous");
 
-        let cand_addrs: Vec<SocketAddr> = outcome.peer_candidates.iter()
+        let cand_addrs: Vec<SocketAddr> = outcome
+            .peer_candidates
+            .iter()
             .filter_map(|c| format!("{}:{}", c.ip, c.port).parse().ok())
             .collect();
-        let peer_addr = ht.probe_and_commit_peer(&cand_addrs, Duration::from_secs(5)).await.expect("host probe");
+        let peer_addr = ht
+            .probe_and_commit_peer(&cand_addrs, Duration::from_secs(5))
+            .await
+            .expect("host probe");
         eprintln!("w3_smoke host probe winner: {peer_addr}");
 
         ht.handshake_as_server(&host_kp).await.expect("host Noise");
@@ -122,7 +146,9 @@ async fn w3_smoke_probe_plus_noise_plus_hello() {
             MonitorRect::new(0, 0, 1920, 1080),
             &[Codec::H265],
             Duration::from_secs(5),
-        ).await.expect("host Hello");
+        )
+        .await
+        .expect("host Hello");
     };
 
     let sig_b = signaling_url.clone();
@@ -140,29 +166,53 @@ async fn w3_smoke_probe_plus_noise_plus_hello() {
                 aggregation_window: Duration::from_millis(300),
             },
             viewer_real,
-        ).await.expect("viewer rendezvous");
+        )
+        .await
+        .expect("viewer rendezvous");
         assert!(outcome.peer_pubkey_b64.is_some());
-        assert!(outcome.peer_candidates.iter().any(|c| c.typ == CandidateType::Host),
-            "viewer missing peer Host; got {:?}", outcome.peer_candidates);
+        assert!(
+            outcome
+                .peer_candidates
+                .iter()
+                .any(|c| c.typ == CandidateType::Host),
+            "viewer missing peer Host; got {:?}",
+            outcome.peer_candidates
+        );
 
-        let cand_addrs: Vec<SocketAddr> = outcome.peer_candidates.iter()
+        let cand_addrs: Vec<SocketAddr> = outcome
+            .peer_candidates
+            .iter()
             .filter_map(|c| format!("{}:{}", c.ip, c.port).parse().ok())
             .collect();
-        let peer_addr = vt.probe_and_commit_peer(&cand_addrs, Duration::from_secs(5)).await.expect("viewer probe");
+        let peer_addr = vt
+            .probe_and_commit_peer(&cand_addrs, Duration::from_secs(5))
+            .await
+            .expect("viewer probe");
         eprintln!("w3_smoke viewer probe winner: {peer_addr}");
 
         let viewer_kp = KeyPair::generate();
-        vt.handshake_as_client(&host_pub_copy, &viewer_kp, DEFAULT_HANDSHAKE_TIMEOUT).await.expect("viewer Noise");
+        vt.handshake_as_client(&host_pub_copy, &viewer_kp, DEFAULT_HANDSHAKE_TIMEOUT)
+            .await
+            .expect("viewer Noise");
         let ack = viewer_handshake(
             &*vt,
-            &HelloRequest { req_width: 1920, req_height: 1080, req_fps: 60, codec: Codec::H265 },
+            &HelloRequest {
+                req_width: 1920,
+                req_height: 1080,
+                req_fps: 60,
+                codec: Codec::H265,
+            },
             Duration::from_millis(500),
             5,
-        ).await.expect("viewer Hello");
+        )
+        .await
+        .expect("viewer Hello");
         assert_eq!(ack.session_id, 0xDEAD_BEEF);
     };
 
     tokio::time::timeout(Duration::from_secs(20), async {
         tokio::join!(host_fut, viewer_fut)
-    }).await.expect("W3 smoke must complete within 20s");
+    })
+    .await
+    .expect("W3 smoke must complete within 20s");
 }

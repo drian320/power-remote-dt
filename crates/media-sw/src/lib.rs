@@ -18,5 +18,5 @@ pub mod traits;
 pub use decoder::Openh264Decoder;
 pub use encoder::{Openh264Encoder, Openh264EncoderConfig};
 pub use error::{MediaSwError, Result};
-pub use nv12::{I420Frame, bgra_to_i420, i420_to_nv12, make_counter_i420};
+pub use nv12::{bgra_to_i420, i420_to_nv12, make_counter_i420, I420Frame};
 pub use traits::{SwH264Decoder, SwH264Encoder};

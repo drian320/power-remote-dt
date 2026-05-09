@@ -41,8 +41,8 @@ pub mod win;
 #[cfg(windows)]
 pub use win::{
     build_consumer, build_render, clipboard_sequence_number, present_frame, read_clipboard_text,
-    resize_renderer, virtual_desktop_rect, write_clipboard_text,
-    PlatformConsumer, PlatformFrame, PlatformRender, MAX_CLIPBOARD_BYTES,
+    resize_renderer, virtual_desktop_rect, write_clipboard_text, PlatformConsumer, PlatformFrame,
+    PlatformRender, MAX_CLIPBOARD_BYTES,
 };
 
 #[cfg(target_os = "linux")]
@@ -51,8 +51,8 @@ pub mod linux;
 #[allow(unused_imports)] // virtual_desktop_rect is reserved for L2 multi-monitor work
 pub use linux::{
     build_consumer, build_render, clipboard_sequence_number, present_frame, read_clipboard_text,
-    resize_renderer, virtual_desktop_rect, write_clipboard_text,
-    PlatformConsumer, PlatformFrame, PlatformRender, MAX_CLIPBOARD_BYTES,
+    resize_renderer, virtual_desktop_rect, write_clipboard_text, PlatformConsumer, PlatformFrame,
+    PlatformRender, MAX_CLIPBOARD_BYTES,
 };
 
 #[cfg(test)]

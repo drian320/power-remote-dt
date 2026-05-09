@@ -42,10 +42,7 @@ impl ServerHandshake {
     /// responder's reply (e, ee, se). After this call the handshake is
     /// complete; a `Session` plus the initiator's static public key are
     /// returned so the host can identify the peer cryptographically.
-    pub fn respond(
-        mut self,
-        client_msg: &[u8],
-    ) -> Result<(Vec<u8>, Session, PubKey), CryptoError> {
+    pub fn respond(mut self, client_msg: &[u8]) -> Result<(Vec<u8>, Session, PubKey), CryptoError> {
         let mut read_buf = vec![0u8; 1024];
         let _ = self.state.read_message(client_msg, &mut read_buf)?;
 

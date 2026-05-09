@@ -31,10 +31,7 @@ pub trait SwH264Decoder: Send {
     /// Decode an Annex-B H.264 access unit. Returns `Ok(Some(frame))`
     /// when a picture is available, `Ok(None)` when the decoder needs
     /// more input (e.g. SPS-only on the first call).
-    fn decode(
-        &mut self,
-        nal_units: &[u8],
-    ) -> std::result::Result<Option<I420Frame>, MediaSwError>;
+    fn decode(&mut self, nal_units: &[u8]) -> std::result::Result<Option<I420Frame>, MediaSwError>;
 
     fn backend_name(&self) -> &'static str;
 }

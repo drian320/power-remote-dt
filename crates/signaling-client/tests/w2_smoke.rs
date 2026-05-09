@@ -7,7 +7,9 @@
 use bytecodec::{DecodeExt, EncodeExt};
 use prdt_crypto::KeyPair;
 use prdt_protocol::{frame::Codec, MonitorRect};
-use prdt_signaling_client::{rendezvous_as_host, rendezvous_as_viewer, HostIdentity, RendezvousConfig};
+use prdt_signaling_client::{
+    rendezvous_as_host, rendezvous_as_viewer, HostIdentity, RendezvousConfig,
+};
 use prdt_signaling_proto::CandidateType;
 use prdt_signaling_server::{router, ServerConfig, ServerState};
 use prdt_transport::{
@@ -19,9 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use stun_codec::rfc5389::attributes::XorMappedAddress;
 use stun_codec::rfc5389::methods::BINDING;
-use stun_codec::{
-    define_attribute_enums, Message, MessageClass, MessageDecoder, MessageEncoder,
-};
+use stun_codec::{define_attribute_enums, Message, MessageClass, MessageDecoder, MessageEncoder};
 use tokio::net::UdpSocket;
 use url::Url;
 
@@ -38,13 +38,18 @@ async fn spawn_stun_mock(report_addr: SocketAddr) -> SocketAddr {
     tokio::spawn(async move {
         let mut buf = [0u8; 512];
         loop {
-            let Ok((n, src)) = socket.recv_from(&mut buf).await else { break };
+            let Ok((n, src)) = socket.recv_from(&mut buf).await else {
+                break;
+            };
             let mut dec = MessageDecoder::<Attribute>::new();
-            let Ok(Ok(req)) = dec.decode_from_bytes(&buf[..n]) else { continue };
+            let Ok(Ok(req)) = dec.decode_from_bytes(&buf[..n]) else {
+                continue;
+            };
             if req.class() != MessageClass::Request || req.method() != BINDING {
                 continue;
             }
-            let mut resp = Message::new(MessageClass::SuccessResponse, BINDING, req.transaction_id());
+            let mut resp =
+                Message::new(MessageClass::SuccessResponse, BINDING, req.transaction_id());
             resp.add_attribute(Attribute::from(XorMappedAddress::new(report_addr)));
             let mut enc = MessageEncoder::<Attribute>::new();
             let bytes = enc.encode_into_bytes(resp).unwrap();
@@ -98,7 +103,9 @@ async fn w2_smoke_stun_plus_signaling_plus_noise() {
                 turn_url: None,
                 aggregation_window: std::time::Duration::from_millis(100),
             },
-            HostIdentity { pubkey_b64: host_pub_b64 },
+            HostIdentity {
+                pubkey_b64: host_pub_b64,
+            },
             local,
         )
         .await
@@ -106,8 +113,14 @@ async fn w2_smoke_stun_plus_signaling_plus_noise() {
 
         // W2 race-free assertion: Host is guaranteed; Srflx may or may not have
         // arrived before we committed on the first Host. Logging for observation.
-        let has_host = outcome.peer_candidates.iter().any(|c| c.typ == CandidateType::Host);
-        let has_srflx = outcome.peer_candidates.iter().any(|c| c.typ == CandidateType::Srflx);
+        let has_host = outcome
+            .peer_candidates
+            .iter()
+            .any(|c| c.typ == CandidateType::Host);
+        let has_srflx = outcome
+            .peer_candidates
+            .iter()
+            .any(|c| c.typ == CandidateType::Srflx);
         assert!(
             has_host,
             "host missing peer Host; got {:?}",
@@ -115,7 +128,9 @@ async fn w2_smoke_stun_plus_signaling_plus_noise() {
         );
         eprintln!("w2_smoke host_side: peer Srflx observed = {has_srflx}");
 
-        let cand_addrs: Vec<std::net::SocketAddr> = outcome.peer_candidates.iter()
+        let cand_addrs: Vec<std::net::SocketAddr> = outcome
+            .peer_candidates
+            .iter()
             .filter_map(|c| format!("{}:{}", c.ip, c.port).parse().ok())
             .collect();
         let _peer_addr = transport
@@ -170,8 +185,14 @@ async fn w2_smoke_stun_plus_signaling_plus_noise() {
 
         // W2 race-free assertion: Host is guaranteed; Srflx may or may not have
         // arrived before we committed on the first Host. Logging for observation.
-        let has_host = outcome.peer_candidates.iter().any(|c| c.typ == CandidateType::Host);
-        let has_srflx = outcome.peer_candidates.iter().any(|c| c.typ == CandidateType::Srflx);
+        let has_host = outcome
+            .peer_candidates
+            .iter()
+            .any(|c| c.typ == CandidateType::Host);
+        let has_srflx = outcome
+            .peer_candidates
+            .iter()
+            .any(|c| c.typ == CandidateType::Srflx);
         assert!(
             has_host,
             "viewer missing peer Host; got {:?}",
@@ -179,7 +200,9 @@ async fn w2_smoke_stun_plus_signaling_plus_noise() {
         );
         eprintln!("w2_smoke viewer_side: peer Srflx observed = {has_srflx}");
 
-        let cand_addrs: Vec<std::net::SocketAddr> = outcome.peer_candidates.iter()
+        let cand_addrs: Vec<std::net::SocketAddr> = outcome
+            .peer_candidates
+            .iter()
             .filter_map(|c| format!("{}:{}", c.ip, c.port).parse().ok())
             .collect();
         let _peer_addr = transport

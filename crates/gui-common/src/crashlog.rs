@@ -115,10 +115,12 @@ fn write_report_to(report: &CrashReport, dir: &Path) -> std::io::Result<PathBuf>
     // JSON content can never disagree. Include milliseconds to avoid
     // same-second same-PID collisions (e.g. eframe catch_unwind double-panic).
     let (stamp, millis) = chrono::DateTime::parse_from_rfc3339(&report.timestamp_iso)
-        .map(|dt| (
-            dt.format("%Y%m%d-%H%M%S").to_string(),
-            dt.timestamp_subsec_millis(),
-        ))
+        .map(|dt| {
+            (
+                dt.format("%Y%m%d-%H%M%S").to_string(),
+                dt.timestamp_subsec_millis(),
+            )
+        })
         .unwrap_or_else(|_| ("unknown".to_string(), 0));
     let path = dir.join(format!(
         "{}-{:03}-{}-{}.json",

@@ -17,10 +17,10 @@
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Media::MediaFoundation::{
-    IMFActivate, IMFDXGIDeviceManager, IMFMediaEventGenerator, IMFTransform,
-    METransformHaveOutput, METransformNeedInput, MFCreateDXGIDeviceManager,
-    MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
-    MFMediaType_Video, MFTEnumEx, MFVideoFormat_HEVC, MFVideoFormat_NV12,
+    IMFActivate, IMFDXGIDeviceManager, IMFMediaEventGenerator, IMFTransform, METransformHaveOutput,
+    METransformNeedInput, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType,
+    MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFSampleExtension_CleanPoint,
+    MFTEnumEx, MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoInterlace_Progressive,
     MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
     MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
     MFT_MESSAGE_NOTIFY_END_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
@@ -28,7 +28,6 @@ use windows::Win32::Media::MediaFoundation::{
     MF_EVENT_FLAG_NONE, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_LOW_LATENCY, MF_MT_AVG_BITRATE,
     MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
     MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_TRANSFORM_ASYNC_UNLOCK,
-    MFSampleExtension_CleanPoint, MFVideoInterlace_Progressive,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 
@@ -73,7 +72,10 @@ impl MfH265Encoder {
 
         unsafe {
             transform
-                .ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, device_manager.as_raw() as usize)
+                .ProcessMessage(
+                    MFT_MESSAGE_SET_D3D_MANAGER,
+                    device_manager.as_raw() as usize,
+                )
                 .map_err(|e| MediaError::Other(format!("MFT_MESSAGE_SET_D3D_MANAGER: {e}")))?;
         }
 
@@ -138,8 +140,7 @@ impl Hevc265Encoder for MfH265Encoder {
         self.bgra_to_nv12.convert(texture, &self.nv12_input)?;
 
         // 2. Wrap NV12 texture in an IMFSample.
-        let sample =
-            wrap_d3d11_in_sample(&self.nv12_input, timestamp_us, self.width, self.height)?;
+        let sample = wrap_d3d11_in_sample(&self.nv12_input, timestamp_us, self.width, self.height)?;
 
         if force_idr || self.pending_idr {
             unsafe {
@@ -296,10 +297,7 @@ fn configure_output_type(
             .SetUINT64(&MF_MT_FRAME_SIZE, size_packed)
             .map_err(|e| MediaError::Other(format!("SetUINT64 frame_size (out): {e}")))?;
         out_type
-            .SetUINT32(
-                &MF_MT_INTERLACE_MODE,
-                MFVideoInterlace_Progressive.0 as u32,
-            )
+            .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
             .map_err(|e| MediaError::Other(format!("SetUINT32 interlace (out): {e}")))?;
         out_type
             .SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, 1u64 << 32 | 1u64)
@@ -335,10 +333,7 @@ fn configure_input_type(
             .SetUINT64(&MF_MT_FRAME_SIZE, size_packed)
             .map_err(|e| MediaError::Other(format!("SetUINT64 frame_size (in): {e}")))?;
         in_type
-            .SetUINT32(
-                &MF_MT_INTERLACE_MODE,
-                MFVideoInterlace_Progressive.0 as u32,
-            )
+            .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
             .map_err(|e| MediaError::Other(format!("SetUINT32 interlace (in): {e}")))?;
         in_type
             .SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, 1u64 << 32 | 1u64)
@@ -356,8 +351,8 @@ fn configure_rate_control(
     cfg: &NvencEncoderConfig,
 ) -> Result<(), MediaError> {
     use windows::Win32::Media::MediaFoundation::{
-        ICodecAPI, CODECAPI_AVEncCommonMaxBitRate, CODECAPI_AVEncCommonMeanBitRate,
-        CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncMPVGOPSize,
+        CODECAPI_AVEncCommonMaxBitRate, CODECAPI_AVEncCommonMeanBitRate,
+        CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncMPVGOPSize, ICodecAPI,
     };
     // windows-rs 0.58 exposes From<u32> for windows::core::VARIANT (VT_UI4).
     // ICodecAPI::SetValue takes *const windows_core::VARIANT.
@@ -426,8 +421,8 @@ fn drain_one_output(transform: &IMFTransform) -> Result<DrainedOutput, MediaErro
         let sample = if mft_provides_sample {
             None
         } else {
-            let s = MFCreateSample()
-                .map_err(|e| MediaError::Other(format!("MFCreateSample: {e}")))?;
+            let s =
+                MFCreateSample().map_err(|e| MediaError::Other(format!("MFCreateSample: {e}")))?;
             let buf = MFCreateMemoryBuffer(stream_info.cbSize.max(1))
                 .map_err(|e| MediaError::Other(format!("MFCreateMemoryBuffer: {e}")))?;
             s.AddBuffer(&buf)
@@ -501,16 +496,11 @@ fn wrap_d3d11_in_sample(
     _height: u32,
 ) -> Result<windows::Win32::Media::MediaFoundation::IMFSample, MediaError> {
     unsafe {
-        let buffer = MFCreateDXGISurfaceBuffer(
-            &ID3D11Texture2D::IID,
-            texture.raw(),
-            0,
-            false,
-        )
-        .map_err(|e| MediaError::Other(format!("MFCreateDXGISurfaceBuffer: {e}")))?;
+        let buffer = MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, texture.raw(), 0, false)
+            .map_err(|e| MediaError::Other(format!("MFCreateDXGISurfaceBuffer: {e}")))?;
 
-        let sample = MFCreateSample()
-            .map_err(|e| MediaError::Other(format!("MFCreateSample: {e}")))?;
+        let sample =
+            MFCreateSample().map_err(|e| MediaError::Other(format!("MFCreateSample: {e}")))?;
         sample
             .AddBuffer(&buffer)
             .map_err(|e| MediaError::Other(format!("AddBuffer: {e}")))?;

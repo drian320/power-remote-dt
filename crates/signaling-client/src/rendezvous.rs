@@ -15,7 +15,8 @@ use std::sync::Arc;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REGISTERED_TIMEOUT: Duration = Duration::from_secs(5);
 
-type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 fn candidate_for(local: SocketAddr) -> Candidate {
     Candidate {
@@ -27,9 +28,12 @@ fn candidate_for(local: SocketAddr) -> Candidate {
 }
 
 async fn ws_connect(url: &url::Url) -> Result<Ws, SignalingError> {
-    let (ws, _) = timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(url.as_str()))
-        .await
-        .map_err(|_| SignalingError::Timeout { stage: "connect" })??;
+    let (ws, _) = timeout(
+        CONNECT_TIMEOUT,
+        tokio_tungstenite::connect_async(url.as_str()),
+    )
+    .await
+    .map_err(|_| SignalingError::Timeout { stage: "connect" })??;
     Ok(ws)
 }
 
@@ -39,7 +43,11 @@ async fn send_msg(ws: &mut Ws, m: &ClientMessage) -> Result<(), SignalingError> 
     Ok(())
 }
 
-async fn recv_msg(ws: &mut Ws, stage: &'static str, dur: Duration) -> Result<ServerMessage, SignalingError> {
+async fn recv_msg(
+    ws: &mut Ws,
+    stage: &'static str,
+    dur: Duration,
+) -> Result<ServerMessage, SignalingError> {
     let frame = timeout(dur, ws.next())
         .await
         .map_err(|_| SignalingError::Timeout { stage })?;
@@ -48,7 +56,9 @@ async fn recv_msg(ws: &mut Ws, stage: &'static str, dur: Duration) -> Result<Ser
         .map_err(SignalingError::from)?;
     match frame {
         Message::Text(t) => Ok(serde_json::from_str(&t)?),
-        other => Err(SignalingError::Protocol(format!("non-text frame: {other:?}"))),
+        other => Err(SignalingError::Protocol(format!(
+            "non-text frame: {other:?}"
+        ))),
     }
 }
 
@@ -60,32 +70,64 @@ pub async fn rendezvous_as_host(
 ) -> Result<RendezvousOutcome, SignalingError> {
     let mut ws = ws_connect(&cfg.url).await?;
 
-    send_msg(&mut ws, &ClientMessage::Register {
-        host_id: cfg.host_id.clone(),
-        pubkey_b64: identity.pubkey_b64,
-    }).await?;
+    send_msg(
+        &mut ws,
+        &ClientMessage::Register {
+            host_id: cfg.host_id.clone(),
+            pubkey_b64: identity.pubkey_b64,
+        },
+    )
+    .await?;
 
     let allocated_host_id = match recv_msg(&mut ws, "registered", REGISTERED_TIMEOUT).await? {
         ServerMessage::Registered { host_id } => host_id,
-        ServerMessage::Error { code, message } => return Err(SignalingError::Server { code, message }),
-        other => return Err(SignalingError::Protocol(format!("expected Registered, got {other:?}"))),
+        ServerMessage::Error { code, message } => {
+            return Err(SignalingError::Server { code, message })
+        }
+        other => {
+            return Err(SignalingError::Protocol(format!(
+                "expected Registered, got {other:?}"
+            )))
+        }
     };
 
     let session_id = match recv_msg(&mut ws, "session_start", cfg.timeout).await? {
-        ServerMessage::SessionStart { session_id, role: Role::Host, .. } => session_id,
-        ServerMessage::Error { code, message } => return Err(SignalingError::Server { code, message }),
-        other => return Err(SignalingError::Protocol(format!("expected SessionStart, got {other:?}"))),
+        ServerMessage::SessionStart {
+            session_id,
+            role: Role::Host,
+            ..
+        } => session_id,
+        ServerMessage::Error { code, message } => {
+            return Err(SignalingError::Server { code, message })
+        }
+        other => {
+            return Err(SignalingError::Protocol(format!(
+                "expected SessionStart, got {other:?}"
+            )))
+        }
     };
     info!(%session_id, "session_start");
 
-    send_candidates(&mut ws, &session_id, local_udp_addr, cfg.stun_url.as_ref(), cfg.turn_url.as_ref()).await?;
+    send_candidates(
+        &mut ws,
+        &session_id,
+        local_udp_addr,
+        cfg.stun_url.as_ref(),
+        cfg.turn_url.as_ref(),
+    )
+    .await?;
 
-    let peer_candidates = recv_peer_candidates(&mut ws, cfg.timeout, cfg.aggregation_window).await?;
+    let peer_candidates =
+        recv_peer_candidates(&mut ws, cfg.timeout, cfg.aggregation_window).await?;
 
-    send_msg(&mut ws, &ClientMessage::Done {
-        session_id: session_id.clone(),
-        outcome: DoneOutcome::Connected,
-    }).await?;
+    send_msg(
+        &mut ws,
+        &ClientMessage::Done {
+            session_id: session_id.clone(),
+            outcome: DoneOutcome::Connected,
+        },
+    )
+    .await?;
 
     let _ = ws.close(None).await;
     Ok(RendezvousOutcome {
@@ -103,23 +145,52 @@ pub async fn rendezvous_as_viewer(
 ) -> Result<RendezvousOutcome, SignalingError> {
     let mut ws = ws_connect(&cfg.url).await?;
 
-    send_msg(&mut ws, &ClientMessage::Connect { host_id: cfg.host_id.clone() }).await?;
+    send_msg(
+        &mut ws,
+        &ClientMessage::Connect {
+            host_id: cfg.host_id.clone(),
+        },
+    )
+    .await?;
 
-    let (session_id, peer_pubkey_b64) = match recv_msg(&mut ws, "session_start", cfg.timeout).await? {
-        ServerMessage::SessionStart { session_id, role: Role::Viewer, peer_pubkey_b64 } => (session_id, peer_pubkey_b64),
-        ServerMessage::Error { code, message } => return Err(SignalingError::Server { code, message }),
-        other => return Err(SignalingError::Protocol(format!("expected SessionStart, got {other:?}"))),
-    };
+    let (session_id, peer_pubkey_b64) =
+        match recv_msg(&mut ws, "session_start", cfg.timeout).await? {
+            ServerMessage::SessionStart {
+                session_id,
+                role: Role::Viewer,
+                peer_pubkey_b64,
+            } => (session_id, peer_pubkey_b64),
+            ServerMessage::Error { code, message } => {
+                return Err(SignalingError::Server { code, message })
+            }
+            other => {
+                return Err(SignalingError::Protocol(format!(
+                    "expected SessionStart, got {other:?}"
+                )))
+            }
+        };
     info!(%session_id, "session_start");
 
-    send_candidates(&mut ws, &session_id, local_udp_addr, cfg.stun_url.as_ref(), cfg.turn_url.as_ref()).await?;
+    send_candidates(
+        &mut ws,
+        &session_id,
+        local_udp_addr,
+        cfg.stun_url.as_ref(),
+        cfg.turn_url.as_ref(),
+    )
+    .await?;
 
-    let peer_candidates = recv_peer_candidates(&mut ws, cfg.timeout, cfg.aggregation_window).await?;
+    let peer_candidates =
+        recv_peer_candidates(&mut ws, cfg.timeout, cfg.aggregation_window).await?;
 
-    send_msg(&mut ws, &ClientMessage::Done {
-        session_id: session_id.clone(),
-        outcome: DoneOutcome::Connected,
-    }).await?;
+    send_msg(
+        &mut ws,
+        &ClientMessage::Done {
+            session_id: session_id.clone(),
+            outcome: DoneOutcome::Connected,
+        },
+    )
+    .await?;
 
     let _ = ws.close(None).await;
     Ok(RendezvousOutcome {
@@ -167,7 +238,9 @@ async fn recv_peer_candidates(
         }
     }
     if collected.is_empty() {
-        return Err(SignalingError::Timeout { stage: "peer_candidate" });
+        return Err(SignalingError::Timeout {
+            stage: "peer_candidate",
+        });
     }
     Ok(collected)
 }
@@ -179,23 +252,31 @@ async fn send_candidates(
     stun_url: Option<&url::Url>,
     turn_url: Option<&url::Url>,
 ) -> Result<(), SignalingError> {
-    send_msg(ws, &ClientMessage::Candidate {
-        session_id: session_id.to_string(),
-        candidate: candidate_for(local_udp_addr),
-    }).await?;
+    send_msg(
+        ws,
+        &ClientMessage::Candidate {
+            session_id: session_id.to_string(),
+            candidate: candidate_for(local_udp_addr),
+        },
+    )
+    .await?;
 
     if let Some(url) = stun_url {
         match resolve_and_learn_srflx(url).await {
             Ok(srflx) => {
-                send_msg(ws, &ClientMessage::Candidate {
-                    session_id: session_id.to_string(),
-                    candidate: Candidate {
-                        typ: CandidateType::Srflx,
-                        ip: srflx.ip().to_string(),
-                        port: srflx.port(),
-                        priority: PRIORITY_SRFLX,
+                send_msg(
+                    ws,
+                    &ClientMessage::Candidate {
+                        session_id: session_id.to_string(),
+                        candidate: Candidate {
+                            typ: CandidateType::Srflx,
+                            ip: srflx.ip().to_string(),
+                            port: srflx.port(),
+                            priority: PRIORITY_SRFLX,
+                        },
                     },
-                }).await?;
+                )
+                .await?;
                 tracing::info!(%srflx, "srflx candidate sent");
             }
             Err(e) => {
@@ -208,21 +289,29 @@ async fn send_candidates(
         match prdt_nat_traversal::TurnConfig::from_url(url).await {
             Ok(cfg) => {
                 let probe_socket = Arc::new(tokio::net::UdpSocket::bind("0.0.0.0:0").await?);
-                match prdt_nat_traversal::TurnRelaySocket::allocate_with_socket(probe_socket, cfg).await {
+                match prdt_nat_traversal::TurnRelaySocket::allocate_with_socket(probe_socket, cfg)
+                    .await
+                {
                     Ok(relay) => {
                         let relayed = relay.relayed_addr();
-                        send_msg(ws, &ClientMessage::Candidate {
-                            session_id: session_id.to_string(),
-                            candidate: Candidate {
-                                typ: CandidateType::Relay,
-                                ip: relayed.ip().to_string(),
-                                port: relayed.port(),
-                                priority: PRIORITY_RELAY,
+                        send_msg(
+                            ws,
+                            &ClientMessage::Candidate {
+                                session_id: session_id.to_string(),
+                                candidate: Candidate {
+                                    typ: CandidateType::Relay,
+                                    ip: relayed.ip().to_string(),
+                                    port: relayed.port(),
+                                    priority: PRIORITY_RELAY,
+                                },
                             },
-                        }).await?;
+                        )
+                        .await?;
                         tracing::info!(%relayed, "relay candidate sent");
                     }
-                    Err(e) => tracing::warn!(error = %e, "TURN allocate failed; no relay candidate"),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "TURN allocate failed; no relay candidate")
+                    }
                 }
             }
             Err(e) => tracing::warn!(error = %e, "TURN URL parse failed"),
@@ -231,9 +320,7 @@ async fn send_candidates(
     Ok(())
 }
 
-async fn resolve_and_learn_srflx(
-    stun_url: &url::Url,
-) -> Result<SocketAddr, SignalingError> {
+async fn resolve_and_learn_srflx(stun_url: &url::Url) -> Result<SocketAddr, SignalingError> {
     if stun_url.scheme() != "stun" {
         return Err(SignalingError::Protocol(format!(
             "unsupported stun URL scheme: {}",
@@ -252,12 +339,9 @@ async fn resolve_and_learn_srflx(
 
     // Separate UDP socket for STUN (W2 limitation — see spec Open Questions).
     let probe = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
-    let addr = prdt_nat_traversal::learn_public_addr(
-        &probe,
-        stun_addr,
-        std::time::Duration::from_secs(3),
-    )
-    .await
-    .map_err(|e| SignalingError::Protocol(format!("stun: {e}")))?;
+    let addr =
+        prdt_nat_traversal::learn_public_addr(&probe, stun_addr, std::time::Duration::from_secs(3))
+            .await
+            .map_err(|e| SignalingError::Protocol(format!("stun: {e}")))?;
     Ok(addr)
 }

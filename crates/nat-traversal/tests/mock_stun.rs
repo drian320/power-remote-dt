@@ -25,9 +25,13 @@ async fn spawn_mock_stun_echoing_source_addr() -> SocketAddr {
     tokio::spawn(async move {
         let mut buf = [0u8; 512];
         loop {
-            let Ok((n, src)) = socket.recv_from(&mut buf).await else { break };
+            let Ok((n, src)) = socket.recv_from(&mut buf).await else {
+                break;
+            };
             let mut decoder = MessageDecoder::<Attribute>::new();
-            let Ok(Ok(req)) = decoder.decode_from_bytes(&buf[..n]) else { continue };
+            let Ok(Ok(req)) = decoder.decode_from_bytes(&buf[..n]) else {
+                continue;
+            };
             if req.class() != MessageClass::Request || req.method() != BINDING {
                 continue;
             }
@@ -78,9 +82,13 @@ async fn ignores_wrong_transaction_id() {
     tokio::spawn(async move {
         let mut buf = [0u8; 512];
         loop {
-            let Ok((n, src)) = socket.recv_from(&mut buf).await else { break };
+            let Ok((n, src)) = socket.recv_from(&mut buf).await else {
+                break;
+            };
             let mut decoder = MessageDecoder::<Attribute>::new();
-            let Ok(Ok(_req)) = decoder.decode_from_bytes(&buf[..n]) else { continue };
+            let Ok(Ok(_req)) = decoder.decode_from_bytes(&buf[..n]) else {
+                continue;
+            };
             let mut resp = Message::<Attribute>::new(
                 MessageClass::SuccessResponse,
                 BINDING,

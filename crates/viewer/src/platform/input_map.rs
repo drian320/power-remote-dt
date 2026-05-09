@@ -44,16 +44,31 @@ mod tests {
 
     #[test]
     fn mouse_button_mapping_left_right_middle() {
-        assert_eq!(map_winit_mouse_button(WinitMouseButton::Left), Some(MouseButton::Left));
-        assert_eq!(map_winit_mouse_button(WinitMouseButton::Right), Some(MouseButton::Right));
-        assert_eq!(map_winit_mouse_button(WinitMouseButton::Middle), Some(MouseButton::Middle));
+        assert_eq!(
+            map_winit_mouse_button(WinitMouseButton::Left),
+            Some(MouseButton::Left)
+        );
+        assert_eq!(
+            map_winit_mouse_button(WinitMouseButton::Right),
+            Some(MouseButton::Right)
+        );
+        assert_eq!(
+            map_winit_mouse_button(WinitMouseButton::Middle),
+            Some(MouseButton::Middle)
+        );
     }
 
     #[test]
     fn mouse_button_extras_return_none() {
         // Back/Forward map to X1/X2 (not None) — matching the original capturer.
-        assert_eq!(map_winit_mouse_button(WinitMouseButton::Back), Some(MouseButton::X1));
-        assert_eq!(map_winit_mouse_button(WinitMouseButton::Forward), Some(MouseButton::X2));
+        assert_eq!(
+            map_winit_mouse_button(WinitMouseButton::Back),
+            Some(MouseButton::X1)
+        );
+        assert_eq!(
+            map_winit_mouse_button(WinitMouseButton::Forward),
+            Some(MouseButton::X2)
+        );
         assert_eq!(map_winit_mouse_button(WinitMouseButton::Other(7)), None);
     }
 

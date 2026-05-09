@@ -154,8 +154,8 @@ fn owner_thread_inner() -> Result<(), LinuxInputError> {
     use x11rb::protocol::xproto::ConnectionExt as _;
     use x11rb::protocol::Event;
 
-    let (conn, screen_num) = x11rb::connect(None)
-        .map_err(|e| LinuxInputError::X11Connect(e.to_string()))?;
+    let (conn, screen_num) =
+        x11rb::connect(None).map_err(|e| LinuxInputError::X11Connect(e.to_string()))?;
     let setup = conn.setup();
     let screen = &setup.roots[screen_num];
     let win = create_invisible_window(&conn, screen.root, screen.root_visual)?;

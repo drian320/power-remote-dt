@@ -28,13 +28,17 @@ impl HostStore {
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
         conn.execute(SCHEMA, [])?;
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     pub fn open_in_memory() -> Result<Self, StoreError> {
         let conn = Connection::open_in_memory()?;
         conn.execute(SCHEMA, [])?;
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     /// When `host_id` is `None`, allocate a fresh 9-digit ID. When `Some`,
@@ -56,13 +60,12 @@ impl HostStore {
                 // strings ("w1-test", "alice-desktop") keep dashes so the
                 // ws.rs DashMap key matches what clients send in Connect.
                 let stripped = id.replace('-', "");
-                let id_normalized = if stripped.len() == 9
-                    && stripped.chars().all(|c| c.is_ascii_digit())
-                {
-                    stripped
-                } else {
-                    id.to_string()
-                };
+                let id_normalized =
+                    if stripped.len() == 9 && stripped.chars().all(|c| c.is_ascii_digit()) {
+                        stripped
+                    } else {
+                        id.to_string()
+                    };
                 let existing: Option<String> = conn
                     .query_row(
                         "SELECT pubkey_b64 FROM hosts WHERE host_id = ?1",

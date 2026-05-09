@@ -140,11 +140,19 @@ const UDP_RCVBUF_TARGET: usize = 4 * 1024 * 1024;
 /// the socket is still functional with the default size.
 fn bind_with_rcvbuf(addr: SocketAddr) -> std::io::Result<UdpSocket> {
     use socket2::{Domain, Protocol, Socket as Sock2, Type};
-    let domain = if addr.is_ipv6() { Domain::IPV6 } else { Domain::IPV4 };
+    let domain = if addr.is_ipv6() {
+        Domain::IPV6
+    } else {
+        Domain::IPV4
+    };
     let sock = Sock2::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
     sock.set_nonblocking(true)?;
     if let Err(e) = sock.set_recv_buffer_size(UDP_RCVBUF_TARGET) {
-        tracing::warn!(?e, target = UDP_RCVBUF_TARGET, "set_recv_buffer_size failed; using default");
+        tracing::warn!(
+            ?e,
+            target = UDP_RCVBUF_TARGET,
+            "set_recv_buffer_size failed; using default"
+        );
     }
     sock.bind(&addr.into())?;
     let std_sock: std::net::UdpSocket = sock.into();

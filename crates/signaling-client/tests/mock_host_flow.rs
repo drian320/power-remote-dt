@@ -24,10 +24,20 @@ async fn host_rendezvous_completes_when_viewer_arrives() {
     let local_udp: SocketAddr = "127.0.0.1:40001".parse().unwrap();
     let host_task = tokio::spawn(async move {
         rendezvous_as_host(
-            RendezvousConfig { url: ws_url, host_id: "h1".into(), timeout: Duration::from_secs(5), stun_url: None, turn_url: None, aggregation_window: std::time::Duration::from_millis(100) },
-            HostIdentity { pubkey_b64: "HOSTPK".into() },
+            RendezvousConfig {
+                url: ws_url,
+                host_id: "h1".into(),
+                timeout: Duration::from_secs(5),
+                stun_url: None,
+                turn_url: None,
+                aggregation_window: std::time::Duration::from_millis(100),
+            },
+            HostIdentity {
+                pubkey_b64: "HOSTPK".into(),
+            },
             local_udp,
-        ).await
+        )
+        .await
     });
 
     // Viewer side as raw WS mock.
@@ -37,17 +47,35 @@ async fn host_rendezvous_completes_when_viewer_arrives() {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
 
-    async fn send(ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, m: ClientMessage) {
+    async fn send(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        m: ClientMessage,
+    ) {
         let s = serde_json::to_string(&m).unwrap();
         SinkExt::send(ws, Message::Text(s)).await.unwrap();
     }
-    async fn recv(ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>) -> prdt_signaling_proto::ServerMessage {
+    async fn recv(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> prdt_signaling_proto::ServerMessage {
         let f = ws.next().await.unwrap().unwrap();
-        let t = match f { Message::Text(s) => s, o => panic!("{o:?}") };
+        let t = match f {
+            Message::Text(s) => s,
+            o => panic!("{o:?}"),
+        };
         serde_json::from_str(&t).unwrap()
     }
 
-    send(&mut viewer_ws, ClientMessage::Connect { host_id: "h1".into() }).await;
+    send(
+        &mut viewer_ws,
+        ClientMessage::Connect {
+            host_id: "h1".into(),
+        },
+    )
+    .await;
     let start = recv(&mut viewer_ws).await;
     let sid = match start {
         prdt_signaling_proto::ServerMessage::SessionStart { session_id, .. } => session_id,
@@ -64,16 +92,31 @@ async fn host_rendezvous_completes_when_viewer_arrives() {
     }
 
     // Viewer replies with its own candidate
-    send(&mut viewer_ws, ClientMessage::Candidate {
-        session_id: sid.clone(),
-        candidate: Candidate { typ: CandidateType::Host, ip: "127.0.0.1".into(), port: 40002, priority: PRIORITY_HOST },
-    }).await;
+    send(
+        &mut viewer_ws,
+        ClientMessage::Candidate {
+            session_id: sid.clone(),
+            candidate: Candidate {
+                typ: CandidateType::Host,
+                ip: "127.0.0.1".into(),
+                port: 40002,
+                priority: PRIORITY_HOST,
+            },
+        },
+    )
+    .await;
 
     let outcome = host_task.await.unwrap().unwrap();
     assert_eq!(outcome.session_id, sid);
-    let peer_addr = outcome.peer_candidates.iter()
+    let peer_addr = outcome
+        .peer_candidates
+        .iter()
         .find(|c| c.typ == prdt_signaling_proto::CandidateType::Host)
-        .and_then(|c| format!("{}:{}", c.ip, c.port).parse::<std::net::SocketAddr>().ok())
+        .and_then(|c| {
+            format!("{}:{}", c.ip, c.port)
+                .parse::<std::net::SocketAddr>()
+                .ok()
+        })
         .expect("no host candidate in peer_candidates");
     assert_eq!(peer_addr.port(), 40002);
     assert_eq!(peer_addr.ip().to_string(), "127.0.0.1");

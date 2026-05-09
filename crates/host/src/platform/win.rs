@@ -235,10 +235,7 @@ impl VideoProducer for DxgiSwProducer {
             // reinit).
             let seq = self.seq;
             self.seq += 1;
-            return Ok(EncodedFrame {
-                seq,
-                ..frame
-            });
+            return Ok(EncodedFrame { seq, ..frame });
         }
     }
 
@@ -259,8 +256,8 @@ impl VideoProducer for DxgiSwProducer {
 
 // === Migrated from lib.rs ===
 
-use prdt_media_win::{HwHevcEncoder, MfH265Encoder, NvencEncoder, NvencEncoderConfig};
 use prdt_media_sw::{Openh264Encoder, Openh264EncoderConfig};
+use prdt_media_win::{HwHevcEncoder, MfH265Encoder, NvencEncoder, NvencEncoderConfig};
 use prdt_protocol::Codec;
 
 /// Resolve `--encoder` to a concrete backend. The `auto` selector picks
@@ -400,13 +397,11 @@ use prdt_input_win::{
     clipboard_sequence_number as _input_win_clipboard_sequence_number,
     read_clipboard_text as _input_win_read_clipboard_text,
     virtual_desktop_rect as _input_win_virtual_desktop_rect,
-    write_clipboard_text as _input_win_write_clipboard_text,
-    SendInputInjector,
+    write_clipboard_text as _input_win_write_clipboard_text, SendInputInjector,
     MAX_CLIPBOARD_BYTES as _INPUT_WIN_MAX,
 };
 use prdt_media_win::{
-    dxgi::enumerate_outputs_for_adapter, pick_default_adapter, DxgiNvencProducer,
-    OutputInfo,
+    dxgi::enumerate_outputs_for_adapter, pick_default_adapter, DxgiNvencProducer, OutputInfo,
 };
 use prdt_protocol::{InputEvent, MonitorRect, VideoProducer};
 
@@ -426,7 +421,8 @@ pub fn output_display_name(d: &OutputDescriptor) -> &str {
 /// adapters + outputs and returns the first.
 pub fn pick_default_output(_args: &crate::Args) -> anyhow::Result<OutputDescriptor> {
     let adapter = pick_default_adapter().context("pick_default_adapter")?;
-    let outputs = enumerate_outputs_for_adapter(&adapter).context("enumerate_outputs_for_adapter")?;
+    let outputs =
+        enumerate_outputs_for_adapter(&adapter).context("enumerate_outputs_for_adapter")?;
     let primary = outputs
         .into_iter()
         .next()
@@ -448,15 +444,23 @@ pub fn build_video_producer(
     let dev = D3d11Device::create(&adapter).context("D3D11 device")?;
     let width = (output.desktop_rect.right - output.desktop_rect.left) as u32;
     let height = (output.desktop_rect.bottom - output.desktop_rect.top) as u32;
-    let backend = pick_encoder(args_encoder, &adapter, &dev, width, height, bitrate_bps, negotiated_codec)
-        .context("pick_encoder")?;
+    let backend = pick_encoder(
+        args_encoder,
+        &adapter,
+        &dev,
+        width,
+        height,
+        bitrate_bps,
+        negotiated_codec,
+    )
+    .context("pick_encoder")?;
     let producer: Box<dyn VideoProducer> = match backend {
-        VideoEncoderBackend::Hw(enc) => Box::new(
-            DxgiNvencProducer::with_encoder(&dev, output, enc).context("hw producer")?,
-        ),
-        VideoEncoderBackend::SwH264(enc) => Box::new(
-            DxgiSwProducer::with_encoder(&dev, output, *enc).context("sw producer")?,
-        ),
+        VideoEncoderBackend::Hw(enc) => {
+            Box::new(DxgiNvencProducer::with_encoder(&dev, output, enc).context("hw producer")?)
+        }
+        VideoEncoderBackend::SwH264(enc) => {
+            Box::new(DxgiSwProducer::with_encoder(&dev, output, *enc).context("sw producer")?)
+        }
     };
     Ok(producer)
 }

@@ -13,7 +13,12 @@ async fn health_endpoint_returns_counts() {
     // small yield to let the server come up
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    let body = reqwest::get(format!("http://{addr}/health")).await.unwrap().text().await.unwrap();
+    let body = reqwest::get(format!("http://{addr}/health"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["hosts"], 0);
     assert_eq!(v["sessions"], 0);
@@ -38,7 +43,9 @@ fn ws_url(addr: std::net::SocketAddr) -> String {
 }
 
 async fn ws_send(
-    ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
     msg: ClientMessage,
 ) {
     let s = serde_json::to_string(&msg).unwrap();
@@ -46,7 +53,9 @@ async fn ws_send(
 }
 
 async fn ws_recv(
-    ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
 ) -> ServerMessage {
     let frame = ws.next().await.unwrap().unwrap();
     let text = match frame {
@@ -59,12 +68,18 @@ async fn ws_recv(
 #[tokio::test]
 async fn register_gets_ack() {
     let (addr, state) = start_test_server().await;
-    let (mut ws, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
+    let (mut ws, _) = tokio_tungstenite::connect_async(ws_url(addr))
+        .await
+        .unwrap();
 
-    ws_send(&mut ws, ClientMessage::Register {
-        host_id: "h1".into(),
-        pubkey_b64: "AAA".into(),
-    }).await;
+    ws_send(
+        &mut ws,
+        ClientMessage::Register {
+            host_id: "h1".into(),
+            pubkey_b64: "AAA".into(),
+        },
+    )
+    .await;
 
     let msg = ws_recv(&mut ws).await;
     assert!(matches!(msg, ServerMessage::Registered { host_id } if host_id == "h1"));
@@ -77,12 +92,30 @@ async fn register_gets_ack() {
 async fn duplicate_register_rejected() {
     let (addr, _state) = start_test_server().await;
 
-    let (mut ws1, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
-    ws_send(&mut ws1, ClientMessage::Register { host_id: "h1".into(), pubkey_b64: "PK1".into() }).await;
+    let (mut ws1, _) = tokio_tungstenite::connect_async(ws_url(addr))
+        .await
+        .unwrap();
+    ws_send(
+        &mut ws1,
+        ClientMessage::Register {
+            host_id: "h1".into(),
+            pubkey_b64: "PK1".into(),
+        },
+    )
+    .await;
     let _ = ws_recv(&mut ws1).await;
 
-    let (mut ws2, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
-    ws_send(&mut ws2, ClientMessage::Register { host_id: "h1".into(), pubkey_b64: "PK1".into() }).await;
+    let (mut ws2, _) = tokio_tungstenite::connect_async(ws_url(addr))
+        .await
+        .unwrap();
+    ws_send(
+        &mut ws2,
+        ClientMessage::Register {
+            host_id: "h1".into(),
+            pubkey_b64: "PK1".into(),
+        },
+    )
+    .await;
 
     let msg = ws_recv(&mut ws2).await;
     match msg {
@@ -98,54 +131,108 @@ async fn connect_triggers_session_start_on_both_sides() {
     let (addr, _) = start_test_server().await;
 
     // host registers
-    let (mut host_ws, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
-    ws_send(&mut host_ws, ClientMessage::Register {
-        host_id: "h1".into(),
-        pubkey_b64: "PUBKEY".into(),
-    }).await;
+    let (mut host_ws, _) = tokio_tungstenite::connect_async(ws_url(addr))
+        .await
+        .unwrap();
+    ws_send(
+        &mut host_ws,
+        ClientMessage::Register {
+            host_id: "h1".into(),
+            pubkey_b64: "PUBKEY".into(),
+        },
+    )
+    .await;
     let _ = ws_recv(&mut host_ws).await;
 
     // viewer connects
-    let (mut viewer_ws, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
-    ws_send(&mut viewer_ws, ClientMessage::Connect { host_id: "h1".into() }).await;
+    let (mut viewer_ws, _) = tokio_tungstenite::connect_async(ws_url(addr))
+        .await
+        .unwrap();
+    ws_send(
+        &mut viewer_ws,
+        ClientMessage::Connect {
+            host_id: "h1".into(),
+        },
+    )
+    .await;
 
     let host_start = ws_recv(&mut host_ws).await;
     let viewer_start = ws_recv(&mut viewer_ws).await;
 
     let (host_sid, viewer_sid) = match (host_start, viewer_start) {
         (
-            ServerMessage::SessionStart { session_id: h, role: prdt_signaling_proto::Role::Host, peer_pubkey_b64: None },
-            ServerMessage::SessionStart { session_id: v, role: prdt_signaling_proto::Role::Viewer, peer_pubkey_b64: Some(pk) },
+            ServerMessage::SessionStart {
+                session_id: h,
+                role: prdt_signaling_proto::Role::Host,
+                peer_pubkey_b64: None,
+            },
+            ServerMessage::SessionStart {
+                session_id: v,
+                role: prdt_signaling_proto::Role::Viewer,
+                peer_pubkey_b64: Some(pk),
+            },
         ) => {
             assert_eq!(pk, "PUBKEY");
             (h, v)
         }
         (h, v) => panic!("unexpected fan-out: host={h:?} viewer={v:?}"),
     };
-    assert_eq!(host_sid, viewer_sid, "both sides must see the same session_id");
+    assert_eq!(
+        host_sid, viewer_sid,
+        "both sides must see the same session_id"
+    );
 }
 
 #[tokio::test]
 async fn connect_unknown_host_returns_error() {
     let (addr, _) = start_test_server().await;
-    let (mut ws, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
-    ws_send(&mut ws, ClientMessage::Connect { host_id: "ghost".into() }).await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(ws_url(addr))
+        .await
+        .unwrap();
+    ws_send(
+        &mut ws,
+        ClientMessage::Connect {
+            host_id: "ghost".into(),
+        },
+    )
+    .await;
     let msg = ws_recv(&mut ws).await;
-    assert!(matches!(msg, ServerMessage::Error { code, .. } if code == prdt_signaling_proto::ErrorCode::HostNotFound));
+    assert!(
+        matches!(msg, ServerMessage::Error { code, .. } if code == prdt_signaling_proto::ErrorCode::HostNotFound)
+    );
 }
 
-use prdt_signaling_proto::{Candidate, CandidateType, PRIORITY_HOST, PRIORITY_RELAY, PRIORITY_SRFLX};
+use prdt_signaling_proto::{
+    Candidate, CandidateType, PRIORITY_HOST, PRIORITY_RELAY, PRIORITY_SRFLX,
+};
 
 #[tokio::test]
 async fn candidate_forwarded_both_ways() {
     let (addr, _) = start_test_server().await;
 
-    let (mut host_ws, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
-    ws_send(&mut host_ws, ClientMessage::Register { host_id: "h1".into(), pubkey_b64: "P".into() }).await;
+    let (mut host_ws, _) = tokio_tungstenite::connect_async(ws_url(addr))
+        .await
+        .unwrap();
+    ws_send(
+        &mut host_ws,
+        ClientMessage::Register {
+            host_id: "h1".into(),
+            pubkey_b64: "P".into(),
+        },
+    )
+    .await;
     let _ = ws_recv(&mut host_ws).await;
 
-    let (mut viewer_ws, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
-    ws_send(&mut viewer_ws, ClientMessage::Connect { host_id: "h1".into() }).await;
+    let (mut viewer_ws, _) = tokio_tungstenite::connect_async(ws_url(addr))
+        .await
+        .unwrap();
+    ws_send(
+        &mut viewer_ws,
+        ClientMessage::Connect {
+            host_id: "h1".into(),
+        },
+    )
+    .await;
 
     let h_start = ws_recv(&mut host_ws).await;
     let v_start = ws_recv(&mut viewer_ws).await;
@@ -156,15 +243,27 @@ async fn candidate_forwarded_both_ways() {
     let _ = v_start;
 
     // viewer sends its candidate
-    ws_send(&mut viewer_ws, ClientMessage::Candidate {
-        session_id: sid.clone(),
-        candidate: Candidate { typ: CandidateType::Host, ip: "127.0.0.1".into(), port: 60001, priority: PRIORITY_HOST },
-    }).await;
+    ws_send(
+        &mut viewer_ws,
+        ClientMessage::Candidate {
+            session_id: sid.clone(),
+            candidate: Candidate {
+                typ: CandidateType::Host,
+                ip: "127.0.0.1".into(),
+                port: 60001,
+                priority: PRIORITY_HOST,
+            },
+        },
+    )
+    .await;
 
     // host should receive PeerCandidate
     let m = ws_recv(&mut host_ws).await;
     match m {
-        ServerMessage::PeerCandidate { session_id, candidate } => {
+        ServerMessage::PeerCandidate {
+            session_id,
+            candidate,
+        } => {
             assert_eq!(session_id, sid);
             assert_eq!(candidate.port, 60001);
         }
@@ -172,14 +271,26 @@ async fn candidate_forwarded_both_ways() {
     }
 
     // host sends its candidate
-    ws_send(&mut host_ws, ClientMessage::Candidate {
-        session_id: sid.clone(),
-        candidate: Candidate { typ: CandidateType::Host, ip: "127.0.0.1".into(), port: 60002, priority: PRIORITY_HOST },
-    }).await;
+    ws_send(
+        &mut host_ws,
+        ClientMessage::Candidate {
+            session_id: sid.clone(),
+            candidate: Candidate {
+                typ: CandidateType::Host,
+                ip: "127.0.0.1".into(),
+                port: 60002,
+                priority: PRIORITY_HOST,
+            },
+        },
+    )
+    .await;
 
     let m = ws_recv(&mut viewer_ws).await;
     match m {
-        ServerMessage::PeerCandidate { session_id, candidate } => {
+        ServerMessage::PeerCandidate {
+            session_id,
+            candidate,
+        } => {
             assert_eq!(session_id, sid);
             assert_eq!(candidate.port, 60002);
         }
@@ -191,12 +302,29 @@ async fn candidate_forwarded_both_ways() {
 async fn srflx_candidate_forwarded() {
     let (addr, _) = start_test_server().await;
 
-    let (mut host_ws, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
-    ws_send(&mut host_ws, ClientMessage::Register { host_id: "h1".into(), pubkey_b64: "P".into() }).await;
+    let (mut host_ws, _) = tokio_tungstenite::connect_async(ws_url(addr))
+        .await
+        .unwrap();
+    ws_send(
+        &mut host_ws,
+        ClientMessage::Register {
+            host_id: "h1".into(),
+            pubkey_b64: "P".into(),
+        },
+    )
+    .await;
     let _ = ws_recv(&mut host_ws).await;
 
-    let (mut viewer_ws, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
-    ws_send(&mut viewer_ws, ClientMessage::Connect { host_id: "h1".into() }).await;
+    let (mut viewer_ws, _) = tokio_tungstenite::connect_async(ws_url(addr))
+        .await
+        .unwrap();
+    ws_send(
+        &mut viewer_ws,
+        ClientMessage::Connect {
+            host_id: "h1".into(),
+        },
+    )
+    .await;
 
     let h_start = ws_recv(&mut host_ws).await;
     let _ = ws_recv(&mut viewer_ws).await;
@@ -205,20 +333,27 @@ async fn srflx_candidate_forwarded() {
         _ => unreachable!(),
     };
 
-    ws_send(&mut viewer_ws, ClientMessage::Candidate {
-        session_id: sid.clone(),
-        candidate: Candidate {
-            typ: CandidateType::Srflx,
-            ip: "198.51.100.42".into(),
-            port: 55_000,
-            priority: PRIORITY_SRFLX,
+    ws_send(
+        &mut viewer_ws,
+        ClientMessage::Candidate {
+            session_id: sid.clone(),
+            candidate: Candidate {
+                typ: CandidateType::Srflx,
+                ip: "198.51.100.42".into(),
+                port: 55_000,
+                priority: PRIORITY_SRFLX,
+            },
         },
-    }).await;
+    )
+    .await;
 
     // Host should receive the Srflx candidate as-is.
     let m = ws_recv(&mut host_ws).await;
     match m {
-        ServerMessage::PeerCandidate { session_id, candidate } => {
+        ServerMessage::PeerCandidate {
+            session_id,
+            candidate,
+        } => {
             assert_eq!(session_id, sid);
             assert_eq!(candidate.typ, CandidateType::Srflx);
             assert_eq!(candidate.ip, "198.51.100.42");
@@ -232,11 +367,28 @@ async fn srflx_candidate_forwarded() {
 async fn relay_candidate_forwarded() {
     let (addr, _) = start_test_server().await;
 
-    let (mut host_ws, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
-    ws_send(&mut host_ws, ClientMessage::Register { host_id: "h1".into(), pubkey_b64: "P".into() }).await;
+    let (mut host_ws, _) = tokio_tungstenite::connect_async(ws_url(addr))
+        .await
+        .unwrap();
+    ws_send(
+        &mut host_ws,
+        ClientMessage::Register {
+            host_id: "h1".into(),
+            pubkey_b64: "P".into(),
+        },
+    )
+    .await;
     let _ = ws_recv(&mut host_ws).await;
-    let (mut viewer_ws, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
-    ws_send(&mut viewer_ws, ClientMessage::Connect { host_id: "h1".into() }).await;
+    let (mut viewer_ws, _) = tokio_tungstenite::connect_async(ws_url(addr))
+        .await
+        .unwrap();
+    ws_send(
+        &mut viewer_ws,
+        ClientMessage::Connect {
+            host_id: "h1".into(),
+        },
+    )
+    .await;
     let h_start = ws_recv(&mut host_ws).await;
     let _ = ws_recv(&mut viewer_ws).await;
     let sid = match h_start {
@@ -244,20 +396,27 @@ async fn relay_candidate_forwarded() {
         _ => unreachable!(),
     };
 
-    ws_send(&mut viewer_ws, ClientMessage::Candidate {
-        session_id: sid.clone(),
-        candidate: Candidate {
-            typ: CandidateType::Relay,
-            ip: "198.51.100.33".into(),
-            port: 33000,
-            priority: PRIORITY_RELAY,
+    ws_send(
+        &mut viewer_ws,
+        ClientMessage::Candidate {
+            session_id: sid.clone(),
+            candidate: Candidate {
+                typ: CandidateType::Relay,
+                ip: "198.51.100.33".into(),
+                port: 33000,
+                priority: PRIORITY_RELAY,
+            },
         },
-    }).await;
+    )
+    .await;
 
     // W4: Relay is now forwarded like Host/Srflx.
     let m = ws_recv(&mut host_ws).await;
     match m {
-        ServerMessage::PeerCandidate { session_id, candidate } => {
+        ServerMessage::PeerCandidate {
+            session_id,
+            candidate,
+        } => {
             assert_eq!(session_id, sid);
             assert_eq!(candidate.typ, CandidateType::Relay);
             assert_eq!(candidate.ip, "198.51.100.33");
@@ -270,19 +429,38 @@ async fn relay_candidate_forwarded() {
 #[tokio::test]
 async fn session_timeout_kills_silent_session() {
     let state = Arc::new(ServerState::new());
-    let cfg = ServerConfig { session_timeout: std::time::Duration::from_millis(300) };
+    let cfg = ServerConfig {
+        session_timeout: std::time::Duration::from_millis(300),
+    };
     let app = router(state.clone(), cfg);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    let (mut host_ws, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
-    ws_send(&mut host_ws, ClientMessage::Register { host_id: "h1".into(), pubkey_b64: "P".into() }).await;
+    let (mut host_ws, _) = tokio_tungstenite::connect_async(ws_url(addr))
+        .await
+        .unwrap();
+    ws_send(
+        &mut host_ws,
+        ClientMessage::Register {
+            host_id: "h1".into(),
+            pubkey_b64: "P".into(),
+        },
+    )
+    .await;
     let _ = ws_recv(&mut host_ws).await;
 
-    let (mut viewer_ws, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
-    ws_send(&mut viewer_ws, ClientMessage::Connect { host_id: "h1".into() }).await;
+    let (mut viewer_ws, _) = tokio_tungstenite::connect_async(ws_url(addr))
+        .await
+        .unwrap();
+    ws_send(
+        &mut viewer_ws,
+        ClientMessage::Connect {
+            host_id: "h1".into(),
+        },
+    )
+    .await;
     let _h_start = ws_recv(&mut host_ws).await;
     let _v_start = ws_recv(&mut viewer_ws).await;
 
@@ -303,14 +481,25 @@ async fn session_timeout_kills_silent_session() {
 #[tokio::test]
 async fn register_allocates_new_id_when_empty() {
     let (addr, _) = start_test_server().await;
-    let (mut ws, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
-    ws_send(&mut ws, ClientMessage::Register {
-        host_id: "".into(), pubkey_b64: "PK1".into(),
-    }).await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(ws_url(addr))
+        .await
+        .unwrap();
+    ws_send(
+        &mut ws,
+        ClientMessage::Register {
+            host_id: "".into(),
+            pubkey_b64: "PK1".into(),
+        },
+    )
+    .await;
     let msg = ws_recv(&mut ws).await;
     match msg {
         ServerMessage::Registered { host_id } => {
-            assert_eq!(host_id.len(), 11, "expected dashed 9-digit ID, got {host_id}");
+            assert_eq!(
+                host_id.len(),
+                11,
+                "expected dashed 9-digit ID, got {host_id}"
+            );
             assert!(host_id.chars().filter(|c| c.is_ascii_digit()).count() == 9);
         }
         other => panic!("unexpected: {other:?}"),
@@ -322,10 +511,17 @@ async fn register_rejects_pubkey_mismatch() {
     let (addr, _) = start_test_server().await;
 
     // First-time register with explicit ID (treated as first registration)
-    let (mut ws1, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
-    ws_send(&mut ws1, ClientMessage::Register {
-        host_id: "987654321".into(), pubkey_b64: "PKX".into(),
-    }).await;
+    let (mut ws1, _) = tokio_tungstenite::connect_async(ws_url(addr))
+        .await
+        .unwrap();
+    ws_send(
+        &mut ws1,
+        ClientMessage::Register {
+            host_id: "987654321".into(),
+            pubkey_b64: "PKX".into(),
+        },
+    )
+    .await;
     let _ = ws_recv(&mut ws1).await;
 
     // Drop ws1 so hosts map is free (leave it open a bit for cleanup)
@@ -333,10 +529,17 @@ async fn register_rejects_pubkey_mismatch() {
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // Re-register with same ID but different pubkey → Mismatch
-    let (mut ws2, _) = tokio_tungstenite::connect_async(ws_url(addr)).await.unwrap();
-    ws_send(&mut ws2, ClientMessage::Register {
-        host_id: "987654321".into(), pubkey_b64: "PKY".into(),
-    }).await;
+    let (mut ws2, _) = tokio_tungstenite::connect_async(ws_url(addr))
+        .await
+        .unwrap();
+    ws_send(
+        &mut ws2,
+        ClientMessage::Register {
+            host_id: "987654321".into(),
+            pubkey_b64: "PKY".into(),
+        },
+    )
+    .await;
     let msg = ws_recv(&mut ws2).await;
     match msg {
         ServerMessage::Error { code, .. } => {

@@ -56,7 +56,10 @@ mod tests {
 
     #[test]
     fn clipboard_error_variants_match_l0() {
-        assert_eq!(ClipboardError::NoText.to_string(), "no text content available");
+        assert_eq!(
+            ClipboardError::NoText.to_string(),
+            "no text content available"
+        );
         assert_eq!(
             ClipboardError::TooLarge(70_000).to_string(),
             "clipboard payload too large: 70000 bytes"

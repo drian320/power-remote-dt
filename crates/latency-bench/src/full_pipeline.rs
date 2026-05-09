@@ -9,8 +9,8 @@
 
 use std::time::{Duration, Instant};
 
-use prdt_media_sw::{make_counter_i420, Openh264Decoder, Openh264Encoder, Openh264EncoderConfig};
 use prdt_media_sw::traits::{SwH264Decoder, SwH264Encoder};
+use prdt_media_sw::{make_counter_i420, Openh264Decoder, Openh264Encoder, Openh264EncoderConfig};
 use prdt_media_win::synthetic::make_counter_texture;
 use prdt_media_win::{
     pick_default_adapter, D3d11Device, Hevc265Encoder, HwHevcEncoder, MfD3d11Consumer,
@@ -38,9 +38,9 @@ impl std::str::FromStr for ConsumerBackend {
             "mf" => Ok(Self::Mf),
             "nvdec" => Ok(Self::Nvdec),
             "openh264" => Ok(Self::Openh264),
-            other => anyhow::bail!(
-                "unknown consumer backend {other:?} (options: mf, nvdec, openh264)"
-            ),
+            other => {
+                anyhow::bail!("unknown consumer backend {other:?} (options: mf, nvdec, openh264)")
+            }
         }
     }
 }
@@ -63,9 +63,9 @@ impl std::str::FromStr for EncoderBackend {
             "nvenc" => Ok(Self::Nvenc),
             "mf" => Ok(Self::Mf),
             "openh264" => Ok(Self::Openh264),
-            other => anyhow::bail!(
-                "unknown encoder backend {other:?} (options: nvenc, mf, openh264)"
-            ),
+            other => {
+                anyhow::bail!("unknown encoder backend {other:?} (options: nvenc, mf, openh264)")
+            }
         }
     }
 }

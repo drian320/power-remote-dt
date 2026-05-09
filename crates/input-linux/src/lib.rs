@@ -6,11 +6,11 @@
 #![cfg(target_os = "linux")]
 #![allow(dead_code)]
 
+pub mod core_adapter;
 pub mod error;
 pub mod uinput_injector;
 pub mod x11_clipboard;
 pub mod x11_geometry;
-pub mod core_adapter;
 
 pub use error::LinuxInputError;
 

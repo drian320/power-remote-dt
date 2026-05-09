@@ -22,11 +22,7 @@ pub struct LinuxSwProducer {
 }
 
 impl LinuxSwProducer {
-    pub fn new(
-        capture: X11ShmCapturer,
-        encoder: LinuxSwEncoder,
-        fps: u32,
-    ) -> anyhow::Result<Self> {
+    pub fn new(capture: X11ShmCapturer, encoder: LinuxSwEncoder, fps: u32) -> anyhow::Result<Self> {
         let width = capture.width();
         let height = capture.height();
         let pacer = make_pacer(fps);
@@ -44,7 +40,11 @@ impl LinuxSwProducer {
 }
 
 fn make_pacer(fps: u32) -> Interval {
-    let micros = if fps == 0 { 16_667 } else { 1_000_000 / fps as u64 };
+    let micros = if fps == 0 {
+        16_667
+    } else {
+        1_000_000 / fps as u64
+    };
     let mut p = interval(Duration::from_micros(micros));
     p.set_missed_tick_behavior(MissedTickBehavior::Skip);
     p

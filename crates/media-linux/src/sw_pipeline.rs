@@ -7,8 +7,8 @@
 use crate::error::LinuxMediaError;
 use crate::frame::BgraFrame;
 use prdt_media_sw::{
-    I420Frame, Openh264Decoder, Openh264Encoder, Openh264EncoderConfig, SwH264Decoder,
-    SwH264Encoder, bgra_to_i420,
+    bgra_to_i420, I420Frame, Openh264Decoder, Openh264Encoder, Openh264EncoderConfig,
+    SwH264Decoder, SwH264Encoder,
 };
 
 pub struct LinuxSwEncoder {
@@ -18,7 +18,12 @@ pub struct LinuxSwEncoder {
 }
 
 impl LinuxSwEncoder {
-    pub fn new(width: u32, height: u32, bitrate_bps: u32, fps: u32) -> Result<Self, LinuxMediaError> {
+    pub fn new(
+        width: u32,
+        height: u32,
+        bitrate_bps: u32,
+        fps: u32,
+    ) -> Result<Self, LinuxMediaError> {
         let cfg = Openh264EncoderConfig {
             width,
             height,
@@ -26,7 +31,11 @@ impl LinuxSwEncoder {
             max_fps: fps as f32,
         };
         let inner = Openh264Encoder::new(cfg)?;
-        Ok(Self { inner, width, height })
+        Ok(Self {
+            inner,
+            width,
+            height,
+        })
     }
 
     /// Returns the encoder's `EncodedFrame` directly (mirrors
@@ -41,7 +50,10 @@ impl LinuxSwEncoder {
         timestamp_us: u64,
     ) -> Result<prdt_protocol::EncodedFrame, LinuxMediaError> {
         if frame.width != self.width || frame.height != self.height {
-            return Err(LinuxMediaError::InvalidDimensions(frame.width, frame.height));
+            return Err(LinuxMediaError::InvalidDimensions(
+                frame.width,
+                frame.height,
+            ));
         }
         let i420 = bgra_to_i420(&frame.bgra, frame.width, frame.height, frame.stride)?;
         let out = self.inner.encode(&i420, force_idr, timestamp_us)?;
@@ -129,7 +141,10 @@ mod tests {
             };
             decoded = dec.decode(&pkt_n).expect("decode N");
         }
-        assert!(decoded.is_some(), "decoder should yield a frame after IDR + follow-ups");
+        assert!(
+            decoded.is_some(),
+            "decoder should yield a frame after IDR + follow-ups"
+        );
 
         // Suppress unused-var warning for i420_in (kept for clarity).
         let _ = i420_in;
@@ -140,7 +155,10 @@ mod tests {
         let mut enc = LinuxSwEncoder::new(320, 240, 500_000, 30).expect("encoder");
         let f = BgraFrame::new_zeroed(640, 480);
         let r = enc.encode(&f, false, 0);
-        assert!(matches!(r, Err(LinuxMediaError::InvalidDimensions(640, 480))));
+        assert!(matches!(
+            r,
+            Err(LinuxMediaError::InvalidDimensions(640, 480))
+        ));
     }
 
     #[test]

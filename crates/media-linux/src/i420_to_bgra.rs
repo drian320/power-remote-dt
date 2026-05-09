@@ -22,9 +22,9 @@ pub fn i420_to_bgra(i420: &I420Frame, out_bgra: &mut [u8]) {
             // (approximation: Y' = (Y-16)*255/219), but for L1 we use
             // BT.709 full coefficients — visible artifacts on broadcast
             // content are tolerable, fix in L2.
-            let r = y + ((1793 * v) >> 10);          // 1.793 ≈ 2*(1-Kr)
+            let r = y + ((1793 * v) >> 10); // 1.793 ≈ 2*(1-Kr)
             let g = y - ((534 * u + 213 * v) >> 10); // BT.709
-            let b = y + ((2115 * u) >> 10);          // 2.115 ≈ 2*(1-Kb)
+            let b = y + ((2115 * u) >> 10); // 2.115 ≈ 2*(1-Kb)
             let off = (j * w + i) * 4;
             out_bgra[off] = clamp_u8(b);
             out_bgra[off + 1] = clamp_u8(g);

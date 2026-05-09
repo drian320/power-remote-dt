@@ -42,7 +42,7 @@ pub fn build_video_producer(
     fps: u32,
     _negotiated_codec: prdt_protocol::Codec,
 ) -> anyhow::Result<Box<dyn VideoProducer>> {
-    let _ = normalize_encoder(args_encoder);  // warn-log if the user passed nvenc/mf
+    let _ = normalize_encoder(args_encoder); // warn-log if the user passed nvenc/mf
     let producer = prdt_media_linux::build_video_producer(bitrate_bps, fps)?;
     Ok(Box::new(producer))
 }
@@ -53,11 +53,17 @@ fn normalize_encoder(arg: &str) -> &'static str {
     match arg {
         "openh264" | "auto" => "openh264",
         "nvenc" | "mf" => {
-            tracing::warn!(requested = arg, "Linux SW codec only; falling back to openh264");
+            tracing::warn!(
+                requested = arg,
+                "Linux SW codec only; falling back to openh264"
+            );
             "openh264"
         }
         other => {
-            tracing::warn!(requested = other, "unknown encoder; falling back to openh264");
+            tracing::warn!(
+                requested = other,
+                "unknown encoder; falling back to openh264"
+            );
             "openh264"
         }
     }

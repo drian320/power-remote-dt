@@ -71,7 +71,8 @@ mod tests {
 
     #[test]
     fn clipboard_too_large_preserves_byte_count() {
-        let conv: prdt_input_core::ClipboardError = LinuxInputError::ClipboardTooLarge(70_000).into();
+        let conv: prdt_input_core::ClipboardError =
+            LinuxInputError::ClipboardTooLarge(70_000).into();
         assert!(matches!(
             conv,
             prdt_input_core::ClipboardError::TooLarge(70_000)

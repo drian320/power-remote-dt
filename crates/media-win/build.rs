@@ -1,5 +1,6 @@
 use std::env;
-#[allow(unused_imports)] // only used in #[cfg(target_os = "windows")] fns; pre-existing on master
+#[allow(unused_imports)]
+// only used in #[cfg(target_os = "windows")] fns; pre-existing on master
 use std::path::PathBuf;
 
 fn main() {

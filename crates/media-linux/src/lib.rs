@@ -6,13 +6,13 @@
 #![cfg(target_os = "linux")]
 #![allow(dead_code)]
 
+pub mod core_adapter;
 pub mod error;
 pub mod frame;
-pub mod x11_capture;
-pub mod sw_pipeline;
 pub mod i420_to_bgra;
 pub mod linux_sw_producer;
-pub mod core_adapter;
+pub mod sw_pipeline;
+pub mod x11_capture;
 
 pub use error::LinuxMediaError;
 pub use frame::BgraFrame;

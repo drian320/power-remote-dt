@@ -274,7 +274,9 @@ impl D3d11Texture {
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             unsafe {
                 ctx.Map(&staging.inner, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
-                    .map_err(|e| MediaError::d3d11("Map staging texture (read_back_bgra_into)", e))?;
+                    .map_err(|e| {
+                        MediaError::d3d11("Map staging texture (read_back_bgra_into)", e)
+                    })?;
             }
             let row_pitch = mapped.RowPitch as usize;
             unsafe {

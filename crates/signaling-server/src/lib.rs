@@ -17,7 +17,9 @@ pub struct ServerConfig {
 
 impl Default for ServerConfig {
     fn default() -> Self {
-        Self { session_timeout: Duration::from_millis(60_000) }
+        Self {
+            session_timeout: Duration::from_millis(60_000),
+        }
     }
 }
 

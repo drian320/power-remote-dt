@@ -144,8 +144,7 @@ pub fn present_frame(
         r.surface
             .resize(nz_w, nz_h)
             .map_err(|e| super::RenderError::Present(format!("Surface::resize: {e}")))?;
-        r.scratch_bgra
-            .resize((stream_w * stream_h * 4) as usize, 0);
+        r.scratch_bgra.resize((stream_w * stream_h * 4) as usize, 0);
         r.last_size = (stream_w, stream_h);
     }
 
@@ -219,7 +218,9 @@ pub fn virtual_desktop_rect() -> MonitorRect {
 mod tests {
     use super::*;
 
-    fn expect_err(r: Result<PlatformConsumer, super::super::ConsumerError>) -> super::super::ConsumerError {
+    fn expect_err(
+        r: Result<PlatformConsumer, super::super::ConsumerError>,
+    ) -> super::super::ConsumerError {
         // Manual destructure: PlatformConsumer doesn't derive Debug because
         // Openh264Decoder doesn't, and we'd rather not bolt it onto a foreign
         // type just to satisfy `unwrap_err()`'s `T: Debug` bound.
@@ -233,7 +234,8 @@ mod tests {
     fn linux_build_consumer_rejects_h265() {
         let err = expect_err(build_consumer("auto", Codec::H265, 1920, 1080));
         assert!(
-            err.to_string().contains("Linux supports openh264+H264 only"),
+            err.to_string()
+                .contains("Linux supports openh264+H264 only"),
             "unexpected error string: {err}"
         );
     }
@@ -241,9 +243,13 @@ mod tests {
     #[test]
     fn linux_build_consumer_rejects_hw_decoder_args() {
         let err = expect_err(build_consumer("nvdec", Codec::H264, 1920, 1080));
-        assert!(err.to_string().contains("unsupported decoder/codec on Linux"));
+        assert!(err
+            .to_string()
+            .contains("unsupported decoder/codec on Linux"));
         let err = expect_err(build_consumer("mf", Codec::H264, 1920, 1080));
-        assert!(err.to_string().contains("unsupported decoder/codec on Linux"));
+        assert!(err
+            .to_string()
+            .contains("unsupported decoder/codec on Linux"));
     }
 
     #[test]

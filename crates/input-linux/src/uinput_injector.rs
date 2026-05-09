@@ -51,11 +51,9 @@ static DEVICES: OnceCell<Mutex<UinputDevices>> = OnceCell::new();
 /// range. Called by `init_with_geometry` from host startup.
 pub fn init_with_geometry(width: u32, height: u32) -> Result<(), LinuxInputError> {
     let devices = create_devices(width, height)?;
-    DEVICES
-        .set(Mutex::new(devices))
-        .map_err(|_| {
-            LinuxInputError::UinputIoctl(std::io::Error::other("uinput already initialized"))
-        })?;
+    DEVICES.set(Mutex::new(devices)).map_err(|_| {
+        LinuxInputError::UinputIoctl(std::io::Error::other("uinput already initialized"))
+    })?;
     Ok(())
 }
 
@@ -73,14 +71,22 @@ pub fn inject_event(event: InputEvent) -> Result<(), LinuxInputError> {
 
 fn write_event(d: &mut UinputDevices, e: InputEvent) -> Result<(), LinuxInputError> {
     match e {
-        InputEvent::MouseMove { x, y, absolute: true } => {
+        InputEvent::MouseMove {
+            x,
+            y,
+            absolute: true,
+        } => {
             let xc = x.clamp(0, d.abs_max_x);
             let yc = y.clamp(0, d.abs_max_y);
             send_event(&mut d.mouse, EV_ABS, ABS_X, xc)?;
             send_event(&mut d.mouse, EV_ABS, ABS_Y, yc)?;
             send_syn(&mut d.mouse)?;
         }
-        InputEvent::MouseMove { x, y, absolute: false } => {
+        InputEvent::MouseMove {
+            x,
+            y,
+            absolute: false,
+        } => {
             send_event(&mut d.mouse, EV_REL, REL_X, x)?;
             send_event(&mut d.mouse, EV_REL, REL_Y, y)?;
             send_syn(&mut d.mouse)?;
@@ -118,7 +124,12 @@ fn write_event(d: &mut UinputDevices, e: InputEvent) -> Result<(), LinuxInputErr
     Ok(())
 }
 
-fn send_event(file: &mut std::fs::File, type_: u16, code: u16, value: i32) -> Result<(), LinuxInputError> {
+fn send_event(
+    file: &mut std::fs::File,
+    type_: u16,
+    code: u16,
+    value: i32,
+) -> Result<(), LinuxInputError> {
     // Encode `struct input_event { struct timeval time; __u16 type; __u16 code; __s32 value; }`.
     // timeval is (time_t sec, suseconds_t usec) — kernel ignores time on uinput input.
     let ev = InputEventBytes {
@@ -134,7 +145,8 @@ fn send_event(file: &mut std::fs::File, type_: u16, code: u16, value: i32) -> Re
             std::mem::size_of::<InputEventBytes>(),
         )
     };
-    file.write_all(bytes).map_err(LinuxInputError::UinputIoctl)?;
+    file.write_all(bytes)
+        .map_err(LinuxInputError::UinputIoctl)?;
     Ok(())
 }
 

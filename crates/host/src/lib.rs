@@ -10,14 +10,14 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use prdt_audio::{LoopbackCapture, OpusEncoder};
-use prdt_crypto::KeyPair;
-use prdt_filetransfer::{send_file, TransferReceiver, DEFAULT_MAX_TRANSFER_BYTES};
 use platform::{
     build_video_producer, clipboard_sequence_number, dispatch_input, output_display_name,
     pick_default_output, read_clipboard_text, virtual_desktop_rect, write_clipboard_text,
     MAX_CLIPBOARD_BYTES,
 };
+use prdt_audio::{LoopbackCapture, OpusEncoder};
+use prdt_crypto::KeyPair;
+use prdt_filetransfer::{send_file, TransferReceiver, DEFAULT_MAX_TRANSFER_BYTES};
 use prdt_protocol::{wire::AudioPacket, Codec, ControlMessage, MonitorRect};
 
 use prdt_transport::{
@@ -323,68 +323,68 @@ pub async fn run_host(
                 "silent-allow enabled; skipping consent gate"
             );
         } else {
-        let known = match prdt_crypto::KnownPeers::load_or_default(&args.known_peers_file) {
-            Ok(k) => k,
-            Err(e) => {
-                warn!(?e, path=?args.known_peers_file, "failed to load known-peer-ids; rejecting session");
-                continue;
-            }
-        };
-        if !known.contains(&peer_pubkey) {
-            let decision = match &consent_tx {
-                Some(tx) => {
-                    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-                    let req = ConsentRequest {
-                        peer_pubkey,
-                        responder: resp_tx,
-                    };
-                    if tx.send(req).is_err() {
-                        warn!("consent channel closed; rejecting unknown peer");
-                        continue;
-                    }
-                    match resp_rx.await {
-                        Ok(d) => d,
-                        Err(_) => {
-                            warn!("consent responder dropped; rejecting unknown peer");
-                            continue;
-                        }
-                    }
-                }
-                None => {
-                    warn!(
-                        peer=%peer_pubkey.to_base64(),
-                        "unknown peer connected and no consent channel (headless without --silent-allow); rejecting"
-                    );
+            let known = match prdt_crypto::KnownPeers::load_or_default(&args.known_peers_file) {
+                Ok(k) => k,
+                Err(e) => {
+                    warn!(?e, path=?args.known_peers_file, "failed to load known-peer-ids; rejecting session");
                     continue;
                 }
             };
-            match decision {
-                ConsentDecision::Reject => {
-                    info!(peer=%peer_pubkey.to_base64(), "consent rejected; resetting session");
-                    continue;
-                }
-                ConsentDecision::Accept => {
-                    // Persist so future connections from this peer are silent.
-                    let mut updated = known;
-                    updated.insert(peer_pubkey, peer_pubkey.to_base64());
-                    if let Err(e) = updated.save(&args.known_peers_file) {
+            if !known.contains(&peer_pubkey) {
+                let decision = match &consent_tx {
+                    Some(tx) => {
+                        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+                        let req = ConsentRequest {
+                            peer_pubkey,
+                            responder: resp_tx,
+                        };
+                        if tx.send(req).is_err() {
+                            warn!("consent channel closed; rejecting unknown peer");
+                            continue;
+                        }
+                        match resp_rx.await {
+                            Ok(d) => d,
+                            Err(_) => {
+                                warn!("consent responder dropped; rejecting unknown peer");
+                                continue;
+                            }
+                        }
+                    }
+                    None => {
                         warn!(
-                            ?e,
-                            path=?args.known_peers_file,
-                            "failed to persist known-peer-ids; session continues but won't be remembered"
-                        );
-                    } else {
-                        info!(
                             peer=%peer_pubkey.to_base64(),
-                            path=?args.known_peers_file,
-                            "added peer to known-peer-ids"
+                            "unknown peer connected and no consent channel (headless without --silent-allow); rejecting"
                         );
+                        continue;
+                    }
+                };
+                match decision {
+                    ConsentDecision::Reject => {
+                        info!(peer=%peer_pubkey.to_base64(), "consent rejected; resetting session");
+                        continue;
+                    }
+                    ConsentDecision::Accept => {
+                        // Persist so future connections from this peer are silent.
+                        let mut updated = known;
+                        updated.insert(peer_pubkey, peer_pubkey.to_base64());
+                        if let Err(e) = updated.save(&args.known_peers_file) {
+                            warn!(
+                                ?e,
+                                path=?args.known_peers_file,
+                                "failed to persist known-peer-ids; session continues but won't be remembered"
+                            );
+                        } else {
+                            info!(
+                                peer=%peer_pubkey.to_base64(),
+                                path=?args.known_peers_file,
+                                "added peer to known-peer-ids"
+                            );
+                        }
                     }
                 }
+            } else {
+                info!(peer=%peer_pubkey.to_base64(), "peer is in known-peer-ids; auto-accepted");
             }
-        } else {
-            info!(peer=%peer_pubkey.to_base64(), "peer is in known-peer-ids; auto-accepted");
-        }
         } // end of !silent_allow branch
 
         // Wait for Hello, send HelloAck. Session ID is random per host start so
@@ -414,12 +414,12 @@ pub async fn run_host(
             // multi-monitor WSLg). Without this the viewer scales mouse
             // input to a rect bigger than what the host actually captures.
             use prdt_media_linux::x11_capture::{MAX_CAPTURE_H, MAX_CAPTURE_W};
-            let clipped_right = vd_rect.left.saturating_add(
-                ((vd_rect.right - vd_rect.left) as u32).min(MAX_CAPTURE_W) as i32,
-            );
-            let clipped_bottom = vd_rect.top.saturating_add(
-                ((vd_rect.bottom - vd_rect.top) as u32).min(MAX_CAPTURE_H) as i32,
-            );
+            let clipped_right = vd_rect
+                .left
+                .saturating_add(((vd_rect.right - vd_rect.left) as u32).min(MAX_CAPTURE_W) as i32);
+            let clipped_bottom = vd_rect
+                .top
+                .saturating_add(((vd_rect.bottom - vd_rect.top) as u32).min(MAX_CAPTURE_H) as i32);
             MonitorRect::new(vd_rect.left, vd_rect.top, clipped_right, clipped_bottom)
         };
         info!(
@@ -469,7 +469,11 @@ pub async fn run_host(
             req.codec,
         )
         .context("build_video_producer")?;
-        info!(backend = producer.backend_name(), codec = req.codec.name(), "encoder ready");
+        info!(
+            backend = producer.backend_name(),
+            codec = req.codec.name(),
+            "encoder ready"
+        );
 
         let cancel = CancellationToken::new();
         let last_keepalive = Arc::new(AtomicU64::new(now_monotonic_us()));
@@ -849,7 +853,6 @@ fn init_tracing() {
         )
         .init();
 }
-
 
 // Tests below exercise Windows-specific encoder/adapter surfaces
 // (`pick_default_adapter`, `supported_codecs_for_encoder_arg`) and so are

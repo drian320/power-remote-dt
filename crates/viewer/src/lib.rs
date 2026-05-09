@@ -7,9 +7,9 @@ use clap::Parser;
 use prdt_audio::{AudioPlayback, OpusDecoder};
 use prdt_crypto::{KeyPair, KnownHosts, PubKey};
 use prdt_filetransfer::{send_file, TransferReceiver, DEFAULT_MAX_TRANSFER_BYTES};
-use prdt_protocol::{frame::Codec, ControlMessage, InputEvent, MonitorRect};
 #[cfg(windows)]
 use prdt_protocol::VideoConsumer;
+use prdt_protocol::{frame::Codec, ControlMessage, InputEvent, MonitorRect};
 
 #[cfg(windows)]
 #[allow(dead_code)] // wired into ViewerApp in Task 3
@@ -223,9 +223,8 @@ fn load_or_create_viewer_key(path: &std::path::Path) -> Result<KeyPair> {
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let kp = KeyPair::generate();
-            std::fs::write(path, kp.private.0).with_context(|| {
-                format!("write new viewer key to {}", path.display())
-            })?;
+            std::fs::write(path, kp.private.0)
+                .with_context(|| format!("write new viewer key to {}", path.display()))?;
             info!(
                 path = ?path,
                 pubkey = %kp.public.to_base64(),
@@ -233,8 +232,9 @@ fn load_or_create_viewer_key(path: &std::path::Path) -> Result<KeyPair> {
             );
             Ok(kp)
         }
-        Err(e) => Err(anyhow::Error::from(e)
-            .context(format!("read viewer key {}", path.display()))),
+        Err(e) => {
+            Err(anyhow::Error::from(e).context(format!("read viewer key {}", path.display())))
+        }
     }
 }
 
@@ -261,9 +261,7 @@ impl CodecArg {
             "auto" => Ok(Self::Auto),
             "h265" => Ok(Self::H265),
             "h264" => Ok(Self::H264),
-            other => anyhow::bail!(
-                "bad --codec {other:?}, expected one of: auto, h265, h264"
-            ),
+            other => anyhow::bail!("bad --codec {other:?}, expected one of: auto, h265, h264"),
         }
     }
 
@@ -329,16 +327,12 @@ fn choose_decoder(
         ("openh264", Codec::H264) => Ok(DecoderChoice::Openh264),
         ("auto", Codec::H265) => Ok(DecoderChoice::Nvdec),
         ("auto", Codec::H264) => Ok(DecoderChoice::Openh264),
-        ("nvdec", Codec::H264) => Err(
-            "codec mismatch: viewer requested nvdec (H.265) but host \
+        ("nvdec", Codec::H264) => Err("codec mismatch: viewer requested nvdec (H.265) but host \
              negotiated H.264; pass --decoder openh264 or --decoder auto"
-                .into(),
-        ),
-        ("mf", Codec::H264) => Err(
-            "codec mismatch: viewer requested mf (H.265) but host \
+            .into()),
+        ("mf", Codec::H264) => Err("codec mismatch: viewer requested mf (H.265) but host \
              negotiated H.264; pass --decoder openh264 or --decoder auto"
-                .into(),
-        ),
+            .into()),
         ("openh264", Codec::H265) => Err(
             "codec mismatch: viewer requested openh264 (H.264) but host \
              negotiated H.265; pass --decoder {nvdec|mf} or --decoder auto"
@@ -800,7 +794,9 @@ pub fn run_main() -> Result<()> {
     run_with_args(Args::parse())
 }
 
-pub fn run_with_args(#[cfg_attr(target_os = "linux", allow(unused_mut))] mut args: Args) -> Result<()> {
+pub fn run_with_args(
+    #[cfg_attr(target_os = "linux", allow(unused_mut))] mut args: Args,
+) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -1781,8 +1777,7 @@ mod tests {
     fn negotiation_guard_mf_h264_errors() {
         let err = choose_decoder("mf", Codec::H264, CodecArg::Auto).unwrap_err();
         assert!(
-            err.contains("viewer requested mf (H.265)")
-                && err.contains("host negotiated H.264"),
+            err.contains("viewer requested mf (H.265)") && err.contains("host negotiated H.264"),
             "unexpected message: {err}"
         );
     }

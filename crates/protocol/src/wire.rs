@@ -697,9 +697,7 @@ mod control_tests {
     #[test]
     fn control_kind_22_accepted() {
         // kind 22 (HelloReject) must pass the upper-bound check.
-        let msg = ControlMessage::HelloReject {
-            reason: "x".into(),
-        };
+        let msg = ControlMessage::HelloReject { reason: "x".into() };
         let buf = encode_control(&msg).unwrap();
         assert!(decode_control(&buf).is_ok());
     }

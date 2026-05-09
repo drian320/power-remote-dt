@@ -5,7 +5,9 @@
 use crate::frame::BgraFrame;
 use crate::sw_pipeline::{LinuxSwDecoder, LinuxSwEncoder};
 use crate::x11_capture::X11ShmCapturer;
-use prdt_media_core::{CaptureError, Capturer, DecodeError, Decoder, EncodeError, Encoder, EncodedPacket};
+use prdt_media_core::{
+    CaptureError, Capturer, DecodeError, Decoder, EncodeError, EncodedPacket, Encoder,
+};
 
 pub struct LinuxX11ShmCapturer {
     inner: X11ShmCapturer,

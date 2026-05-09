@@ -25,8 +25,8 @@ pub fn virtual_desktop_rect() -> MonitorRect {
 fn query() -> Result<MonitorRect, LinuxInputError> {
     use x11rb::connection::Connection;
     use x11rb::protocol::randr::ConnectionExt as _;
-    let (conn, screen_num) = x11rb::connect(None)
-        .map_err(|e| LinuxInputError::X11Connect(e.to_string()))?;
+    let (conn, screen_num) =
+        x11rb::connect(None).map_err(|e| LinuxInputError::X11Connect(e.to_string()))?;
     let setup = conn.setup();
     let screen = &setup.roots[screen_num];
     let resources = conn
