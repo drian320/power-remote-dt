@@ -19,14 +19,14 @@ use prdt_input_win::{
     clipboard_sequence_number, read_clipboard_text, virtual_desktop_rect, write_clipboard_text,
     SendInputInjector, MAX_CLIPBOARD_BYTES,
 };
-use prdt_media_sw::{Openh264Encoder, Openh264EncoderConfig};
 use prdt_media_win::{
     dxgi::enumerate_outputs_for_adapter, pick_default_adapter, D3d11Device, DxgiNvencProducer,
-    HwHevcEncoder, MfH265Encoder, NvencEncoder, NvencEncoderConfig,
 };
 use prdt_protocol::{wire::AudioPacket, Codec, ControlMessage, MonitorRect, VideoProducer};
 
-use platform::win::{DxgiSwProducer, VideoEncoderBackend};
+use platform::win::{
+    pick_encoder, supported_codecs_for_encoder_arg, DxgiSwProducer, VideoEncoderBackend,
+};
 use prdt_transport::{
     host_handshake, now_monotonic_us, CustomUdpTransport, ReceivedMessage, Transport,
     UdpTransportConfig,
@@ -838,135 +838,6 @@ fn init_tracing() {
         .init();
 }
 
-/// Resolve `--encoder` to a concrete backend. The `auto` selector picks
-/// nvenc > mf > openh264. When the resolved backend is HW, the negotiated
-/// codec must be H.265; when SW, must be H.264. The handshake layer rejects
-/// mismatches before we get here, so a mismatch in this fn is a programmer
-/// error and we bail.
-fn pick_encoder(
-    args_encoder: &str,
-    adapter: &prdt_media_win::AdapterInfo,
-    dev: &D3d11Device,
-    width: u32,
-    height: u32,
-    bitrate_bps: u32,
-    negotiated_codec: Codec,
-) -> anyhow::Result<VideoEncoderBackend> {
-    let choice = resolve_encoder_choice(args_encoder, adapter, negotiated_codec);
-    match choice {
-        "nvenc" => {
-            if negotiated_codec != Codec::H265 {
-                anyhow::bail!(
-                    "encoder=nvenc but negotiated codec={:?}; handshake layer should have rejected this",
-                    negotiated_codec
-                );
-            }
-            let cfg = NvencEncoderConfig {
-                width,
-                height,
-                fps_numerator: 60,
-                fps_denominator: 1,
-                bitrate_bps,
-                gop_length: 60,
-            };
-            let enc = NvencEncoder::new(dev, &cfg).context("NvencEncoder::new")?;
-            Ok(VideoEncoderBackend::Hw(HwHevcEncoder::from(enc)))
-        }
-        "mf" => {
-            if negotiated_codec != Codec::H265 {
-                anyhow::bail!(
-                    "encoder=mf but negotiated codec={:?}; handshake layer should have rejected this",
-                    negotiated_codec
-                );
-            }
-            let cfg = NvencEncoderConfig {
-                width,
-                height,
-                fps_numerator: 60,
-                fps_denominator: 1,
-                bitrate_bps,
-                gop_length: 60,
-            };
-            let enc = MfH265Encoder::new(dev, &cfg).context("MfH265Encoder::new")?;
-            Ok(VideoEncoderBackend::Hw(HwHevcEncoder::from(enc)))
-        }
-        "openh264" => {
-            if negotiated_codec != Codec::H264 {
-                anyhow::bail!(
-                    "encoder=openh264 but negotiated codec={:?}; handshake layer should have rejected this",
-                    negotiated_codec
-                );
-            }
-            let cfg = Openh264EncoderConfig {
-                width,
-                height,
-                target_bitrate_bps: bitrate_bps,
-                max_fps: 60.0,
-            };
-            let enc = Openh264Encoder::new(cfg).context("Openh264Encoder::new")?;
-            Ok(VideoEncoderBackend::SwH264(Box::new(enc)))
-        }
-        other => anyhow::bail!("unknown --encoder {other:?} (valid: auto, nvenc, mf, openh264)"),
-    }
-}
-
-/// Apply the `auto` selection policy: nvenc > mf > openh264. Plan §Phase 2:
-/// "auto selection order: nvenc > mf > openh264". The viewer-requested
-/// codec narrows the choice — if the viewer wants H.264 we pick openh264
-/// regardless of GPU vendor (HW H.264 encode is not implemented in this
-/// repo and is out of scope for the software-codec tag).
-fn resolve_encoder_choice<'a>(
-    args_encoder: &'a str,
-    adapter: &prdt_media_win::AdapterInfo,
-    negotiated_codec: Codec,
-) -> &'a str {
-    if args_encoder == "auto" {
-        match negotiated_codec {
-            Codec::H264 => "openh264",
-            Codec::H265 => {
-                if adapter.is_nvidia() {
-                    "nvenc"
-                } else {
-                    "mf"
-                }
-            }
-            // Any future codec falls through to nvenc/mf which will then
-            // bail with a clear "encoder=X but negotiated codec=Y" error.
-            _ => {
-                if adapter.is_nvidia() {
-                    "nvenc"
-                } else {
-                    "mf"
-                }
-            }
-        }
-    } else {
-        args_encoder
-    }
-}
-
-/// What we advertise in HelloAck `host_supported_codecs` based on the
-/// `--encoder` flag. An explicit choice locks us to a single codec; `auto`
-/// advertises the full HW set so the viewer's preference wins.
-fn supported_codecs_for_encoder_arg(
-    args_encoder: &str,
-    adapter: &prdt_media_win::AdapterInfo,
-) -> Vec<Codec> {
-    match args_encoder {
-        "openh264" => vec![Codec::H264],
-        "nvenc" | "mf" => vec![Codec::H265],
-        // "auto" or anything else — caller resolves to a HW backend
-        // (nvenc/mf), both of which emit H.265. media-sw is built into
-        // this binary, so SW H.264 is also reachable; advertise both
-        // so a viewer that explicitly asks for H.264 (with `--codec
-        // h264`) can still negotiate without forcing the operator to
-        // pass `--encoder openh264` on the host side.
-        _ => {
-            let _ = adapter;
-            vec![Codec::H265, Codec::H264]
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

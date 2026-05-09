@@ -256,3 +256,235 @@ impl VideoProducer for DxgiSwProducer {
         "openh264-sw"
     }
 }
+
+// === Migrated from lib.rs ===
+
+use prdt_media_win::{HwHevcEncoder, MfH265Encoder, NvencEncoder, NvencEncoderConfig};
+use prdt_media_sw::{Openh264Encoder, Openh264EncoderConfig};
+use prdt_protocol::Codec;
+
+/// Resolve `--encoder` to a concrete backend. The `auto` selector picks
+/// nvenc > mf > openh264. When the resolved backend is HW, the negotiated
+/// codec must be H.265; when SW, must be H.264. The handshake layer rejects
+/// mismatches before we get here, so a mismatch in this fn is a programmer
+/// error and we bail.
+pub(super) fn pick_encoder(
+    args_encoder: &str,
+    adapter: &prdt_media_win::AdapterInfo,
+    dev: &D3d11Device,
+    width: u32,
+    height: u32,
+    bitrate_bps: u32,
+    negotiated_codec: Codec,
+) -> anyhow::Result<VideoEncoderBackend> {
+    let choice = resolve_encoder_choice(args_encoder, adapter, negotiated_codec);
+    match choice {
+        "nvenc" => {
+            if negotiated_codec != Codec::H265 {
+                anyhow::bail!(
+                    "encoder=nvenc but negotiated codec={:?}; handshake layer should have rejected this",
+                    negotiated_codec
+                );
+            }
+            let cfg = NvencEncoderConfig {
+                width,
+                height,
+                fps_numerator: 60,
+                fps_denominator: 1,
+                bitrate_bps,
+                gop_length: 60,
+            };
+            let enc = NvencEncoder::new(dev, &cfg).context("NvencEncoder::new")?;
+            Ok(VideoEncoderBackend::Hw(HwHevcEncoder::from(enc)))
+        }
+        "mf" => {
+            if negotiated_codec != Codec::H265 {
+                anyhow::bail!(
+                    "encoder=mf but negotiated codec={:?}; handshake layer should have rejected this",
+                    negotiated_codec
+                );
+            }
+            let cfg = NvencEncoderConfig {
+                width,
+                height,
+                fps_numerator: 60,
+                fps_denominator: 1,
+                bitrate_bps,
+                gop_length: 60,
+            };
+            let enc = MfH265Encoder::new(dev, &cfg).context("MfH265Encoder::new")?;
+            Ok(VideoEncoderBackend::Hw(HwHevcEncoder::from(enc)))
+        }
+        "openh264" => {
+            if negotiated_codec != Codec::H264 {
+                anyhow::bail!(
+                    "encoder=openh264 but negotiated codec={:?}; handshake layer should have rejected this",
+                    negotiated_codec
+                );
+            }
+            let cfg = Openh264EncoderConfig {
+                width,
+                height,
+                target_bitrate_bps: bitrate_bps,
+                max_fps: 60.0,
+            };
+            let enc = Openh264Encoder::new(cfg).context("Openh264Encoder::new")?;
+            Ok(VideoEncoderBackend::SwH264(Box::new(enc)))
+        }
+        other => anyhow::bail!("unknown --encoder {other:?} (valid: auto, nvenc, mf, openh264)"),
+    }
+}
+
+/// Apply the `auto` selection policy: nvenc > mf > openh264. Plan §Phase 2:
+/// "auto selection order: nvenc > mf > openh264". The viewer-requested
+/// codec narrows the choice — if the viewer wants H.264 we pick openh264
+/// regardless of GPU vendor (HW H.264 encode is not implemented in this
+/// repo and is out of scope for the software-codec tag).
+fn resolve_encoder_choice<'a>(
+    args_encoder: &'a str,
+    adapter: &prdt_media_win::AdapterInfo,
+    negotiated_codec: Codec,
+) -> &'a str {
+    if args_encoder == "auto" {
+        match negotiated_codec {
+            Codec::H264 => "openh264",
+            Codec::H265 => {
+                if adapter.is_nvidia() {
+                    "nvenc"
+                } else {
+                    "mf"
+                }
+            }
+            // Any future codec falls through to nvenc/mf which will then
+            // bail with a clear "encoder=X but negotiated codec=Y" error.
+            _ => {
+                if adapter.is_nvidia() {
+                    "nvenc"
+                } else {
+                    "mf"
+                }
+            }
+        }
+    } else {
+        args_encoder
+    }
+}
+
+/// What we advertise in HelloAck `host_supported_codecs` based on the
+/// `--encoder` flag. An explicit choice locks us to a single codec; `auto`
+/// advertises the full HW set so the viewer's preference wins.
+pub(super) fn supported_codecs_for_encoder_arg(
+    args_encoder: &str,
+    adapter: &prdt_media_win::AdapterInfo,
+) -> Vec<Codec> {
+    match args_encoder {
+        "openh264" => vec![Codec::H264],
+        "nvenc" | "mf" => vec![Codec::H265],
+        // "auto" or anything else — caller resolves to a HW backend
+        // (nvenc/mf), both of which emit H.265. media-sw is built into
+        // this binary, so SW H.264 is also reachable; advertise both
+        // so a viewer that explicitly asks for H.264 (with `--codec
+        // h264`) can still negotiate without forcing the operator to
+        // pass `--encoder openh264` on the host side.
+        _ => {
+            let _ = adapter;
+            vec![Codec::H265, Codec::H264]
+        }
+    }
+}
+
+// === Factory surface (cfg-transparent re-exports via platform/mod.rs) ===
+
+use anyhow::Context as _;
+use prdt_input_win::{
+    clipboard_sequence_number as _input_win_clipboard_sequence_number,
+    read_clipboard_text as _input_win_read_clipboard_text,
+    virtual_desktop_rect as _input_win_virtual_desktop_rect,
+    write_clipboard_text as _input_win_write_clipboard_text,
+    SendInputInjector,
+    MAX_CLIPBOARD_BYTES as _INPUT_WIN_MAX,
+};
+use prdt_media_win::{
+    dxgi::enumerate_outputs_for_adapter, pick_default_adapter, DxgiNvencProducer,
+    OutputInfo,
+};
+use prdt_protocol::{InputEvent, MonitorRect, VideoProducer};
+
+/// Re-exported max clipboard bytes; identical value across OSes.
+pub const MAX_CLIPBOARD_BYTES: usize = _INPUT_WIN_MAX;
+
+/// Per-OS opaque output descriptor. Windows holds the real `OutputInfo`;
+/// Linux holds `()`.
+pub type OutputDescriptor = OutputInfo;
+
+/// Pick the default output (monitor) for capture. Internally enumerates
+/// adapters + outputs and returns the first.
+pub fn pick_default_output(_args: &crate::Args) -> anyhow::Result<OutputDescriptor> {
+    let adapter = pick_default_adapter().context("pick_default_adapter")?;
+    let outputs = enumerate_outputs_for_adapter(&adapter).context("enumerate_outputs_for_adapter")?;
+    let primary = outputs
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no DXGI output found on adapter"))?;
+    Ok(primary)
+}
+
+/// Build a boxed `VideoProducer` for the requested encoder backend.
+/// `args_encoder` is the raw CLI string ("auto" | "nvenc" | "mf" | "openh264");
+/// `negotiated_codec` is the codec the viewer agreed to in HelloAck.
+pub fn build_video_producer(
+    args_encoder: &str,
+    output: &OutputDescriptor,
+    bitrate_bps: u32,
+    _fps: u32,
+    negotiated_codec: prdt_protocol::Codec,
+) -> anyhow::Result<Box<dyn VideoProducer>> {
+    let adapter = pick_default_adapter().context("pick_default_adapter")?;
+    let dev = D3d11Device::create(&adapter).context("D3D11 device")?;
+    let width = (output.desktop_rect.right - output.desktop_rect.left) as u32;
+    let height = (output.desktop_rect.bottom - output.desktop_rect.top) as u32;
+    let backend = pick_encoder(args_encoder, &adapter, &dev, width, height, bitrate_bps, negotiated_codec)
+        .context("pick_encoder")?;
+    let producer: Box<dyn VideoProducer> = match backend {
+        VideoEncoderBackend::Hw(enc) => Box::new(
+            DxgiNvencProducer::with_encoder(&dev, output, enc).context("hw producer")?,
+        ),
+        VideoEncoderBackend::SwH264(enc) => Box::new(
+            DxgiSwProducer::with_encoder(&dev, output, *enc).context("sw producer")?,
+        ),
+    };
+    Ok(producer)
+}
+
+/// Inject one input event into the kernel via SendInput.
+pub fn dispatch_input(event: InputEvent) -> Result<(), super::DispatchError> {
+    SendInputInjector::send(event).map_err(|e| super::DispatchError::Backend(e.to_string()))
+}
+
+/// Read the user's primary clipboard text channel.
+pub fn read_clipboard_text() -> Result<String, super::ClipboardError> {
+    _input_win_read_clipboard_text().map_err(|e| match e {
+        prdt_input_win::ClipboardError::TooLarge(n) => super::ClipboardError::TooLarge(n),
+        prdt_input_win::ClipboardError::NoText => super::ClipboardError::NoText,
+        other => super::ClipboardError::Backend(other.to_string()),
+    })
+}
+
+/// Set the user's primary clipboard text channel.
+pub fn write_clipboard_text(text: &str) -> Result<(), super::ClipboardError> {
+    _input_win_write_clipboard_text(text).map_err(|e| match e {
+        prdt_input_win::ClipboardError::TooLarge(n) => super::ClipboardError::TooLarge(n),
+        prdt_input_win::ClipboardError::NoText => super::ClipboardError::NoText,
+        other => super::ClipboardError::Backend(other.to_string()),
+    })
+}
+
+/// Cheap monotonic counter that bumps on any system clipboard change.
+pub fn clipboard_sequence_number() -> u32 {
+    _input_win_clipboard_sequence_number()
+}
+
+/// Return the host's combined virtual desktop rectangle in screen-space coords.
+pub fn virtual_desktop_rect() -> MonitorRect {
+    _input_win_virtual_desktop_rect()
+}
