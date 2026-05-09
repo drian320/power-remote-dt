@@ -15,10 +15,14 @@ fn main() {
     // unexpected_cfgs lint doesn't complain on consumers.
     println!("cargo::rustc-check-cfg=cfg(prdt_nvdec_bindings)");
 
-    generate_nvenc_bindings();
-    generate_nvdec_bindings();
+    #[cfg(target_os = "windows")]
+    {
+        generate_nvenc_bindings();
+        generate_nvdec_bindings();
+    }
 }
 
+#[cfg(target_os = "windows")]
 fn generate_nvenc_bindings() {
     let out_dir = env::var("OUT_DIR").unwrap();
     let out_path = PathBuf::from(&out_dir).join("nvenc_bindings.rs");
@@ -78,6 +82,7 @@ fn generate_nvenc_bindings() {
 /// includes. When CUDA_PATH is unset we emit empty stubs and the nvdec
 /// module compiles to a `NotAvailable` error path rather than failing
 /// the build outright — the host/viewer still build against MF decode.
+#[cfg(target_os = "windows")]
 fn generate_nvdec_bindings() {
     let out_dir = env::var("OUT_DIR").unwrap();
     let out_path = PathBuf::from(&out_dir).join("nvdec_bindings.rs");
