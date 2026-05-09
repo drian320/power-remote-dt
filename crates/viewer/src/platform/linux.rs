@@ -77,6 +77,20 @@ pub fn build_render(
     surface
         .resize(nz_w, nz_h)
         .map_err(|e| super::RenderError::Init(format!("Surface::resize: {e}")))?;
+    // On Wayland a wl_surface stays unmapped until the first buffer is
+    // committed (Wayland spec). Our render path only commits when a
+    // decoded frame arrives, so without this initial blank present the
+    // window never appears on screen until the first successful decode.
+    // Commit a black/transparent buffer once so the compositor maps the
+    // window immediately.
+    {
+        let mut buf = surface
+            .buffer_mut()
+            .map_err(|e| super::RenderError::Init(format!("initial buffer_mut: {e}")))?;
+        buf.fill(0);
+        buf.present()
+            .map_err(|e| super::RenderError::Init(format!("initial present: {e}")))?;
+    }
     Ok(PlatformRender {
         window,
         _ctx: ctx,
