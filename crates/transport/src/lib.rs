@@ -1,6 +1,7 @@
 //! Custom UDP transport with FEC for power-remote-dt.
 
 pub mod assembler;
+pub mod bitrate_control;
 pub mod error;
 pub mod fec;
 pub mod handshake;
