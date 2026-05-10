@@ -41,6 +41,47 @@ use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
+/// Tracks whether an IDR frame has been requested from the host encoder,
+/// with a 250 ms rate-limit to avoid flooding the encode loop.
+///
+/// Two trigger paths:
+///   1. `FrameAssembler::purge()` returns a non-empty `Vec<u64>` (fragment loss).
+///   2. Decoder returns `Err(_)` on a frame (reference frame missing / corrupt).
+struct IdrRequester {
+    needs_idr_pending: bool,
+    last_request_at: Option<std::time::Instant>,
+}
+
+impl IdrRequester {
+    fn new() -> Self {
+        Self {
+            needs_idr_pending: false,
+            last_request_at: None,
+        }
+    }
+
+    /// Signal that an IDR is needed (called on decode error or assembler purge).
+    fn mark(&mut self) {
+        self.needs_idr_pending = true;
+    }
+
+    /// If a request is pending and the cooldown has elapsed, clear the flag
+    /// and return `true` (caller should send `RequestIdr`). Otherwise `false`.
+    fn try_take(&mut self, now: std::time::Instant, cooldown: std::time::Duration) -> bool {
+        if !self.needs_idr_pending {
+            return false;
+        }
+        if let Some(t) = self.last_request_at {
+            if now.duration_since(t) < cooldown {
+                return false;
+            }
+        }
+        self.needs_idr_pending = false;
+        self.last_request_at = Some(now);
+        true
+    }
+}
+
 pub fn default_viewer_key_path() -> std::path::PathBuf {
     if let Some(base) = dirs::data_local_dir() {
         let dir = base.join("prdt");
@@ -1314,6 +1355,8 @@ fn spawn_worker_tasks(
             let mut err_count = 0u64;
             let mut last_log = std::time::Instant::now();
             let mut timeouts = 0u64;
+            let mut idr_req = IdrRequester::new();
+            const IDR_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(250);
             loop {
                 let recv_result = match tokio::time::timeout(
                     std::time::Duration::from_secs(1),
@@ -1324,6 +1367,10 @@ fn spawn_worker_tasks(
                     Ok(r) => r,
                     Err(_) => {
                         timeouts += 1;
+                        let purged = recv_transport.purge_assembler().await;
+                        if !purged.is_empty() {
+                            idr_req.mark();
+                        }
                         info!(
                             frames_received = frame_count,
                             textures_decoded = tex_count,
@@ -1398,6 +1445,7 @@ fn spawn_worker_tasks(
                             };
                             if let Err(e) = submit_result {
                                 warn!(error = %e, seq, is_kf, nal_len, "consumer.submit error");
+                                idr_req.mark();
                                 continue;
                             }
                             let frame_opt: Option<PlatformFrame> = match &mut *c {
@@ -1438,12 +1486,31 @@ fn spawn_worker_tasks(
                                     *recv_shared.latest_frame.lock().unwrap() =
                                         Some((PlatformFrame::I420(arc), host_ts_us));
                                 }
-                                Ok(None) => {}
+                                Ok(None) => {
+                                    if *needs_idr && !is_kf {
+                                        idr_req.mark();
+                                    }
+                                }
                                 Err(e) => {
                                     warn!(error = %e, seq, is_kf, nal_len, "linux openh264 decode failed");
-                                    continue;
+                                    idr_req.mark();
                                 }
                             }
+                        }
+
+                        // Rate-limited RequestIdr send. Fires when loss detected (purge or decode error).
+                        if idr_req.try_take(std::time::Instant::now(), IDR_COOLDOWN) {
+                            let ctrl_transport = Arc::clone(&recv_transport);
+                            tokio::spawn(async move {
+                                if let Err(e) = ctrl_transport
+                                    .send_control(ControlMessage::RequestIdr)
+                                    .await
+                                {
+                                    tracing::warn!(?e, "send RequestIdr failed");
+                                } else {
+                                    tracing::debug!("viewer sent RequestIdr (loss detected)");
+                                }
+                            });
                         }
                     }
                     Ok(ReceivedMessage::Control(ControlMessage::Bye)) => {
@@ -1842,5 +1909,24 @@ mod tests {
             choose_decoder("openh264", Codec::H264, CodecArg::H264).unwrap(),
             DecoderChoice::Openh264
         );
+    }
+
+    #[test]
+    fn idr_requester_cooldown() {
+        let mut r = IdrRequester::new();
+        // Initially no pending request → try_take returns false.
+        assert!(!r.try_take(std::time::Instant::now(), std::time::Duration::from_millis(250)));
+
+        // Mark pending, then try_take immediately → should return true (first request, no prior).
+        r.mark();
+        assert!(r.try_take(std::time::Instant::now(), std::time::Duration::from_millis(250)));
+
+        // try_take consumed the pending flag; second call immediately after → false (cooldown).
+        r.mark();
+        assert!(!r.try_take(std::time::Instant::now(), std::time::Duration::from_millis(250)));
+
+        // After sleeping past cooldown, try_take succeeds again.
+        std::thread::sleep(std::time::Duration::from_millis(260));
+        assert!(r.try_take(std::time::Instant::now(), std::time::Duration::from_millis(250)));
     }
 }

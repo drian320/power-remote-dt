@@ -684,6 +684,14 @@ impl CustomUdpTransport {
             }
         }
     }
+
+    /// Purge stale partial frames from the assembler, returning the seqs
+    /// that were dropped. Caller (viewer) uses the result to trigger
+    /// RequestIdr when fragment loss is detected.
+    pub async fn purge_assembler(&self) -> Vec<u64> {
+        let mut asm = self.assembler.lock().await;
+        asm.purge()
+    }
 }
 
 #[async_trait]
