@@ -1,7 +1,7 @@
 # power-remote-dt — Project Status & Roadmap
 
-**Last updated:** 2026-04-27
-**Latest tag:** `software-codec-openh264-complete`
+**Last updated:** 2026-05-10
+**Latest tag:** `phase-l2-transport-robustness-complete`
 **Branch state:** `phase0-sw-codec-wire` (post-tag) — **Phase 4 + Plan 4 B1 + B4 + B6 + B7 + B8 完了 + MF エンコーダ fallback 完了 + host session liveness 完了 + NVDEC arc-swap 化 完了 + ソフトウェアコーデック OpenH264 完了 (B3 のみ HW ブロック保留)**
 **Test count:** 348+ automated Rust tests + 11 Python tests; new crate `prdt-media-sw` 6 tests (Phase 1) + Phase 0 protocol/transport new tests + Phase 5 latency-bench new test (≥10 new tests per plan §8 acceptance)
 
@@ -140,10 +140,22 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
     - `e69d199` media-linux: WSLg multi-monitor 7680×2160 が OpenH264 SW max 超 → 3840×2160 にクランプ
     - `f02b706` host: WSLg で audio device 不在 → audio task が session ごとキャンセル → audio failure を非致命に
     - `70857e0` viewer: Wayland の `wl_surface` は最初の buffer commit まで unmapped → `build_render` で初期黒 buffer を 1 回 commit
-  - **L1.5b smoke 既知制約** (L2 transport polish 候補): WSL2 → LAN UDP 高 bitrate (>5 Mbps) で大量 fragment 損失。viewer に `RequestIdr` 送信 path 未実装で IDR loss 後の自己回復無し。実機 Wayland 上でウィンドウは表示されるがフレーム中身は decode 失敗 (transport/IDR-recovery が L2 で要解決)
+  - **L1.5b smoke 既知制約** (L2 transport polish 候補): WSL2 → LAN UDP 高 bitrate (>5 Mbps) で大量 fragment 損失。viewer に `RequestIdr` 送信 path 未実装で IDR loss 後の自己回復無し。実機 Wayland 上でウィンドウは表示されるがフレーム中身は decode 失敗 (transport/IDR-recovery が L2 で要解決) → **L2 で解消、下記**
   - **CI 配信**: `.github/workflows/release.yml` で Linux x86_64 binary を tag-trigger で release 化 (smoke-1, smoke-2 で運用検証済み)
-- **L2 候補**: Wayland portal capture / libei / wl-clipboard、VAAPI HW encode/decode、NVENC/NVDEC on Linux、cross-OS scancode normalization、multi-monitor non-zero-origin、cursor capture/合成、複数 distro 検証、`Cmd::Gui` Linux 対応、Linux viewer overlay child process、audio default-on on Linux、`prdt_input_win::RawInputCapturer::map_winit_mouse_button` cleanup、viewer cooperative shutdown (CancellationToken plumbing)、**transport robustness on lossy UDP (RequestIdr 自動再送、SPS/PPS repeat-with-IDR、IDR fragment FEC)**
-- **元の見積もり**: 大(3-4 週)。**実績 (L0 + L1 + L1.5a + L1.5b + smoke fixes)**: ~80%。残 20% (HW codec + Wayland portal + transport robustness + packaging) は L2/L3 へ
+  - **L2 (`phase-l2-transport-robustness-complete`, 2026-05-10)**: L1.5b smoke の black-screen を解消する transport robustness 最小ループを実装。Cross-platform (Linux + Windows)、~250 LoC across 9 tasks。
+    - **Viewer side** (`crates/viewer/src/lib.rs`): `IdrRequester` struct (`needs_idr_pending` + `last_request_at` + 250ms cooldown) を recv loop に配線。3 つの loss 検知 trigger: Linux decoder `Err`、Linux `Ok(None) && needs_idr && !is_kf` (P-frame reference miss)、Windows submit error。+ 1-second recv timeout 経路で `purge_assembler()` non-empty → mark。`try_send_idr_request` closure を全 exit point (continue 含む) で発火 → `transport.send_control(ControlMessage::RequestIdr).await`
+    - **Transport side** (`crates/transport/src/udp.rs`): `pub async fn purge_assembler(&self) -> Vec<u64>` を `CustomUdpTransport` に追加 (assembler の既存 `purge()` を viewer に expose)。
+    - **Host side** (`crates/host/src/lib.rs`): `force_idr_flag: Arc<AtomicBool>` を control loop と video loop で共有。control loop の new arm: `Ok(ReceivedMessage::Control(ControlMessage::RequestIdr)) => force_idr_flag.store(true, Release)`。video loop は `force_idr_flag.swap(false, AcqRel)` → `producer.request_idr()` (既存 `VideoProducer` trait) を `next_frame()` 直前に呼ぶ。
+    - **Encoder side**: 全 3 encoder で SPS/PPS-with-every-IDR を有効化:
+      - OpenH264 (`crates/media-sw/src/encoder.rs`): `SpsPpsStrategy::SpsPpsListing` を `EncoderConfig` builder に追加 (実際は `ScreenContentRealTime` usage で `CONSTANT_ID` に降格されるが、結果として全 IDR に SPS+PPS が乗る)
+      - MF H.265 (`crates/media-win/src/mf/encoder.rs`): `CODECAPI_AVEncVideoForceKeyFrame=1` を `ICodecAPI::SetValue` で。MFT が E_NOTIMPL を返す場合は黙って無視 (degraded mode fallback は viewer-side cache、L3)
+      - NVENC (`crates/media-win/src/nvenc/config.rs`): `enableRepeatSPSPPS=1` を `NV_ENC_INITIALIZE_PARAMS` に
+    - **Tests**: 7 new tests cross-platform: 3 transport loopback (`idr_loss_test::*`)、2 host smoke (`request_idr_handler_smoke::*`)、1 viewer unit (`idr_requester_cooldown`)、1 OpenH264 (`second_idr_carries_sps_pps`)、+ 2 `#[ignore]` HW encoder tests (MF/NVENC; Windows CI で `--ignored` 付き実行)
+    - **Linux regression bar**: cargo build + clippy --workspace -- -D warnings green、339 passed / 6 ignored
+    - **Windows regression bar**: Windows CI (PR で確認、tag push 後)
+    - **Pre-existing flaky test (L2 regression ではない)**: `transport::probe_test::two_transports_find_each_other` は master でも deterministic FAILED (UDP probe timing issue、別件)
+- **L2 残候補** (transport robustness 完了後): Wayland portal capture / libei / wl-clipboard、VAAPI HW encode/decode、NVENC/NVDEC on Linux、cross-OS scancode normalization、multi-monitor non-zero-origin、cursor capture/合成、複数 distro 検証、`Cmd::Gui` Linux 対応、Linux viewer overlay child process、audio default-on on Linux、`prdt_input_win::RawInputCapturer::map_winit_mouse_button` cleanup、viewer cooperative shutdown (CancellationToken plumbing)、IDR fragment FEC + adaptive bitrate (L3)
+- **元の見積もり**: 大(3-4 週)。**実績 (L0 + L1 + L1.5a + L1.5b + smoke fixes + L2 transport)**: ~85%。残 15% (HW codec + Wayland portal + packaging) は L2 残/L3 へ
 
 ### **C. 計測 / 観測 系(blocker 解消用)**
 
