@@ -154,6 +154,13 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
     - **Linux regression bar**: cargo build + clippy --workspace -- -D warnings green、339 passed / 6 ignored
     - **Windows regression bar**: Windows CI (PR で確認、tag push 後)
     - **Pre-existing flaky test (L2 regression ではない)**: `transport::probe_test::two_transports_find_each_other` は master でも deterministic FAILED (UDP probe timing issue、別件)
+  - **L2 smoke walkthrough (2026-05-10)**: WSLg host (`--bitrate-mbps 5 --encoder openh264`) + 実機 Wayland viewer で end-to-end 検証。**spec §1 DoD #1 達成 ✅** — 接続後 ~2.4 秒で black → live に遷移 (`textures_decoded=0 → 5 → 7`)。L2 RequestIdr loop 完全動作確認:
+    - Viewer: 初回 decode 失敗 (Native:16 = `dsNoParamSets`) → `IdrRequester::mark()` → `transport.send_control(RequestIdr)`
+    - Host: control loop が `viewer requested IDR; setting force_idr for next encode` を log + `force_idr_flag.store(true, Release)`
+    - Host video loop: `force_idr_flag.swap(false, AcqRel)` → `producer.request_idr()` → encoder が SPS+PPS+IDR slice を含む新 IDR を emit
+    - Viewer: 新 IDR 復号成功、画面更新開始
+    - Latency 改善 (前回 30Mbps smoke vs 今回 5Mbps): `arrival_p50` 412ms → 99ms (4.2×)、`decode_p50` 564ms → 205ms (2.7×)、`present_p50` 586ms → 223ms (2.6×)
+  - **L2 smoke 残課題** (L3 territory): 17 秒以降 host→viewer の packet delivery が事実上停止 (host 262 frames send → viewer 15 frames recv = **5.7% delivery**)。host watchdog が 5 秒 silence で session kill。原因: WiFi/LAN の物理層 packet loss + IDR fragment loss が連鎖して回復不能 stretch に入った。**L3 で解決予定**: (a) Reed-Solomon FEC across IDR fragments、(b) observed-loss-driven adaptive bitrate
 - **L2 残候補** (transport robustness 完了後): Wayland portal capture / libei / wl-clipboard、VAAPI HW encode/decode、NVENC/NVDEC on Linux、cross-OS scancode normalization、multi-monitor non-zero-origin、cursor capture/合成、複数 distro 検証、`Cmd::Gui` Linux 対応、Linux viewer overlay child process、audio default-on on Linux、`prdt_input_win::RawInputCapturer::map_winit_mouse_button` cleanup、viewer cooperative shutdown (CancellationToken plumbing)、IDR fragment FEC + adaptive bitrate (L3)
 - **元の見積もり**: 大(3-4 週)。**実績 (L0 + L1 + L1.5a + L1.5b + smoke fixes + L2 transport)**: ~85%。残 15% (HW codec + Wayland portal + packaging) は L2 残/L3 へ
 
