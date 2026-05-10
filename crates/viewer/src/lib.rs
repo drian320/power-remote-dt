@@ -225,6 +225,20 @@ pub struct Args {
     /// missing. The host uses the matching pubkey to identify this viewer.
     #[arg(long, default_value_os_t = default_viewer_key_path())]
     pub viewer_key_file: std::path::PathBuf,
+
+    /// Disable the L3 viewer-side adaptive bitrate controller. When set,
+    /// the viewer will not send `ControlMessage::SetBitrate` to the host
+    /// and the host's encoder will run at its CLI-configured bitrate for
+    /// the entire session. Use for A/B regression comparisons.
+    #[arg(long, default_value_t = false)]
+    pub no_adaptive_bitrate: bool,
+
+    /// Hint to the controller about the host's max bitrate, in Mbps. Used
+    /// as the upper clamp for AIMD. If you don't know it, leave the
+    /// default — the controller will start at this value and never exceed
+    /// it. Should match the host's `--bitrate-mbps`.
+    #[arg(long, default_value_t = 30u32)]
+    pub bitrate_mbps: u32,
 }
 
 /// Normalize a user-supplied host_id for signaling: 9-digit numeric inputs
@@ -969,6 +983,8 @@ pub fn run_with_args(
         args.decoder.clone(),
         args.codec.clone(),
         viewer_kp,
+        args.no_adaptive_bitrate,
+        args.bitrate_mbps.saturating_mul(1_000_000),
     );
 
     // Build the event loop + app.
@@ -1021,6 +1037,8 @@ fn spawn_worker_tasks(
     decoder: String,
     codec: String,
     viewer_kp: KeyPair,
+    no_adaptive_bitrate: bool,
+    max_bitrate_bps: u32,
 ) {
     handle.clone().spawn(async move {
         // CLI --bind supplies the local UDP bind (default 0.0.0.0:0). We only
@@ -1650,10 +1668,21 @@ fn spawn_worker_tasks(
         let latency_probe = Arc::clone(&shared.latency);
         let latency_transport = Arc::clone(&transport);
         let title_shared = Arc::clone(&shared);
+        // L3 adaptive bitrate controller — runs inside latency_task at 1 Hz.
+        let mut bitrate_controller = {
+            let mut cfg = prdt_transport::bitrate_control::BitrateControllerConfig::new_for_max(
+                max_bitrate_bps,
+            );
+            cfg.enabled = !no_adaptive_bitrate;
+            prdt_transport::bitrate_control::BitrateController::new(cfg)
+        };
+        let bitrate_transport = Arc::clone(&transport);
         let latency_task = tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(1));
             ticker.tick().await; // fire first tick immediately; skip it
             let mut ticks_since_report: u32 = 0;
+            // L3: caller-side rolling window state.
+            let mut last_total_samples: u64 = 0;
             loop {
                 ticker.tick().await;
 
@@ -1692,6 +1721,36 @@ fn spawn_worker_tasks(
                         arrival_p95_us = arrival.p95_us,
                         "M1 latency (arrival only; no present samples yet)",
                     );
+                }
+
+                // L3: adaptive bitrate step.
+                let purged = bitrate_transport.purge_assembler().await;
+                let lost = purged.len() as u64;
+                let curr_total_samples = snap
+                    .present
+                    .map(|p| p.samples as u64)
+                    .unwrap_or(last_total_samples);
+                let delta_total = curr_total_samples.saturating_sub(last_total_samples);
+                last_total_samples = curr_total_samples;
+                let total_window = delta_total.saturating_add(lost);
+                bitrate_controller.observe(lost, total_window);
+                bitrate_controller.aimd_step(std::time::Instant::now());
+                bitrate_controller.reset_window();
+                if bitrate_controller.should_send() {
+                    let target_bps = bitrate_controller.target_bps();
+                    let msg = ControlMessage::SetBitrate { target_bps };
+                    match bitrate_transport.send_control(msg).await {
+                        Ok(()) => {
+                            bitrate_controller.mark_sent();
+                            info!(
+                                target_bps,
+                                lost_in_window = lost,
+                                total_in_window = total_window,
+                                "L3 sent SetBitrate"
+                            );
+                        }
+                        Err(e) => warn!(?e, "L3 send SetBitrate failed"),
+                    }
                 }
 
                 ticks_since_report += 1;
