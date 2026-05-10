@@ -24,11 +24,14 @@ clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = "1"
+thiserror = { workspace = true }
 dirs = { workspace = true }
 rand_core = { version = "0.6", features = ["getrandom"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
+tempfile = "3"
+clap = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 prdt-media-win = { path = "../media-win" }
@@ -37,4 +40,14 @@ prdt-input-win = { path = "../input-win" }
 tokio-util = { version = "0.7", features = ["rt"] }
 prdt-gui-host = { path = "../gui-host" }
 prdt-gui-common = { path = "../gui-common" }
+async-trait = "0.1"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(prdt_nvdec_bindings)', 'cfg(prdt_nvenc_bindings)'] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+prdt-media-linux = { path = "../media-linux" }
+prdt-input-linux = { path = "../input-linux" }
+prdt-media-sw = { path = "../media-sw" }
+tokio-util = { version = "0.7", features = ["rt"] }
 async-trait = "0.1"

@@ -33,13 +33,21 @@ async fn handle_socket(mut socket: WebSocket, app: AppState) {
     let classified = match msg {
         Ok(m) => m,
         Err(e) => {
-            send_error(&mut socket, ErrorCode::ProtocolError, &format!("bad first message: {e}")).await;
+            send_error(
+                &mut socket,
+                ErrorCode::ProtocolError,
+                &format!("bad first message: {e}"),
+            )
+            .await;
             return;
         }
     };
 
     match classified {
-        ClientMessage::Register { host_id, pubkey_b64 } => {
+        ClientMessage::Register {
+            host_id,
+            pubkey_b64,
+        } => {
             let input_id = if host_id.trim().is_empty() {
                 None
             } else {
@@ -52,27 +60,47 @@ async fn handle_socket(mut socket: WebSocket, app: AppState) {
                         &mut socket,
                         ErrorCode::HostIdPubkeyMismatch,
                         "host_id pubkey does not match registered key",
-                    ).await;
+                    )
+                    .await;
                     return;
                 }
                 Err(e) => {
-                    send_error(&mut socket, ErrorCode::InternalError, &format!("store: {e}")).await;
+                    send_error(
+                        &mut socket,
+                        ErrorCode::InternalError,
+                        &format!("store: {e}"),
+                    )
+                    .await;
                     return;
                 }
             };
             if state.hosts.contains_key(&allocated) {
-                send_error(&mut socket, ErrorCode::HostAlreadyRegistered, "host_id already in use").await;
+                send_error(
+                    &mut socket,
+                    ErrorCode::HostAlreadyRegistered,
+                    "host_id already in use",
+                )
+                .await;
                 return;
             }
             let (tx, rx) = mpsc::channel::<ServerMessage>(SEND_CHAN_CAP);
-            state.hosts.insert(allocated.clone(), HostEntry {
-                pubkey_b64,
-                tx: tx.clone(),
-                registered_at: Instant::now(),
-            });
+            state.hosts.insert(
+                allocated.clone(),
+                HostEntry {
+                    pubkey_b64,
+                    tx: tx.clone(),
+                    registered_at: Instant::now(),
+                },
+            );
             info!(host_id = %allocated, "register");
-            if send_message(&mut socket, &ServerMessage::Registered { host_id: allocated.clone() })
-                .await.is_err()
+            if send_message(
+                &mut socket,
+                &ServerMessage::Registered {
+                    host_id: allocated.clone(),
+                },
+            )
+            .await
+            .is_err()
             {
                 state.hosts.remove(&allocated);
                 return;
@@ -89,24 +117,31 @@ async fn handle_socket(mut socket: WebSocket, app: AppState) {
                 }
             };
             let session_id = uuid::Uuid::new_v4().to_string();
-            state.sessions.insert(session_id.clone(), crate::state::SessionEntry {
-                host_id: host_id.clone(),
-                host_tx: host_tx.clone(),
-                viewer_tx: viewer_tx.clone(),
-                created_at: Instant::now(),
-            });
+            state.sessions.insert(
+                session_id.clone(),
+                crate::state::SessionEntry {
+                    host_id: host_id.clone(),
+                    host_tx: host_tx.clone(),
+                    viewer_tx: viewer_tx.clone(),
+                    created_at: Instant::now(),
+                },
+            );
             info!(host_id = %host_id, session_id = %session_id, "connect");
 
-            let _ = host_tx.send(ServerMessage::SessionStart {
-                session_id: session_id.clone(),
-                role: prdt_signaling_proto::Role::Host,
-                peer_pubkey_b64: None,
-            }).await;
-            let _ = viewer_tx.send(ServerMessage::SessionStart {
-                session_id: session_id.clone(),
-                role: prdt_signaling_proto::Role::Viewer,
-                peer_pubkey_b64: Some(pubkey_b64),
-            }).await;
+            let _ = host_tx
+                .send(ServerMessage::SessionStart {
+                    session_id: session_id.clone(),
+                    role: prdt_signaling_proto::Role::Host,
+                    peer_pubkey_b64: None,
+                })
+                .await;
+            let _ = viewer_tx
+                .send(ServerMessage::SessionStart {
+                    session_id: session_id.clone(),
+                    role: prdt_signaling_proto::Role::Viewer,
+                    peer_pubkey_b64: Some(pubkey_b64),
+                })
+                .await;
 
             let timeout_state = state.clone();
             let timeout_sid = session_id.clone();
@@ -116,14 +151,18 @@ async fn handle_socket(mut socket: WebSocket, app: AppState) {
             tokio::spawn(async move {
                 tokio::time::sleep(session_timeout).await;
                 if timeout_state.sessions.remove(&timeout_sid).is_some() {
-                    let _ = timeout_host_tx.send(ServerMessage::Error {
-                        code: ErrorCode::InternalError,
-                        message: "session timeout".into(),
-                    }).await;
-                    let _ = timeout_viewer_tx.send(ServerMessage::Error {
-                        code: ErrorCode::InternalError,
-                        message: "session timeout".into(),
-                    }).await;
+                    let _ = timeout_host_tx
+                        .send(ServerMessage::Error {
+                            code: ErrorCode::InternalError,
+                            message: "session timeout".into(),
+                        })
+                        .await;
+                    let _ = timeout_viewer_tx
+                        .send(ServerMessage::Error {
+                            code: ErrorCode::InternalError,
+                            message: "session timeout".into(),
+                        })
+                        .await;
                     tracing::info!(session_id = %timeout_sid, "session_timeout");
                 }
             });
@@ -131,7 +170,12 @@ async fn handle_socket(mut socket: WebSocket, app: AppState) {
             viewer_loop(socket, state, session_id, viewer_rx).await;
         }
         _ => {
-            send_error(&mut socket, ErrorCode::ProtocolError, "first message must be register or connect").await;
+            send_error(
+                &mut socket,
+                ErrorCode::ProtocolError,
+                "first message must be register or connect",
+            )
+            .await;
         }
     }
 }
@@ -234,5 +278,12 @@ pub(crate) async fn send_message(socket: &mut WebSocket, m: &ServerMessage) -> R
 }
 
 pub(crate) async fn send_error(socket: &mut WebSocket, code: ErrorCode, message: &str) {
-    let _ = send_message(socket, &ServerMessage::Error { code, message: message.into() }).await;
+    let _ = send_message(
+        socket,
+        &ServerMessage::Error {
+            code,
+            message: message.into(),
+        },
+    )
+    .await;
 }

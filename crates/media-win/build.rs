@@ -1,7 +1,14 @@
 use std::env;
+#[allow(unused_imports)]
+// only used in #[cfg(target_os = "windows")] fns; pre-existing on master
 use std::path::PathBuf;
 
 fn main() {
+    // Register the custom cfgs unconditionally so the unexpected_cfgs lint
+    // doesn't complain on non-Windows targets (pre-existing; surfaced by L1.5a).
+    println!("cargo::rustc-check-cfg=cfg(prdt_nvdec_bindings)");
+    println!("cargo::rustc-check-cfg=cfg(prdt_nvenc_bindings)");
+
     // Only run on Windows.
     let target = env::var("TARGET").unwrap_or_default();
     if !target.contains("windows") {
@@ -11,14 +18,15 @@ fn main() {
     println!("cargo:rerun-if-env-changed=NV_CODEC_SDK_PATH");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rerun-if-changed=build.rs");
-    // Register the custom cfg we emit from generate_nvdec_bindings so the
-    // unexpected_cfgs lint doesn't complain on consumers.
-    println!("cargo::rustc-check-cfg=cfg(prdt_nvdec_bindings)");
 
-    generate_nvenc_bindings();
-    generate_nvdec_bindings();
+    #[cfg(target_os = "windows")]
+    {
+        generate_nvenc_bindings();
+        generate_nvdec_bindings();
+    }
 }
 
+#[cfg(target_os = "windows")]
 fn generate_nvenc_bindings() {
     let out_dir = env::var("OUT_DIR").unwrap();
     let out_path = PathBuf::from(&out_dir).join("nvenc_bindings.rs");
@@ -70,6 +78,7 @@ fn generate_nvenc_bindings() {
         .expect("bindgen failed");
 
     bindings.write_to_file(&out_path).expect("write bindings");
+    println!("cargo:rustc-cfg=prdt_nvenc_bindings");
 }
 
 /// Plan 2d: generate NVDEC (cuvid) bindings. Requires the NVIDIA Video
@@ -78,6 +87,7 @@ fn generate_nvenc_bindings() {
 /// includes. When CUDA_PATH is unset we emit empty stubs and the nvdec
 /// module compiles to a `NotAvailable` error path rather than failing
 /// the build outright — the host/viewer still build against MF decode.
+#[cfg(target_os = "windows")]
 fn generate_nvdec_bindings() {
     let out_dir = env::var("OUT_DIR").unwrap();
     let out_path = PathBuf::from(&out_dir).join("nvdec_bindings.rs");

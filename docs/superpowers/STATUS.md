@@ -131,12 +131,19 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
 - 合計 ~8 週分の作業を完了、Phase 4 完了
 
 #### B2. Phase 1 — Linux サポート
-- **状態**: 着手前。Windows-specific 部分(`media-win` / `input-win`)を Linux 等価実装に置換
-- **必要モジュール**:
-  - `media-linux`: PipeWire screencast capture、VA-API (intel/AMD) or NVENC (NVIDIA) encode、libav decode
-  - `input-linux`: evdev + uinput injection、X11/Wayland clipboard、virtual desktop (Wayland では複数モニタが API レベルで違う)
-- **ブロッカー**: Wayland のキャプチャはコンポジタ依存、screencast portal 経由のフレームレート制限あり
-- **見積もり**: 大(3-4 週)。OS-independent な `protocol`/`transport`/`crypto` はそのまま使える
+- **状態 (2026-05-09)**: **L0 + L1 platform crates + L1.5a host wiring + L1.5b viewer wiring 完了**。Linux↔Linux end-to-end smoke 可
+  - L0: traits 抽出 + skeleton crates + L0 follow-ups (master)
+  - L1: `prdt-media-linux` + `prdt-input-linux` 完全実装 + 29 unit tests + 4 ignored integration (`phase-l1-platform-crates-complete`)
+  - L1.5a (`phase-l1.5a-host-wiring-complete`): host `lib.rs` を `platform::*` 経由に rewire + Linux client が `prdt host` をルート
+  - **L1.5b (`phase-l1.5b-viewer-wiring-complete`)**: viewer `lib.rs` (2029 行) を `platform/{mod,win,linux,input_map}.rs` に分解。`LatestFrame`/`ViewerConsumer`/`ViewerRenderer` を `PlatformFrame`/`PlatformConsumer`/`PlatformRender` に rename + 平台別に分割。Linux 側は softbuffer + `prdt_media_linux::i420_to_bgra` で CPU 描画、`prdt_media_sw::Openh264Decoder` で SW H.264 decode。Linux client が `prdt connect` をルート。`crates/viewer/tests/linux_connect_smoke.rs` (`#[ignore]`、WSLg 必要) で viewer boot 検証 (1 passed)。`cargo check + clippy` 両ターゲット green。
+  - **L1.5b smoke walkthrough (2026-05-09)**: WSLg host + 実機 Wayland viewer で end-to-end 検証。**ウィンドウ表示 ✅** (softbuffer + winit + Wayland 統合動作確認)、handshake + frame 送信 wire 層 ✅。3 fix を smoke 中に発見・修正:
+    - `e69d199` media-linux: WSLg multi-monitor 7680×2160 が OpenH264 SW max 超 → 3840×2160 にクランプ
+    - `f02b706` host: WSLg で audio device 不在 → audio task が session ごとキャンセル → audio failure を非致命に
+    - `70857e0` viewer: Wayland の `wl_surface` は最初の buffer commit まで unmapped → `build_render` で初期黒 buffer を 1 回 commit
+  - **L1.5b smoke 既知制約** (L2 transport polish 候補): WSL2 → LAN UDP 高 bitrate (>5 Mbps) で大量 fragment 損失。viewer に `RequestIdr` 送信 path 未実装で IDR loss 後の自己回復無し。実機 Wayland 上でウィンドウは表示されるがフレーム中身は decode 失敗 (transport/IDR-recovery が L2 で要解決)
+  - **CI 配信**: `.github/workflows/release.yml` で Linux x86_64 binary を tag-trigger で release 化 (smoke-1, smoke-2 で運用検証済み)
+- **L2 候補**: Wayland portal capture / libei / wl-clipboard、VAAPI HW encode/decode、NVENC/NVDEC on Linux、cross-OS scancode normalization、multi-monitor non-zero-origin、cursor capture/合成、複数 distro 検証、`Cmd::Gui` Linux 対応、Linux viewer overlay child process、audio default-on on Linux、`prdt_input_win::RawInputCapturer::map_winit_mouse_button` cleanup、viewer cooperative shutdown (CancellationToken plumbing)、**transport robustness on lossy UDP (RequestIdr 自動再送、SPS/PPS repeat-with-IDR、IDR fragment FEC)**
+- **元の見積もり**: 大(3-4 週)。**実績 (L0 + L1 + L1.5a + L1.5b + smoke fixes)**: ~80%。残 20% (HW codec + Wayland portal + transport robustness + packaging) は L2/L3 へ
 
 ### **C. 計測 / 観測 系(blocker 解消用)**
 

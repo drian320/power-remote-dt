@@ -41,6 +41,12 @@ pub trait VideoProducer: Send {
 
     /// Update the target bitrate in bits per second. Honoured best-effort.
     fn set_target_bitrate(&mut self, bps: u32);
+
+    /// Return a short, stable identifier for the capture+encode backend in
+    /// use (e.g. `"nvenc-h265"`, `"openh264-sw"`, `"linux-x11shm-openh264"`).
+    /// Used for logging/metrics; must be `'static` so callers can record it
+    /// without cloning.
+    fn backend_name(&self) -> &'static str;
 }
 
 /// Accepts `EncodedFrame` on the viewer, decodes, and hands the decoded
@@ -70,5 +76,23 @@ mod tests {
             ConsumerError::Decode("MF_E_INVALIDMEDIATYPE".into()).to_string(),
             "decode: MF_E_INVALIDMEDIATYPE"
         );
+    }
+
+    #[test]
+    fn video_producer_trait_has_backend_name() {
+        struct Stub;
+        #[async_trait::async_trait]
+        impl VideoProducer for Stub {
+            async fn next_frame(&mut self) -> Result<EncodedFrame, ProducerError> {
+                unreachable!()
+            }
+            fn request_idr(&mut self) {}
+            fn set_target_bitrate(&mut self, _bps: u32) {}
+            fn backend_name(&self) -> &'static str {
+                "stub"
+            }
+        }
+        let s: Box<dyn VideoProducer> = Box::new(Stub);
+        assert_eq!(s.backend_name(), "stub");
     }
 }

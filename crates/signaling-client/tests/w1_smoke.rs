@@ -5,7 +5,9 @@
 
 use prdt_crypto::KeyPair;
 use prdt_protocol::{frame::Codec, MonitorRect};
-use prdt_signaling_client::{rendezvous_as_host, rendezvous_as_viewer, HostIdentity, RendezvousConfig};
+use prdt_signaling_client::{
+    rendezvous_as_host, rendezvous_as_viewer, HostIdentity, RendezvousConfig,
+};
 use prdt_signaling_server::{router, ServerConfig, ServerState};
 use prdt_transport::{
     host_handshake, viewer_handshake, CustomUdpTransport, HelloRequest, UdpTransportConfig,
@@ -38,21 +40,35 @@ async fn w1_smoke_signaling_noise_hello_ack_completes() {
     let host_url = signaling_url.clone();
     let host_fut = async move {
         let transport = Arc::new(
-            CustomUdpTransport::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap(), UdpTransportConfig::default())
-                .await
-                .expect("host bind"),
+            CustomUdpTransport::bind(
+                "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+                UdpTransportConfig::default(),
+            )
+            .await
+            .expect("host bind"),
         );
         let local = transport.local_addr().expect("host local_addr");
 
         let outcome = rendezvous_as_host(
-            RendezvousConfig { url: host_url, host_id: "w1-smoke".into(), timeout: Duration::from_secs(5), stun_url: None, turn_url: None, aggregation_window: std::time::Duration::from_millis(100) },
-            HostIdentity { pubkey_b64: host_pub_b64 },
+            RendezvousConfig {
+                url: host_url,
+                host_id: "w1-smoke".into(),
+                timeout: Duration::from_secs(5),
+                stun_url: None,
+                turn_url: None,
+                aggregation_window: std::time::Duration::from_millis(100),
+            },
+            HostIdentity {
+                pubkey_b64: host_pub_b64,
+            },
             local,
         )
         .await
         .expect("host rendezvous");
 
-        let cand_addrs: Vec<std::net::SocketAddr> = outcome.peer_candidates.iter()
+        let cand_addrs: Vec<std::net::SocketAddr> = outcome
+            .peer_candidates
+            .iter()
             .filter_map(|c| format!("{}:{}", c.ip, c.port).parse().ok())
             .collect();
         let _peer_addr = transport
@@ -86,21 +102,36 @@ async fn w1_smoke_signaling_noise_hello_ack_completes() {
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         let transport = Arc::new(
-            CustomUdpTransport::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap(), UdpTransportConfig::default())
-                .await
-                .expect("viewer bind"),
+            CustomUdpTransport::bind(
+                "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+                UdpTransportConfig::default(),
+            )
+            .await
+            .expect("viewer bind"),
         );
         let local = transport.local_addr().expect("viewer local_addr");
 
         let outcome = rendezvous_as_viewer(
-            RendezvousConfig { url: viewer_url, host_id: "w1-smoke".into(), timeout: Duration::from_secs(5), stun_url: None, turn_url: None, aggregation_window: std::time::Duration::from_millis(100) },
+            RendezvousConfig {
+                url: viewer_url,
+                host_id: "w1-smoke".into(),
+                timeout: Duration::from_secs(5),
+                stun_url: None,
+                turn_url: None,
+                aggregation_window: std::time::Duration::from_millis(100),
+            },
             local,
         )
         .await
         .expect("viewer rendezvous");
-        assert!(outcome.peer_pubkey_b64.is_some(), "viewer should receive host pubkey");
+        assert!(
+            outcome.peer_pubkey_b64.is_some(),
+            "viewer should receive host pubkey"
+        );
 
-        let cand_addrs: Vec<std::net::SocketAddr> = outcome.peer_candidates.iter()
+        let cand_addrs: Vec<std::net::SocketAddr> = outcome
+            .peer_candidates
+            .iter()
             .filter_map(|c| format!("{}:{}", c.ip, c.port).parse().ok())
             .collect();
         let _peer_addr = transport
@@ -117,7 +148,12 @@ async fn w1_smoke_signaling_noise_hello_ack_completes() {
         // Hello exchange
         let ack = viewer_handshake(
             &*transport,
-            &HelloRequest { req_width: 1920, req_height: 1080, req_fps: 60, codec: Codec::H265 },
+            &HelloRequest {
+                req_width: 1920,
+                req_height: 1080,
+                req_fps: 60,
+                codec: Codec::H265,
+            },
             Duration::from_millis(500),
             5,
         )

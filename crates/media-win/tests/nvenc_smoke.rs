@@ -3,7 +3,7 @@
 //! output NAL units have valid Annex-B start codes and the expected
 //! IDR cadence.
 
-#![cfg(windows)]
+#![cfg(all(windows, prdt_nvenc_bindings))]
 
 use prdt_media_win::{
     pick_default_adapter, synthetic::make_counter_texture, D3d11Device, NvencEncoder,

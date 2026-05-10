@@ -1,21 +1,41 @@
-//! Linux media backend — empty skeleton for L1.
+//! Linux media backend — XShm capture + OpenH264 SW encode/decode +
+//! VideoProducer adapter. See `docs/superpowers/specs/2026-05-09-l1-linux-poc-design.md`.
 //!
-//! This crate compiles to an empty library on non-Linux targets. On
-//! Linux it will provide screen-capture (X11 / xdg-desktop-portal +
-//! PipeWire) and encode/decode (VAAPI / NVENC Linux / software)
-//! implementations of `prdt_media_core` traits in L1+.
-//!
-//! L0 deliverable: crate exists and is wired into the workspace so
-//! the L1 implementer has a place to write code without restructuring
-//! the workspace mid-flight.
+//! The crate compiles to an empty library on non-Linux targets.
 
 #![cfg(target_os = "linux")]
 #![allow(dead_code)]
 
-// Intentionally empty in L0. L1 will add:
-//   pub mod x11_capture;
-//   pub mod portal_capture;
-//   pub mod vaapi_encode;
-//   pub mod nvenc_linux;
-//   pub mod ffmpeg_decode;
-//   pub mod core_adapter;  // impls of prdt_media_core traits
+pub mod core_adapter;
+pub mod error;
+pub mod frame;
+pub mod i420_to_bgra;
+pub mod linux_sw_producer;
+pub mod sw_pipeline;
+pub mod x11_capture;
+
+pub use error::LinuxMediaError;
+pub use frame::BgraFrame;
+
+/// Production wiring entry point — host calls this to obtain a boxed
+/// `VideoProducer` for the Linux SW path. Width/height come from the
+/// X server; the host need only pass bitrate + fps (and the
+/// `--encoder` flag selection, currently always SW on Linux).
+#[cfg(target_os = "linux")]
+pub fn build_video_producer(
+    bitrate_bps: u32,
+    fps: u32,
+) -> anyhow::Result<linux_sw_producer::LinuxSwProducer> {
+    use anyhow::Context as _;
+    let cap = x11_capture::X11ShmCapturer::new().context("X11ShmCapturer::new")?;
+    let enc = sw_pipeline::LinuxSwEncoder::new(cap.width(), cap.height(), bitrate_bps, fps)
+        .context("LinuxSwEncoder::new")?;
+    linux_sw_producer::LinuxSwProducer::new(cap, enc, fps).context("LinuxSwProducer::new")
+}
+
+/// Production wiring entry point — viewer calls this to obtain a SW
+/// decoder.
+#[cfg(target_os = "linux")]
+pub fn build_video_decoder() -> anyhow::Result<sw_pipeline::LinuxSwDecoder> {
+    sw_pipeline::LinuxSwDecoder::new().map_err(Into::into)
+}

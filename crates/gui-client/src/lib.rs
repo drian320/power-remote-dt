@@ -12,8 +12,10 @@
 mod app;
 
 use std::path::PathBuf;
+#[allow(unused_imports)] // used only in #[cfg(windows)] code; pre-existing on master
 use std::sync::{Arc, Mutex};
 
+#[allow(unused_imports)] // used only in #[cfg(windows)] code; pre-existing on master
 use prdt_gui_common::{install_jp_font, Config};
 
 /// Run the unified client GUI as a blocking call. Returns when the user

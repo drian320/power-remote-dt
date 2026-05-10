@@ -2,19 +2,30 @@
 //! resolutions × bitrates × decoders × fps and writes per-frame raw
 //! CSVs + a summary CSV.
 
-#![cfg(windows)]
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("prdt-bench-matrix is a Windows-only bench bin (NVENC/NVDEC via media-win).");
+    std::process::exit(1);
+}
 
+#[cfg(windows)]
 use std::path::PathBuf;
+#[cfg(windows)]
 use std::time::Duration;
 
+#[cfg(windows)]
 use anyhow::Context;
+#[cfg(windows)]
 use clap::Parser;
+#[cfg(windows)]
 use prdt_latency_bench::{
     aggregate, config_id, expand_matrix, full_pipeline, write_per_frame_csv, write_summary_csv,
     ConfigStats, ConsumerBackend, EncoderBackend, MatrixAxes,
 };
+#[cfg(windows)]
 use tracing::{info, warn};
 
+#[cfg(windows)]
 #[derive(Parser, Debug)]
 #[command(
     name = "prdt-bench-matrix",
@@ -55,6 +66,7 @@ struct Args {
     dry_run: bool,
 }
 
+#[cfg(windows)]
 fn parse_decoders(strs: &[String]) -> anyhow::Result<Vec<ConsumerBackend>> {
     strs.iter()
         .map(|s| match s.as_str() {
@@ -68,6 +80,7 @@ fn parse_decoders(strs: &[String]) -> anyhow::Result<Vec<ConsumerBackend>> {
         .collect()
 }
 
+#[cfg(windows)]
 fn parse_encoders(strs: &[String]) -> anyhow::Result<Vec<EncoderBackend>> {
     strs.iter()
         .map(|s| match s.as_str() {
@@ -81,10 +94,12 @@ fn parse_encoders(strs: &[String]) -> anyhow::Result<Vec<EncoderBackend>> {
         .collect()
 }
 
+#[cfg(windows)]
 fn heights_to_resolutions(heights: &[u32]) -> Vec<(u32, u32)> {
     heights.iter().map(|h| (h * 16 / 9, *h)).collect()
 }
 
+#[cfg(windows)]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();

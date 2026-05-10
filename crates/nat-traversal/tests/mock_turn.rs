@@ -32,13 +32,10 @@ async fn spawn_mock_turn(
                 _ => continue,
             };
             if req.class() == MessageClass::Indication && req.method() == SEND {
-                let Some(peer) = req.get_attribute::<XorPeerAddress>().map(|a| a.address())
-                else {
+                let Some(peer) = req.get_attribute::<XorPeerAddress>().map(|a| a.address()) else {
                     continue;
                 };
-                let Some(payload) =
-                    req.get_attribute::<Data>().map(|d| d.data().to_vec())
-                else {
+                let Some(payload) = req.get_attribute::<Data>().map(|d| d.data().to_vec()) else {
                     continue;
                 };
                 let mut resp = Message::<TurnAttribute>::new(
@@ -68,12 +65,8 @@ async fn spawn_mock_turn(
                     resp.add_attribute(TurnAttribute::from(
                         ErrorCode::new(401, "Unauthorized".to_string()).unwrap(),
                     ));
-                    resp.add_attribute(TurnAttribute::from(
-                        Realm::new(REALM.to_string()).unwrap(),
-                    ));
-                    resp.add_attribute(TurnAttribute::from(
-                        Nonce::new(NONCE.to_string()).unwrap(),
-                    ));
+                    resp.add_attribute(TurnAttribute::from(Realm::new(REALM.to_string()).unwrap()));
+                    resp.add_attribute(TurnAttribute::from(Nonce::new(NONCE.to_string()).unwrap()));
                     let mut enc = MessageEncoder::<TurnAttribute>::new();
                     let bytes = enc.encode_into_bytes(resp).unwrap();
                     let _ = socket.send_to(&bytes, src).await;
@@ -171,7 +164,10 @@ async fn send_indication_echoed_as_data_indication() {
     client.allocate(Duration::from_secs(3)).await.unwrap();
 
     let peer: SocketAddr = "198.51.100.77:33000".parse().unwrap();
-    client.send_indication(peer, b"hello-turn").await.expect("send_indication");
+    client
+        .send_indication(peer, b"hello-turn")
+        .await
+        .expect("send_indication");
 
     // Read raw bytes from our socket; should be a Data Indication.
     let mut buf = vec![0u8; 1500];
@@ -197,7 +193,8 @@ async fn turn_relay_socket_send_recv_roundtrip() {
     };
     let socket = std::sync::Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
     let relay = TurnRelaySocket::allocate_with_socket(socket, cfg)
-        .await.expect("allocate");
+        .await
+        .expect("allocate");
     let peer: SocketAddr = "198.51.100.99:44000".parse().unwrap();
     relay.ensure_permission(peer).await.expect("perm");
 

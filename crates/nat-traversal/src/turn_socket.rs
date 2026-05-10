@@ -94,7 +94,8 @@ impl TurnRelaySocket {
                         if ind.data.len() > buf.len() {
                             return Err(TurnError::Protocol(format!(
                                 "data too big for buf: {} > {}",
-                                ind.data.len(), buf.len()
+                                ind.data.len(),
+                                buf.len()
                             )));
                         }
                         let len = ind.data.len();
@@ -107,7 +108,9 @@ impl TurnRelaySocket {
             // Direct traffic — pass through.
             if n > buf.len() {
                 return Err(TurnError::Protocol(format!(
-                    "direct datagram too big for buf: {} > {}", n, buf.len()
+                    "direct datagram too big for buf: {} > {}",
+                    n,
+                    buf.len()
                 )));
             }
             buf[..n].copy_from_slice(&tmp[..n]);

@@ -19,19 +19,22 @@ async fn spawn_signaling_with_store(store: Arc<HostStore>) -> SocketAddr {
     addr
 }
 
-async fn register_raw(
-    addr: SocketAddr,
-    host_id: &str,
-    pubkey_b64: &str,
-) -> ServerMessage {
-    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/signal")).await.unwrap();
+async fn register_raw(addr: SocketAddr, host_id: &str, pubkey_b64: &str) -> ServerMessage {
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/signal"))
+        .await
+        .unwrap();
     let msg = ClientMessage::Register {
         host_id: host_id.into(),
         pubkey_b64: pubkey_b64.into(),
     };
-    ws.send(WsMessage::Text(serde_json::to_string(&msg).unwrap())).await.unwrap();
+    ws.send(WsMessage::Text(serde_json::to_string(&msg).unwrap()))
+        .await
+        .unwrap();
     let frame = ws.next().await.unwrap().unwrap();
-    let t = match frame { WsMessage::Text(s) => s, o => panic!("{o:?}") };
+    let t = match frame {
+        WsMessage::Text(s) => s,
+        o => panic!("{o:?}"),
+    };
     serde_json::from_str(&t).unwrap()
 }
 

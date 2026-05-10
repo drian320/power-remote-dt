@@ -5,7 +5,9 @@
 pub mod full_pipeline;
 
 #[cfg(windows)]
-pub use full_pipeline::{ConsumerBackend, EncoderBackend, FullPipelineConfig, RunStats, StageTimes};
+pub use full_pipeline::{
+    ConsumerBackend, EncoderBackend, FullPipelineConfig, RunStats, StageTimes,
+};
 
 /// Compute (p50, p90, p95, p99, p100) by sorting in place. Sorts the input.
 pub fn percentiles(lags_us: &mut [u64]) -> (u64, u64, u64, u64, u64) {
@@ -282,7 +284,6 @@ pub use matrix::{
     MatrixAxes,
 };
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,7 +474,9 @@ mod tests {
             lines[0]
         );
         assert!(
-            lines[1].starts_with("1080p60-30mbps-encnvenc-decmfdec,1920x1080,30,mfdec,nvenc,60,600,598,"),
+            lines[1].starts_with(
+                "1080p60-30mbps-encnvenc-decmfdec,1920x1080,30,mfdec,nvenc,60,600,598,"
+            ),
             "unexpected row: {}",
             lines[1]
         );

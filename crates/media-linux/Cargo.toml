@@ -10,4 +10,17 @@ path = "src/lib.rs"
 
 [dependencies]
 prdt-media-core = { path = "../media-core" }
+prdt-media-sw = { path = "../media-sw" }
 prdt-protocol = { path = "../protocol" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { workspace = true, features = ["shm"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["time", "rt", "macros"] }
+async-trait = "0.1"
+anyhow = "1"
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "time", "rt", "macros"] }

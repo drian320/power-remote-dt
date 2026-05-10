@@ -6,6 +6,8 @@
 //! Pure-CPU; no D3D11, no GPU. Runs on any platform that builds
 //! `prdt-media-sw` (currently any windows/linux x86_64 with a working
 //! C toolchain for the vendored OpenH264 source).
+// full_pipeline mod is gated to windows in lib.rs; pre-existing before L1.5a.
+#![cfg(windows)]
 
 use std::time::Duration;
 

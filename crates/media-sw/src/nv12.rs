@@ -89,12 +89,7 @@ impl openh264::formats::YUVSource for AsYuv<'_> {
 
 /// Convert BGRA8 (`bgra_stride` bytes per row) to packed I420 using
 /// BT.601 limited-range coefficients. Width and height must be even.
-pub fn bgra_to_i420(
-    bgra: &[u8],
-    width: u32,
-    height: u32,
-    bgra_stride: u32,
-) -> Result<I420Frame> {
+pub fn bgra_to_i420(bgra: &[u8], width: u32, height: u32, bgra_stride: u32) -> Result<I420Frame> {
     if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
         return Err(MediaSwError::InvalidFrame {
             reason: format!("dims must be even and nonzero, got {width}x{height}"),

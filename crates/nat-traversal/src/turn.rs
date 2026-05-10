@@ -9,9 +9,7 @@ use rand_core::{OsRng, RngCore};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use stun_codec::rfc5389::attributes::{
-    ErrorCode, MessageIntegrity, Nonce, Realm, Username,
-};
+use stun_codec::rfc5389::attributes::{ErrorCode, MessageIntegrity, Nonce, Realm, Username};
 use stun_codec::rfc5766::attributes::{
     Data, Lifetime, RequestedTransport, XorPeerAddress, XorRelayAddress,
 };
@@ -266,8 +264,7 @@ impl TurnClient {
             .clone()
             .ok_or_else(|| TurnError::Auth("no nonce".into()))?;
         let txn = random_transaction_id();
-        let mut req =
-            Message::<TurnAttribute>::new(MessageClass::Request, CREATE_PERMISSION, txn);
+        let mut req = Message::<TurnAttribute>::new(MessageClass::Request, CREATE_PERMISSION, txn);
         req.add_attribute(TurnAttribute::from(XorPeerAddress::new(peer)));
         let username = Username::new(self.config.username.clone())
             .map_err(|e| TurnError::Auth(format!("bad username: {e:?}")))?;
@@ -307,11 +304,7 @@ impl TurnClient {
 
     /// Wrap `data` in a Send Indication addressed to `peer` and send it to the
     /// TURN server. Send Indications are NOT authenticated per RFC 5766 §10.
-    pub async fn send_indication(
-        &self,
-        peer: SocketAddr,
-        data: &[u8],
-    ) -> Result<(), TurnError> {
+    pub async fn send_indication(&self, peer: SocketAddr, data: &[u8]) -> Result<(), TurnError> {
         let txn = random_transaction_id();
         let mut msg = Message::<TurnAttribute>::new(MessageClass::Indication, SEND, txn);
         msg.add_attribute(TurnAttribute::from(XorPeerAddress::new(peer)));

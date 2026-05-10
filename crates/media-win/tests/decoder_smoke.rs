@@ -5,7 +5,7 @@
 //! pulls out NV12 output. Verifies the output buffer is of the expected
 //! NV12 size.
 
-#![cfg(windows)]
+#![cfg(all(windows, prdt_nvenc_bindings))]
 
 use prdt_media_win::{
     mf::H265Decoder, pick_default_adapter, synthetic::make_counter_texture, D3d11Device,

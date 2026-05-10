@@ -48,16 +48,12 @@ fn map_err(err: MediaError) -> EncodeError {
     match &err {
         // MediaError::UnsupportedFormat semantically matches
         // EncodeError::FormatMismatch.
-        MediaError::UnsupportedFormat { .. } => {
-            EncodeError::FormatMismatch(err.to_string())
-        }
+        MediaError::UnsupportedFormat { .. } => EncodeError::FormatMismatch(err.to_string()),
         // MediaError::DeviceRemoved means TDR / driver crash / hot-unplug —
         // the entire D3D11 device and every resource bound to it are gone.
         // Surfacing this as EncodeError::DeviceLost lets host wiring
         // distinguish "recreate device" from "transient encode failure".
-        MediaError::DeviceRemoved { .. } => {
-            EncodeError::DeviceLost(err.to_string())
-        }
+        MediaError::DeviceRemoved { .. } => EncodeError::DeviceLost(err.to_string()),
         _ => EncodeError::Backend(err.to_string()),
     }
 }

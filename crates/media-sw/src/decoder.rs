@@ -3,9 +3,9 @@
 //! convert to NV12 via `i420_to_nv12` for upload into a D3D11 NV12
 //! texture (the chosen renderer reuse path — see plan §Phase 3).
 
-use openh264::OpenH264API;
 use openh264::decoder::{Decoder, DecoderConfig};
 use openh264::formats::YUVSource;
+use openh264::OpenH264API;
 
 use crate::error::{MediaSwError, Result};
 use crate::nv12::I420Frame;
@@ -26,10 +26,7 @@ impl Openh264Decoder {
 }
 
 impl SwH264Decoder for Openh264Decoder {
-    fn decode(
-        &mut self,
-        nal_units: &[u8],
-    ) -> std::result::Result<Option<I420Frame>, MediaSwError> {
+    fn decode(&mut self, nal_units: &[u8]) -> std::result::Result<Option<I420Frame>, MediaSwError> {
         // OpenH264's Decoder::decode accepts the entire access unit at
         // once; we don't need to split into individual NALs.
         let yuv = match self

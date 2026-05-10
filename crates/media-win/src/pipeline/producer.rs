@@ -9,7 +9,10 @@ use crate::d3d11::D3d11Device;
 use crate::dxgi::{AcquiredFrame, DesktopDuplication, OutputInfo};
 use crate::encoder_trait::{Hevc265Encoder, HwHevcEncoder};
 use crate::error::MediaError;
-use crate::nvenc::{NvencEncoder, NvencEncoderConfig};
+#[cfg(prdt_nvenc_bindings)]
+use crate::nvenc::NvencEncoder;
+#[cfg(prdt_nvenc_bindings)]
+use crate::nvenc::NvencEncoderConfig;
 
 pub struct DxgiNvencProducer {
     dev: D3d11Device,
@@ -25,6 +28,11 @@ pub struct DxgiNvencProducer {
 impl DxgiNvencProducer {
     /// Create a producer for the given monitor. `bitrate_bps` is the NVENC
     /// target CBR bitrate.
+    ///
+    /// Only available when the NVIDIA Video Codec SDK was present at build
+    /// time (`prdt_nvenc_bindings` cfg). Use `with_encoder` to construct a
+    /// producer with a pre-built encoder (e.g. MF backend) regardless.
+    #[cfg(prdt_nvenc_bindings)]
     pub fn new(
         dev: &D3d11Device,
         output: &OutputInfo,
@@ -182,5 +190,9 @@ impl VideoProducer for DxgiNvencProducer {
     fn set_target_bitrate(&mut self, _bps: u32) {
         // Phase 0 Plan 2c: bitrate is fixed at construction time. Reconfigure
         // via NvencEncoder::reconfigure will be wired in Plan 3+.
+    }
+
+    fn backend_name(&self) -> &'static str {
+        self.encoder.backend_name()
     }
 }

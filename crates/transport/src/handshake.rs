@@ -145,8 +145,7 @@ pub async fn host_handshake<T: Transport>(
                         ));
                     }
                     if !supported.contains(&codec) {
-                        let reason =
-                            format!("host does not support {}", codec.name());
+                        let reason = format!("host does not support {}", codec.name());
                         transport
                             .send_control(ControlMessage::HelloReject {
                                 reason: reason.clone(),
@@ -334,10 +333,9 @@ mod tests {
 
         // The viewer must observe a HelloRejected error within 100ms once
         // the host sends HelloReject — i.e. no waiting for the retry budget.
-        let v_outcome =
-            tokio::time::timeout(Duration::from_millis(100), viewer_task)
-                .await
-                .expect("viewer must observe rejection within 100ms");
+        let v_outcome = tokio::time::timeout(Duration::from_millis(100), viewer_task)
+            .await
+            .expect("viewer must observe rejection within 100ms");
         let v_err = v_outcome.unwrap().unwrap_err();
         match v_err {
             TransportError::HelloRejected(reason) => {

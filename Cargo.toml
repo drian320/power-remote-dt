@@ -104,6 +104,11 @@ semver = "1"
 # Phase 4 G5 (crash reporter timestamps)
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 
+# L1: Linux backend
+x11rb = "0.13"
+softbuffer = "0.4"
+nix = "0.29"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

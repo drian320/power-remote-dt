@@ -32,17 +32,23 @@ async fn spawn_mock_turn(username: &'static str, relayed: SocketAddr) -> SocketA
     tokio::spawn(async move {
         let mut buf = [0u8; 1500];
         loop {
-            let Ok((n, src)) = socket.recv_from(&mut buf).await else { break };
+            let Ok((n, src)) = socket.recv_from(&mut buf).await else {
+                break;
+            };
             let mut decoder = MessageDecoder::<TurnAttribute>::new();
             let req = match decoder.decode_from_bytes(&buf[..n]) {
                 Ok(Ok(m)) => m,
                 _ => continue,
             };
-            if req.method() != ALLOCATE || req.class() != MessageClass::Request { continue; }
+            if req.method() != ALLOCATE || req.class() != MessageClass::Request {
+                continue;
+            }
             let has_mi = req.get_attribute::<MessageIntegrity>().is_some();
             if !has_mi {
                 let mut resp = Message::<TurnAttribute>::new(
-                    MessageClass::ErrorResponse, ALLOCATE, req.transaction_id(),
+                    MessageClass::ErrorResponse,
+                    ALLOCATE,
+                    req.transaction_id(),
                 );
                 resp.add_attribute(TurnAttribute::from(
                     ErrorCode::new(401, "Unauthorized".into()).unwrap(),
@@ -53,10 +59,17 @@ async fn spawn_mock_turn(username: &'static str, relayed: SocketAddr) -> SocketA
                 let bytes = enc.encode_into_bytes(resp).unwrap();
                 let _ = socket.send_to(&bytes, src).await;
             } else {
-                if req.get_attribute::<Username>().map(|u| u.name().to_string())
-                    != Some(username.to_string()) { continue; }
+                if req
+                    .get_attribute::<Username>()
+                    .map(|u| u.name().to_string())
+                    != Some(username.to_string())
+                {
+                    continue;
+                }
                 let mut resp = Message::<TurnAttribute>::new(
-                    MessageClass::SuccessResponse, ALLOCATE, req.transaction_id(),
+                    MessageClass::SuccessResponse,
+                    ALLOCATE,
+                    req.transaction_id(),
                 );
                 resp.add_attribute(TurnAttribute::from(XorRelayAddress::new(relayed)));
                 resp.add_attribute(TurnAttribute::from(Lifetime::from_u32(600)));
@@ -101,18 +114,29 @@ async fn relay_candidate_flows_through_signaling() {
                     turn_url: Some(turn),
                     aggregation_window: Duration::from_millis(300),
                 },
-                HostIdentity { pubkey_b64: "HPK".into() },
+                HostIdentity {
+                    pubkey_b64: "HPK".into(),
+                },
                 "127.0.0.1:40400".parse().unwrap(),
-            ).await
+            )
+            .await
         }
     });
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let (mut viewer_ws, _) = tokio_tungstenite::connect_async(format!("ws://{sig_addr}/signal")).await.unwrap();
-    viewer_ws.send(WsMessage::Text(serde_json::to_string(
-        &ClientMessage::Connect { host_id: "w4".into() }
-    ).unwrap())).await.unwrap();
+    let (mut viewer_ws, _) = tokio_tungstenite::connect_async(format!("ws://{sig_addr}/signal"))
+        .await
+        .unwrap();
+    viewer_ws
+        .send(WsMessage::Text(
+            serde_json::to_string(&ClientMessage::Connect {
+                host_id: "w4".into(),
+            })
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
 
     let _ = viewer_ws.next().await.unwrap().unwrap(); // SessionStart
 
@@ -120,16 +144,20 @@ async fn relay_candidate_flows_through_signaling() {
     let mut saw_relay_from_turn = false;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     while tokio::time::Instant::now() < deadline && (!saw_host || !saw_relay_from_turn) {
-        let frame = match tokio::time::timeout(
-            deadline - tokio::time::Instant::now(),
-            viewer_ws.next(),
-        ).await {
-            Ok(Some(Ok(f))) => f,
-            _ => break,
+        let frame =
+            match tokio::time::timeout(deadline - tokio::time::Instant::now(), viewer_ws.next())
+                .await
+            {
+                Ok(Some(Ok(f))) => f,
+                _ => break,
+            };
+        let t = match frame {
+            WsMessage::Text(s) => s,
+            _ => continue,
         };
-        let t = match frame { WsMessage::Text(s) => s, _ => continue };
         let m: prdt_signaling_proto::ServerMessage = match serde_json::from_str(&t) {
-            Ok(m) => m, Err(_) => continue,
+            Ok(m) => m,
+            Err(_) => continue,
         };
         if let prdt_signaling_proto::ServerMessage::PeerCandidate { candidate, .. } = m {
             match candidate.typ {
@@ -151,5 +179,8 @@ async fn relay_candidate_flows_through_signaling() {
     let _ = host_task.await;
 
     assert!(saw_host, "Host candidate missing");
-    assert!(saw_relay_from_turn, "Relay candidate (from TURN allocate) missing");
+    assert!(
+        saw_relay_from_turn,
+        "Relay candidate (from TURN allocate) missing"
+    );
 }

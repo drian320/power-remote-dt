@@ -1,7 +1,4 @@
-#![cfg(windows)]
-
-mod dxgi_sw_producer;
-mod encoder_dispatch;
+mod platform;
 mod status;
 mod watchdog;
 
@@ -13,22 +10,16 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use platform::{
+    build_video_producer, clipboard_sequence_number, dispatch_input, output_display_name,
+    pick_default_output, read_clipboard_text, virtual_desktop_rect, write_clipboard_text,
+    MAX_CLIPBOARD_BYTES,
+};
 use prdt_audio::{LoopbackCapture, OpusEncoder};
 use prdt_crypto::KeyPair;
 use prdt_filetransfer::{send_file, TransferReceiver, DEFAULT_MAX_TRANSFER_BYTES};
-use prdt_input_win::{
-    clipboard_sequence_number, read_clipboard_text, virtual_desktop_rect, write_clipboard_text,
-    SendInputInjector, MAX_CLIPBOARD_BYTES,
-};
-use prdt_media_sw::{Openh264Encoder, Openh264EncoderConfig};
-use prdt_media_win::{
-    dxgi::enumerate_outputs_for_adapter, pick_default_adapter, D3d11Device, DxgiNvencProducer,
-    HwHevcEncoder, MfH265Encoder, NvencEncoder, NvencEncoderConfig,
-};
-use prdt_protocol::{wire::AudioPacket, Codec, ControlMessage, MonitorRect, VideoProducer};
+use prdt_protocol::{wire::AudioPacket, Codec, ControlMessage, MonitorRect};
 
-use dxgi_sw_producer::DxgiSwProducer;
-use encoder_dispatch::VideoEncoderBackend;
 use prdt_transport::{
     host_handshake, now_monotonic_us, CustomUdpTransport, ReceivedMessage, Transport,
     UdpTransportConfig,
@@ -197,26 +188,11 @@ pub async fn run_host(
         keypair.public.to_base64()
     );
 
-    let adapter = pick_default_adapter().context("no GPU adapter")?;
-    let dev = D3d11Device::create(&adapter).context("D3D11 device")?;
-    let outputs = enumerate_outputs_for_adapter(&adapter).context("outputs")?;
-    if outputs.is_empty() {
-        anyhow::bail!("no display outputs found on adapter");
-    }
-    let output = outputs
-        .get(args.monitor as usize)
-        .with_context(|| {
-            format!(
-                "no output at index {} (available: 0..{})",
-                args.monitor,
-                outputs.len()
-            )
-        })?
-        .clone();
+    let output = pick_default_output(&args).context("pick_default_output")?;
 
     info!(
         monitor = args.monitor,
-        device_name = %output.device_name,
+        device_name = output_display_name(&output),
         bitrate_mbps = args.bitrate_mbps,
         encoder = %args.encoder,
         "host starting"
@@ -347,68 +323,68 @@ pub async fn run_host(
                 "silent-allow enabled; skipping consent gate"
             );
         } else {
-        let known = match prdt_crypto::KnownPeers::load_or_default(&args.known_peers_file) {
-            Ok(k) => k,
-            Err(e) => {
-                warn!(?e, path=?args.known_peers_file, "failed to load known-peer-ids; rejecting session");
-                continue;
-            }
-        };
-        if !known.contains(&peer_pubkey) {
-            let decision = match &consent_tx {
-                Some(tx) => {
-                    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-                    let req = ConsentRequest {
-                        peer_pubkey,
-                        responder: resp_tx,
-                    };
-                    if tx.send(req).is_err() {
-                        warn!("consent channel closed; rejecting unknown peer");
-                        continue;
-                    }
-                    match resp_rx.await {
-                        Ok(d) => d,
-                        Err(_) => {
-                            warn!("consent responder dropped; rejecting unknown peer");
-                            continue;
-                        }
-                    }
-                }
-                None => {
-                    warn!(
-                        peer=%peer_pubkey.to_base64(),
-                        "unknown peer connected and no consent channel (headless without --silent-allow); rejecting"
-                    );
+            let known = match prdt_crypto::KnownPeers::load_or_default(&args.known_peers_file) {
+                Ok(k) => k,
+                Err(e) => {
+                    warn!(?e, path=?args.known_peers_file, "failed to load known-peer-ids; rejecting session");
                     continue;
                 }
             };
-            match decision {
-                ConsentDecision::Reject => {
-                    info!(peer=%peer_pubkey.to_base64(), "consent rejected; resetting session");
-                    continue;
-                }
-                ConsentDecision::Accept => {
-                    // Persist so future connections from this peer are silent.
-                    let mut updated = known;
-                    updated.insert(peer_pubkey, peer_pubkey.to_base64());
-                    if let Err(e) = updated.save(&args.known_peers_file) {
+            if !known.contains(&peer_pubkey) {
+                let decision = match &consent_tx {
+                    Some(tx) => {
+                        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+                        let req = ConsentRequest {
+                            peer_pubkey,
+                            responder: resp_tx,
+                        };
+                        if tx.send(req).is_err() {
+                            warn!("consent channel closed; rejecting unknown peer");
+                            continue;
+                        }
+                        match resp_rx.await {
+                            Ok(d) => d,
+                            Err(_) => {
+                                warn!("consent responder dropped; rejecting unknown peer");
+                                continue;
+                            }
+                        }
+                    }
+                    None => {
                         warn!(
-                            ?e,
-                            path=?args.known_peers_file,
-                            "failed to persist known-peer-ids; session continues but won't be remembered"
-                        );
-                    } else {
-                        info!(
                             peer=%peer_pubkey.to_base64(),
-                            path=?args.known_peers_file,
-                            "added peer to known-peer-ids"
+                            "unknown peer connected and no consent channel (headless without --silent-allow); rejecting"
                         );
+                        continue;
+                    }
+                };
+                match decision {
+                    ConsentDecision::Reject => {
+                        info!(peer=%peer_pubkey.to_base64(), "consent rejected; resetting session");
+                        continue;
+                    }
+                    ConsentDecision::Accept => {
+                        // Persist so future connections from this peer are silent.
+                        let mut updated = known;
+                        updated.insert(peer_pubkey, peer_pubkey.to_base64());
+                        if let Err(e) = updated.save(&args.known_peers_file) {
+                            warn!(
+                                ?e,
+                                path=?args.known_peers_file,
+                                "failed to persist known-peer-ids; session continues but won't be remembered"
+                            );
+                        } else {
+                            info!(
+                                peer=%peer_pubkey.to_base64(),
+                                path=?args.known_peers_file,
+                                "added peer to known-peer-ids"
+                            );
+                        }
                     }
                 }
+            } else {
+                info!(peer=%peer_pubkey.to_base64(), "peer is in known-peer-ids; auto-accepted");
             }
-        } else {
-            info!(peer=%peer_pubkey.to_base64(), "peer is in known-peer-ids; auto-accepted");
-        }
         } // end of !silent_allow branch
 
         // Wait for Hello, send HelloAck. Session ID is random per host start so
@@ -421,19 +397,46 @@ pub async fn run_host(
             u64::from_le_bytes(buf)
         };
         let bitrate_bps = args.bitrate_mbps.saturating_mul(1_000_000);
+        let vd_rect = virtual_desktop_rect();
+        // On Windows the per-monitor rect is the selected DXGI output;
+        // on Linux (single-monitor only per spec §3) it's the virtual
+        // desktop rect.
+        #[cfg(windows)]
         let monitor_rect = MonitorRect::new(
             output.desktop_rect.left,
             output.desktop_rect.top,
             output.desktop_rect.right,
             output.desktop_rect.bottom,
         );
-        let vd_rect = virtual_desktop_rect();
+        #[cfg(target_os = "linux")]
+        let monitor_rect = {
+            // Match the X11 capturer's clamp (encoder max 3840x2160 on
+            // multi-monitor WSLg). Without this the viewer scales mouse
+            // input to a rect bigger than what the host actually captures.
+            use prdt_media_linux::x11_capture::{MAX_CAPTURE_H, MAX_CAPTURE_W};
+            let clipped_right = vd_rect
+                .left
+                .saturating_add(((vd_rect.right - vd_rect.left) as u32).min(MAX_CAPTURE_W) as i32);
+            let clipped_bottom = vd_rect
+                .top
+                .saturating_add(((vd_rect.bottom - vd_rect.top) as u32).min(MAX_CAPTURE_H) as i32);
+            MonitorRect::new(vd_rect.left, vd_rect.top, clipped_right, clipped_bottom)
+        };
         info!(
             monitor = ?monitor_rect,
             virtual_desktop = ?vd_rect,
             "advertising desktop geometry to viewer",
         );
-        let host_supported = supported_codecs_for_encoder_arg(&args.encoder, &adapter);
+        // Codec advertisement: Windows queries the GPU adapter to decide
+        // between HW (H.265) and SW (H.264); Linux is SW-only (H.264).
+        #[cfg(windows)]
+        let host_supported = {
+            let adapter = prdt_media_win::pick_default_adapter()
+                .context("pick_default_adapter for codec advertisement")?;
+            crate::platform::win::supported_codecs_for_encoder_arg(&args.encoder, &adapter)
+        };
+        #[cfg(target_os = "linux")]
+        let host_supported: Vec<Codec> = vec![Codec::H264];
         let req = match host_handshake(
             &*transport,
             session_id,
@@ -455,21 +458,22 @@ pub async fn run_host(
         info!(?req, "handshake complete");
 
         // Build producer after handshake so the viewer's negotiated codec
-        // selects between the HW (H.265) and SW (H.264) paths.
-        let width = (output.desktop_rect.right - output.desktop_rect.left) as u32;
-        let height = (output.desktop_rect.bottom - output.desktop_rect.top) as u32;
-        let backend =
-            pick_encoder(&args.encoder, &adapter, &dev, width, height, bitrate_bps, req.codec)
-                .context("encoder")?;
-        info!(backend = backend.backend_name(), codec = req.codec.name(), "encoder ready");
-        let mut producer: Box<dyn VideoProducer> = match backend {
-            VideoEncoderBackend::Hw(enc) => Box::new(
-                DxgiNvencProducer::with_encoder(&dev, &output, enc).context("hw producer")?,
-            ),
-            VideoEncoderBackend::SwH264(enc) => Box::new(
-                DxgiSwProducer::with_encoder(&dev, &output, *enc).context("sw producer")?,
-            ),
-        };
+        // selects between the HW (H.265) and SW (H.264) paths. The factory
+        // internally creates the GPU device (Windows) or pipewire stream
+        // (Linux) and derives width/height from `output`.
+        let mut producer = build_video_producer(
+            &args.encoder,
+            &output,
+            bitrate_bps,
+            60, // TODO(L2): thread fps from Args::fps when --fps flag is added
+            req.codec,
+        )
+        .context("build_video_producer")?;
+        info!(
+            backend = producer.backend_name(),
+            codec = req.codec.name(),
+            "encoder ready"
+        );
 
         let cancel = CancellationToken::new();
         let last_keepalive = Arc::new(AtomicU64::new(now_monotonic_us()));
@@ -553,13 +557,14 @@ pub async fn run_host(
 
         let audio_transport = Arc::clone(&transport);
         let cancel_audio = cancel.clone();
-        let cancel_audio_propagate = cancel.clone();
+        // Audio is optional. Its failure must NOT cancel the session — video +
+        // input must continue. (Pre-L1.5b this code propagated cancel; that
+        // killed every WSLg session because ALSA has no default device there.)
         let audio_task = tokio::spawn(async move {
             let mut encoder = match OpusEncoder::new() {
                 Ok(e) => e,
                 Err(e) => {
-                    warn!(?e, "opus encoder init");
-                    cancel_audio_propagate.cancel();
+                    warn!(?e, "opus encoder init failed; continuing without audio");
                     return;
                 }
             };
@@ -588,12 +593,11 @@ pub async fn run_host(
                                     warn!(?e, "send_audio");
                                 }
                             }
-                            None => break, // channel closed, exit task
+                            None => break, // channel closed (e.g. capture init failed); exit silently
                         }
                     }
                 }
             }
-            cancel_audio_propagate.cancel();
         });
 
         // Shared "last clipboard text we received from peer" — used by the
@@ -603,7 +607,6 @@ pub async fn run_host(
 
         // Spawn input injection loop.
         let rx_input = Arc::clone(&transport);
-        let injector = SendInputInjector::new();
         let input_last_remote = Arc::clone(&last_remote_clipboard);
         let cancel_input = cancel.clone();
         let cancel_input_propagate = cancel.clone();
@@ -616,8 +619,8 @@ pub async fn run_host(
                     msg = rx_input.recv() => {
                         match msg {
                             Ok(ReceivedMessage::Input(ev)) => {
-                                if let Err(e) = injector.inject(ev) {
-                                    warn!(?e, "inject error");
+                                if let Err(e) = dispatch_input(ev) {
+                                    warn!(error = %e, "inject error");
                                 }
                             }
                             Ok(ReceivedMessage::Control(ControlMessage::KeepAlive)) => {
@@ -811,6 +814,7 @@ pub fn run_main() -> Result<()> {
     run_with_args(Args::parse())
 }
 
+#[cfg(windows)]
 pub fn run_with_args(args: Args) -> Result<()> {
     if args.headless {
         return run_cli(args);
@@ -825,9 +829,19 @@ pub fn run_with_args(args: Args) -> Result<()> {
     prdt_gui_host::run_host_gui(env!("CARGO_PKG_NAME"), args.config.clone(), run_host_fn)
 }
 
+/// On Linux the host is CLI-only for L1.5a — the GUI shell (`prdt-gui-host`)
+/// is a Windows-only dependency and the Linux GUI is deferred to L2 per
+/// the plan §3 scope. `run_with_args` therefore always invokes the
+/// headless CLI path on Linux regardless of `args.headless`.
+#[cfg(target_os = "linux")]
+pub fn run_with_args(args: Args) -> Result<()> {
+    run_cli(args)
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn run_cli(args: Args) -> Result<()> {
     init_tracing();
+    #[cfg(windows)]
     prdt_gui_common::install_panic_hook(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
     run_host(args, None, None, tokio_util::sync::CancellationToken::new()).await
 }
@@ -840,140 +854,15 @@ fn init_tracing() {
         .init();
 }
 
-/// Resolve `--encoder` to a concrete backend. The `auto` selector picks
-/// nvenc > mf > openh264. When the resolved backend is HW, the negotiated
-/// codec must be H.265; when SW, must be H.264. The handshake layer rejects
-/// mismatches before we get here, so a mismatch in this fn is a programmer
-/// error and we bail.
-fn pick_encoder(
-    args_encoder: &str,
-    adapter: &prdt_media_win::AdapterInfo,
-    dev: &D3d11Device,
-    width: u32,
-    height: u32,
-    bitrate_bps: u32,
-    negotiated_codec: Codec,
-) -> anyhow::Result<VideoEncoderBackend> {
-    let choice = resolve_encoder_choice(args_encoder, adapter, negotiated_codec);
-    match choice {
-        "nvenc" => {
-            if negotiated_codec != Codec::H265 {
-                anyhow::bail!(
-                    "encoder=nvenc but negotiated codec={:?}; handshake layer should have rejected this",
-                    negotiated_codec
-                );
-            }
-            let cfg = NvencEncoderConfig {
-                width,
-                height,
-                fps_numerator: 60,
-                fps_denominator: 1,
-                bitrate_bps,
-                gop_length: 60,
-            };
-            let enc = NvencEncoder::new(dev, &cfg).context("NvencEncoder::new")?;
-            Ok(VideoEncoderBackend::Hw(HwHevcEncoder::from(enc)))
-        }
-        "mf" => {
-            if negotiated_codec != Codec::H265 {
-                anyhow::bail!(
-                    "encoder=mf but negotiated codec={:?}; handshake layer should have rejected this",
-                    negotiated_codec
-                );
-            }
-            let cfg = NvencEncoderConfig {
-                width,
-                height,
-                fps_numerator: 60,
-                fps_denominator: 1,
-                bitrate_bps,
-                gop_length: 60,
-            };
-            let enc = MfH265Encoder::new(dev, &cfg).context("MfH265Encoder::new")?;
-            Ok(VideoEncoderBackend::Hw(HwHevcEncoder::from(enc)))
-        }
-        "openh264" => {
-            if negotiated_codec != Codec::H264 {
-                anyhow::bail!(
-                    "encoder=openh264 but negotiated codec={:?}; handshake layer should have rejected this",
-                    negotiated_codec
-                );
-            }
-            let cfg = Openh264EncoderConfig {
-                width,
-                height,
-                target_bitrate_bps: bitrate_bps,
-                max_fps: 60.0,
-            };
-            let enc = Openh264Encoder::new(cfg).context("Openh264Encoder::new")?;
-            Ok(VideoEncoderBackend::SwH264(Box::new(enc)))
-        }
-        other => anyhow::bail!("unknown --encoder {other:?} (valid: auto, nvenc, mf, openh264)"),
-    }
-}
-
-/// Apply the `auto` selection policy: nvenc > mf > openh264. Plan §Phase 2:
-/// "auto selection order: nvenc > mf > openh264". The viewer-requested
-/// codec narrows the choice — if the viewer wants H.264 we pick openh264
-/// regardless of GPU vendor (HW H.264 encode is not implemented in this
-/// repo and is out of scope for the software-codec tag).
-fn resolve_encoder_choice<'a>(
-    args_encoder: &'a str,
-    adapter: &prdt_media_win::AdapterInfo,
-    negotiated_codec: Codec,
-) -> &'a str {
-    if args_encoder == "auto" {
-        match negotiated_codec {
-            Codec::H264 => "openh264",
-            Codec::H265 => {
-                if adapter.is_nvidia() {
-                    "nvenc"
-                } else {
-                    "mf"
-                }
-            }
-            // Any future codec falls through to nvenc/mf which will then
-            // bail with a clear "encoder=X but negotiated codec=Y" error.
-            _ => {
-                if adapter.is_nvidia() {
-                    "nvenc"
-                } else {
-                    "mf"
-                }
-            }
-        }
-    } else {
-        args_encoder
-    }
-}
-
-/// What we advertise in HelloAck `host_supported_codecs` based on the
-/// `--encoder` flag. An explicit choice locks us to a single codec; `auto`
-/// advertises the full HW set so the viewer's preference wins.
-fn supported_codecs_for_encoder_arg(
-    args_encoder: &str,
-    adapter: &prdt_media_win::AdapterInfo,
-) -> Vec<Codec> {
-    match args_encoder {
-        "openh264" => vec![Codec::H264],
-        "nvenc" | "mf" => vec![Codec::H265],
-        // "auto" or anything else — caller resolves to a HW backend
-        // (nvenc/mf), both of which emit H.265. media-sw is built into
-        // this binary, so SW H.264 is also reachable; advertise both
-        // so a viewer that explicitly asks for H.264 (with `--codec
-        // h264`) can still negotiate without forcing the operator to
-        // pass `--encoder openh264` on the host side.
-        _ => {
-            let _ = adapter;
-            vec![Codec::H265, Codec::H264]
-        }
-    }
-}
-
-#[cfg(test)]
+// Tests below exercise Windows-specific encoder/adapter surfaces
+// (`pick_default_adapter`, `supported_codecs_for_encoder_arg`) and so are
+// gated to Windows. The cross-platform unit tests live in
+// `platform/mod.rs` and `platform/linux.rs`.
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
     use clap::Parser;
+    use platform::win::supported_codecs_for_encoder_arg;
 
     /// `--encoder openh264 --headless` must parse cleanly even on a
     /// machine with no NVENC SDK / no NVIDIA GPU. Pre-mortem #1 from

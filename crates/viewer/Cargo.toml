@@ -41,5 +41,16 @@ serde_json = { workspace = true }
 dirs = { workspace = true }
 thiserror = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+prdt-media-linux = { path = "../media-linux" }
+prdt-input-linux = { path = "../input-linux" }
+prdt-media-sw = { path = "../media-sw" }
+softbuffer = "0.4"
+bytemuck = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+dirs = { workspace = true }
+thiserror = { workspace = true }
+
 [dev-dependencies]
 tempfile = "3"

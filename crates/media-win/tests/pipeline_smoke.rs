@@ -1,7 +1,7 @@
 //! End-to-end pipeline smoke test: `DxgiNvencProducer` to encoded bytes to
 //! `MfD3d11Consumer` to decoded NV12 bytes.
 
-#![cfg(windows)]
+#![cfg(all(windows, prdt_nvenc_bindings))]
 
 use prdt_media_win::{
     dxgi::enumerate_outputs_for_adapter, pick_default_adapter, D3d11Device, DxgiNvencProducer,

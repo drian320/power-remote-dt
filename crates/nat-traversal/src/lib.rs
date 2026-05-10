@@ -8,5 +8,7 @@ pub mod turn_socket;
 
 pub use error::StunError;
 pub use stun::learn_public_addr;
-pub use turn::{try_decode_data_indication, DataIndication, TurnAttribute, TurnClient, TurnConfig, TurnError};
+pub use turn::{
+    try_decode_data_indication, DataIndication, TurnAttribute, TurnClient, TurnConfig, TurnError,
+};
 pub use turn_socket::TurnRelaySocket;

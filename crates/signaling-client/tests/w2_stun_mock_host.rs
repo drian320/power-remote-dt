@@ -10,9 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use stun_codec::rfc5389::attributes::XorMappedAddress;
 use stun_codec::rfc5389::methods::BINDING;
-use stun_codec::{
-    define_attribute_enums, Message, MessageClass, MessageDecoder, MessageEncoder,
-};
+use stun_codec::{define_attribute_enums, Message, MessageClass, MessageDecoder, MessageEncoder};
 use tokio::net::UdpSocket;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use url::Url;
@@ -30,13 +28,18 @@ async fn spawn_stun_mock(report_addr: SocketAddr) -> SocketAddr {
     tokio::spawn(async move {
         let mut buf = [0u8; 512];
         loop {
-            let Ok((n, src)) = socket.recv_from(&mut buf).await else { break };
+            let Ok((n, src)) = socket.recv_from(&mut buf).await else {
+                break;
+            };
             let mut dec = MessageDecoder::<Attribute>::new();
-            let Ok(Ok(req)) = dec.decode_from_bytes(&buf[..n]) else { continue };
+            let Ok(Ok(req)) = dec.decode_from_bytes(&buf[..n]) else {
+                continue;
+            };
             if req.class() != MessageClass::Request || req.method() != BINDING {
                 continue;
             }
-            let mut resp = Message::new(MessageClass::SuccessResponse, BINDING, req.transaction_id());
+            let mut resp =
+                Message::new(MessageClass::SuccessResponse, BINDING, req.transaction_id());
             resp.add_attribute(Attribute::from(XorMappedAddress::new(report_addr)));
             let mut enc = MessageEncoder::<Attribute>::new();
             let bytes = enc.encode_into_bytes(resp).unwrap();
@@ -75,17 +78,28 @@ async fn host_sends_both_host_and_srflx_when_stun_url_given() {
                 turn_url: None,
                 aggregation_window: std::time::Duration::from_millis(100),
             },
-            HostIdentity { pubkey_b64: "HPK".into() },
+            HostIdentity {
+                pubkey_b64: "HPK".into(),
+            },
             "127.0.0.1:40100".parse().unwrap(),
-        ).await
+        )
+        .await
     });
 
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let (mut viewer_ws, _) = tokio_tungstenite::connect_async(format!("ws://{sig_addr}/signal")).await.unwrap();
-    viewer_ws.send(WsMessage::Text(serde_json::to_string(
-        &ClientMessage::Connect { host_id: "h1".into() }
-    ).unwrap())).await.unwrap();
+    let (mut viewer_ws, _) = tokio_tungstenite::connect_async(format!("ws://{sig_addr}/signal"))
+        .await
+        .unwrap();
+    viewer_ws
+        .send(WsMessage::Text(
+            serde_json::to_string(&ClientMessage::Connect {
+                host_id: "h1".into(),
+            })
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
 
     let _ = viewer_ws.next().await.unwrap().unwrap();
 
@@ -93,14 +107,19 @@ async fn host_sends_both_host_and_srflx_when_stun_url_given() {
     let mut got_srflx = None::<Candidate>;
     for _ in 0..2 {
         let frame = viewer_ws.next().await.unwrap().unwrap();
-        let t = match frame { WsMessage::Text(s) => s, o => panic!("{o:?}") };
+        let t = match frame {
+            WsMessage::Text(s) => s,
+            o => panic!("{o:?}"),
+        };
         let m: prdt_signaling_proto::ServerMessage = serde_json::from_str(&t).unwrap();
         match m {
-            prdt_signaling_proto::ServerMessage::PeerCandidate { candidate, .. } => match candidate.typ {
-                CandidateType::Host => got_host = Some(candidate),
-                CandidateType::Srflx => got_srflx = Some(candidate),
-                _ => panic!("unexpected typ: {:?}", candidate.typ),
-            },
+            prdt_signaling_proto::ServerMessage::PeerCandidate { candidate, .. } => {
+                match candidate.typ {
+                    CandidateType::Host => got_host = Some(candidate),
+                    CandidateType::Srflx => got_srflx = Some(candidate),
+                    _ => panic!("unexpected typ: {:?}", candidate.typ),
+                }
+            }
             other => panic!("unexpected: {other:?}"),
         }
     }
