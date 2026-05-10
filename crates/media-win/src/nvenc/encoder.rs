@@ -498,4 +498,72 @@ mod tests {
             &frame.nal_bytes[..8.min(frame.nal_bytes.len())]
         );
     }
+
+    /// HEVC NAL type extractor. nal_unit_type = (byte >> 1) & 0x3F.
+    fn hevc_nal_types(stream: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i + 3 < stream.len() {
+            let is4 = i + 4 <= stream.len()
+                && stream[i] == 0
+                && stream[i + 1] == 0
+                && stream[i + 2] == 0
+                && stream[i + 3] == 1;
+            let is3 = !is4 && stream[i] == 0 && stream[i + 1] == 0 && stream[i + 2] == 1;
+            let skip = if is4 {
+                4
+            } else if is3 {
+                3
+            } else {
+                i += 1;
+                continue;
+            };
+            let hp = i + skip;
+            if hp < stream.len() {
+                out.push((stream[hp] >> 1) & 0x3F);
+            }
+            i += skip;
+        }
+        out
+    }
+
+    #[test]
+    #[cfg(prdt_nvenc_bindings)]
+    #[ignore = "requires NVENC GPU. Run on Windows CI: \
+                cargo test -p prdt-media-win -- nvenc::encoder::tests::second_idr_carries_sps_pps --ignored"]
+    fn second_idr_carries_sps_pps() {
+        // HEVC: VPS=32, SPS=33, PPS=34, IDR_W_RADL=19.
+        let dev = D3d11Device::create_default().expect("D3D11");
+        let cfg = NvencEncoderConfig {
+            width: 320,
+            height: 240,
+            fps_numerator: 30,
+            fps_denominator: 1,
+            bitrate_bps: 2_000_000,
+            gop_length: 30,
+        };
+        let mut enc = NvencEncoder::new(&dev, &cfg).expect("NvencEncoder");
+        let tex = D3d11Texture::new_default(&dev, 320, 240, crate::d3d11::TextureFormat::Bgra8)
+            .expect("texture");
+
+        // 1st IDR.
+        let ef1 = enc.encode(&tex, true, 0).expect("1st IDR");
+        assert!(ef1.is_keyframe);
+
+        // P-frame.
+        let _ef2 = enc.encode(&tex, false, 33_333).expect("P");
+
+        // 2nd IDR.
+        let ef3 = enc.encode(&tex, true, 66_667).expect("2nd IDR");
+        assert!(ef3.is_keyframe, "2nd IDR must be keyframe");
+        let types = hevc_nal_types(&ef3.nal_bytes);
+        assert!(
+            types.contains(&33),
+            "2nd IDR missing HEVC SPS (33): {types:?}"
+        );
+        assert!(
+            types.contains(&34),
+            "2nd IDR missing HEVC PPS (34): {types:?}"
+        );
+    }
 }

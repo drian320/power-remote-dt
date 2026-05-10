@@ -121,6 +121,9 @@ impl InitParams {
         params.enablePTD = 1; // Picture-Type Decision by NVENC
         params.tuningInfo = ffi::NV_ENC_TUNING_INFO::NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY;
         params.encodeConfig = &mut *config as *mut _;
+        // Emit VPS+SPS+PPS with every IDR access unit (NVENC SDK 13, nvEncodeAPI.h).
+        // Value 1 = always prepend parameter sets to IDR NALs.
+        params.enableRepeatSPSPPS = 1;
 
         InitParams { params, config }
     }
