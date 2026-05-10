@@ -1357,6 +1357,22 @@ fn spawn_worker_tasks(
             let mut timeouts = 0u64;
             let mut idr_req = IdrRequester::new();
             const IDR_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(250);
+            let try_send_idr_request =
+                |idr_req: &mut IdrRequester, transport: &Arc<CustomUdpTransport>| {
+                    if idr_req.try_take(std::time::Instant::now(), IDR_COOLDOWN) {
+                        let ctrl_transport = Arc::clone(transport);
+                        tokio::spawn(async move {
+                            if let Err(e) = ctrl_transport
+                                .send_control(ControlMessage::RequestIdr)
+                                .await
+                            {
+                                tracing::warn!(?e, "send RequestIdr failed");
+                            } else {
+                                tracing::debug!("viewer sent RequestIdr (loss detected)");
+                            }
+                        });
+                    }
+                };
             loop {
                 let recv_result = match tokio::time::timeout(
                     std::time::Duration::from_secs(1),
@@ -1371,6 +1387,7 @@ fn spawn_worker_tasks(
                         if !purged.is_empty() {
                             idr_req.mark();
                         }
+                        try_send_idr_request(&mut idr_req, &recv_transport);
                         info!(
                             frames_received = frame_count,
                             textures_decoded = tex_count,
@@ -1446,6 +1463,7 @@ fn spawn_worker_tasks(
                             if let Err(e) = submit_result {
                                 warn!(error = %e, seq, is_kf, nal_len, "consumer.submit error");
                                 idr_req.mark();
+                                try_send_idr_request(&mut idr_req, &recv_transport);
                                 continue;
                             }
                             let frame_opt: Option<PlatformFrame> = match &mut *c {
@@ -1499,19 +1517,7 @@ fn spawn_worker_tasks(
                         }
 
                         // Rate-limited RequestIdr send. Fires when loss detected (purge or decode error).
-                        if idr_req.try_take(std::time::Instant::now(), IDR_COOLDOWN) {
-                            let ctrl_transport = Arc::clone(&recv_transport);
-                            tokio::spawn(async move {
-                                if let Err(e) = ctrl_transport
-                                    .send_control(ControlMessage::RequestIdr)
-                                    .await
-                                {
-                                    tracing::warn!(?e, "send RequestIdr failed");
-                                } else {
-                                    tracing::debug!("viewer sent RequestIdr (loss detected)");
-                                }
-                            });
-                        }
+                        try_send_idr_request(&mut idr_req, &recv_transport);
                     }
                     Ok(ReceivedMessage::Control(ControlMessage::Bye)) => {
                         info!("host sent Bye");
