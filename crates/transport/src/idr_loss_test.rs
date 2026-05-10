@@ -71,8 +71,8 @@ fn idr_fragment_loss_detected_by_purge() {
     asm.set_timeout(Duration::from_millis(5));
 
     let idr = make_idr_frame(0, 800); // 800 bytes → 4 source chunks (k=4, padded)
-    // Drop 3 of 4 source chunks → only 3 chunks received (1 source + 2 parity)
-    // which is less than k=4 required for FEC recovery.
+                                      // Drop 3 of 4 source chunks → only 3 chunks received (1 source + 2 parity)
+                                      // which is less than k=4 required for FEC recovery.
     feed_with_drops(&mut asm, &fec, &idr, &[0, 1, 2]);
 
     // No frame should have completed.

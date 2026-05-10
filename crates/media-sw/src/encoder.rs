@@ -208,7 +208,10 @@ mod tests {
 
         // 2nd IDR — THIS is what this test is for.
         let ef3 = enc.encode(&frame, true, 66_667).expect("2nd IDR");
-        assert!(ef3.is_keyframe, "2nd encode with force_idr=true must be keyframe");
+        assert!(
+            ef3.is_keyframe,
+            "2nd encode with force_idr=true must be keyframe"
+        );
 
         let types = nal_unit_types(&ef3.nal_units);
         assert!(

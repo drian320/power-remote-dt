@@ -1921,18 +1921,30 @@ mod tests {
     fn idr_requester_cooldown() {
         let mut r = IdrRequester::new();
         // Initially no pending request → try_take returns false.
-        assert!(!r.try_take(std::time::Instant::now(), std::time::Duration::from_millis(250)));
+        assert!(!r.try_take(
+            std::time::Instant::now(),
+            std::time::Duration::from_millis(250)
+        ));
 
         // Mark pending, then try_take immediately → should return true (first request, no prior).
         r.mark();
-        assert!(r.try_take(std::time::Instant::now(), std::time::Duration::from_millis(250)));
+        assert!(r.try_take(
+            std::time::Instant::now(),
+            std::time::Duration::from_millis(250)
+        ));
 
         // try_take consumed the pending flag; second call immediately after → false (cooldown).
         r.mark();
-        assert!(!r.try_take(std::time::Instant::now(), std::time::Duration::from_millis(250)));
+        assert!(!r.try_take(
+            std::time::Instant::now(),
+            std::time::Duration::from_millis(250)
+        ));
 
         // After sleeping past cooldown, try_take succeeds again.
         std::thread::sleep(std::time::Duration::from_millis(260));
-        assert!(r.try_take(std::time::Instant::now(), std::time::Duration::from_millis(250)));
+        assert!(r.try_take(
+            std::time::Instant::now(),
+            std::time::Duration::from_millis(250)
+        ));
     }
 }
