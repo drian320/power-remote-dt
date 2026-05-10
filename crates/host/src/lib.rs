@@ -481,6 +481,11 @@ pub async fn run_host(
         // video loop reads+clears it before each encode call.
         // Mirrors last_keepalive: Arc<AtomicU64> (same task-safety pattern).
         let force_idr_flag = Arc::new(AtomicBool::new(false));
+        // L3 adaptive bitrate channel: control loop forwards viewer's
+        // SetBitrate target_bps; video loop drains to latest before each
+        // next_frame() and calls producer.set_target_bitrate(). Unbounded
+        // because messages are tiny u32s at ~1 Hz, far below memory pressure.
+        let (bitrate_tx, mut bitrate_rx) = tokio::sync::mpsc::unbounded_channel::<u32>();
 
         // Spawn video loop. `handshake_complete_at` anchors the first-frame-latency
         // measurement (Phase 4 acceptance: ≤ 500ms max-of-20 cold-start).
@@ -498,6 +503,15 @@ pub async fn run_host(
                 tokio::select! {
                     _ = cancel_video.cancelled() => break,
                     _ = async {
+                        // L3: drain bitrate channel to newest, apply to encoder.
+                        let mut latest_bps: Option<u32> = None;
+                        while let Ok(bps) = bitrate_rx.try_recv() {
+                            latest_bps = Some(bps);
+                        }
+                        if let Some(bps) = latest_bps {
+                            producer.set_target_bitrate(bps);
+                            info!(target_bps = bps, "applied viewer-requested bitrate");
+                        }
                         if video_force_idr.swap(false, Ordering::AcqRel) {
                             producer.request_idr();
                             info!("viewer requested IDR; producer.request_idr() called");
@@ -672,6 +686,12 @@ pub async fn run_host(
                             Ok(ReceivedMessage::Control(ControlMessage::RequestIdr)) => {
                                 info!("viewer requested IDR; setting force_idr for next encode");
                                 input_force_idr.store(true, Ordering::Release);
+                            }
+                            Ok(ReceivedMessage::Control(ControlMessage::SetBitrate {
+                                target_bps,
+                            })) => {
+                                info!(target_bps, "viewer requested bitrate change");
+                                let _ = bitrate_tx.send(target_bps);
                             }
                             Ok(ReceivedMessage::Control(msg)) => {
                                 let _ = ft_rx.handle(msg);
