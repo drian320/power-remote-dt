@@ -352,7 +352,8 @@ fn configure_rate_control(
 ) -> Result<(), MediaError> {
     use windows::Win32::Media::MediaFoundation::{
         CODECAPI_AVEncCommonMaxBitRate, CODECAPI_AVEncCommonMeanBitRate,
-        CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncMPVGOPSize, ICodecAPI,
+        CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncMPVGOPSize,
+        CODECAPI_AVEncVideoForceKeyFrame, ICodecAPI,
     };
     // windows-rs 0.58 exposes From<u32> for windows::core::VARIANT (VT_UI4).
     // ICodecAPI::SetValue takes *const windows_core::VARIANT.
@@ -384,6 +385,16 @@ fn configure_rate_control(
         codec_api
             .SetValue(&CODECAPI_AVEncMPVGOPSize, &var_u32(gop))
             .map_err(|e| MediaError::Other(format!("SetValue GOPSize: {e}")))?;
+
+        // Request that parameter sets (VPS+SPS+PPS for HEVC, SPS+PPS for H.264)
+        // be emitted with every IDR access unit. CODECAPI_AVEncVideoForceKeyFrame
+        // value=1 instructs the encoder to treat the *next* sample as a full
+        // access point with inline headers. For "always" behavior we also rely on
+        // MFSampleExtension_CleanPoint being set on each IDR sample in encode().
+        // If the MFT does not support this codec property, SetValue returns
+        // E_NOTIMPL, which we silently ignore (degraded-mode: headers only on
+        // first IDR, viewer-side SPS/PPS cache is the fallback).
+        let _ = codec_api.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &var_u32(1));
     }
     Ok(())
 }
@@ -509,5 +520,83 @@ fn wrap_d3d11_in_sample(
             .SetSampleTime((timestamp_us * 10) as i64)
             .map_err(|e| MediaError::Other(format!("SetSampleTime: {e}")))?;
         Ok(sample)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::d3d11::{D3d11Device, TextureFormat};
+    use crate::nvenc::NvencEncoderConfig;
+
+    /// NAL-type extractor for HEVC Annex-B streams. HEVC NAL type occupies
+    /// bits [9:15] of the first two bytes (nal_unit_type = (byte1 >> 1) & 0x3F).
+    fn hevc_nal_types(stream: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i + 3 < stream.len() {
+            let is_4byte =
+                stream[i] == 0 && stream[i + 1] == 0 && stream[i + 2] == 0 && stream[i + 3] == 1;
+            let is_3byte = stream[i] == 0 && stream[i + 1] == 0 && stream[i + 2] == 1 && !is_4byte;
+            let skip = if is_4byte {
+                4
+            } else if is_3byte {
+                3
+            } else {
+                i += 1;
+                continue;
+            };
+            let hdr_pos = i + skip;
+            if hdr_pos < stream.len() {
+                let nal_type = (stream[hdr_pos] >> 1) & 0x3F;
+                out.push(nal_type);
+            }
+            i += skip;
+        }
+        out
+    }
+
+    #[test]
+    #[ignore = "requires D3D11 + HEVC HW encoder MFT. Run on Windows CI: \
+                cargo test -p prdt-media-win --test mf_encoder -- second_idr_carries_sps_pps --ignored"]
+    fn second_idr_carries_sps_pps() {
+        // HEVC NAL types: VPS=32, SPS=33, PPS=34, IDR slice=19 or 20.
+        let dev = D3d11Device::create_default().expect("D3D11 device");
+        let cfg = NvencEncoderConfig {
+            width: 320,
+            height: 240,
+            fps_numerator: 30,
+            fps_denominator: 1,
+            bitrate_bps: 2_000_000,
+            gop_length: 30,
+        };
+        let mut enc = MfH265Encoder::new(&dev, &cfg).expect("MF encoder");
+
+        // Create a minimal BGRA D3D11 texture filled with black.
+        let tex = D3d11Texture::new_default(&dev, cfg.width, cfg.height, TextureFormat::Bgra8)
+            .expect("texture");
+
+        // 1st IDR.
+        let ef1 = enc.encode(&tex, true, 0).expect("1st IDR");
+        let types1 = hevc_nal_types(&ef1.nal_bytes);
+        // SPS=33, PPS=34 must appear in first IDR.
+        assert!(types1.contains(&33), "1st IDR missing SPS: {types1:?}");
+        assert!(types1.contains(&34), "1st IDR missing PPS: {types1:?}");
+
+        // P-frame.
+        let _ef2 = enc.encode(&tex, false, 33_333).expect("P-frame");
+
+        // 2nd IDR.
+        let ef3 = enc.encode(&tex, true, 66_667).expect("2nd IDR");
+        let types3 = hevc_nal_types(&ef3.nal_bytes);
+        assert!(
+            types3.contains(&33),
+            "2nd IDR must carry SPS (HEVC type 33); got: {types3:?}"
+        );
+        assert!(
+            types3.contains(&34),
+            "2nd IDR must carry PPS (HEVC type 34); got: {types3:?}"
+        );
+        assert!(ef3.is_keyframe, "2nd IDR must be keyframe");
     }
 }

@@ -23,3 +23,6 @@ pub use udp::{
     now_monotonic_us, CustomUdpTransport, UdpTransportConfig, DEFAULT_HANDSHAKE_TIMEOUT,
     PROBE_RETRY_COUNT, PROBE_RETRY_INTERVAL,
 };
+
+#[cfg(test)]
+mod idr_loss_test;

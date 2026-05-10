@@ -19,7 +19,7 @@ use crate::traits::SwH264Encoder;
 
 use openh264::encoder::{
     BitRate, Complexity, Encoder, EncoderConfig, FrameRate, FrameType, Profile, RateControlMode,
-    UsageType,
+    SpsPpsStrategy, UsageType,
 };
 use openh264::{OpenH264API, Timestamp};
 
@@ -64,7 +64,8 @@ impl Openh264Encoder {
             .num_threads(0)
             .max_frame_rate(FrameRate::from_hz(cfg.max_fps))
             .bitrate(BitRate::from_bps(cfg.target_bitrate_bps))
-            .skip_frames(false);
+            .skip_frames(false)
+            .sps_pps_strategy(SpsPpsStrategy::SpsPpsListing);
 
         let inner = Encoder::with_api_config(api, oh_cfg)
             .map_err(|e| MediaSwError::openh264("Encoder::with_api_config", e))?;
@@ -182,6 +183,49 @@ mod tests {
             i += 1;
         }
         out
+    }
+
+    #[test]
+    fn second_idr_carries_sps_pps() {
+        // Verify that after switching to SpsPpsListing, every IDR access unit
+        // carries SPS (7) + PPS (8) + IDR slice (5) NAL units — not just the first.
+        let cfg = Openh264EncoderConfig {
+            width: 320,
+            height: 240,
+            target_bitrate_bps: 1_000_000,
+            max_fps: 30.0,
+        };
+        let mut enc = Openh264Encoder::new(cfg).expect("encoder");
+        let frame = make_test_frame(320, 240, 128);
+
+        // 1st IDR — the existing test already covers this.
+        let ef1 = enc.encode(&frame, true, 0).expect("1st IDR");
+        assert!(ef1.is_keyframe);
+
+        // P-frame (no force_idr).
+        let ef2 = enc.encode(&frame, false, 33_333).expect("P-frame");
+        let _ = ef2; // we don't assert SPS/PPS here
+
+        // 2nd IDR — THIS is what this test is for.
+        let ef3 = enc.encode(&frame, true, 66_667).expect("2nd IDR");
+        assert!(
+            ef3.is_keyframe,
+            "2nd encode with force_idr=true must be keyframe"
+        );
+
+        let types = nal_unit_types(&ef3.nal_units);
+        assert!(
+            types.contains(&7),
+            "2nd IDR must carry SPS (type 7); got: {types:?}"
+        );
+        assert!(
+            types.contains(&8),
+            "2nd IDR must carry PPS (type 8); got: {types:?}"
+        );
+        assert!(
+            types.contains(&5),
+            "2nd IDR must carry IDR slice (type 5); got: {types:?}"
+        );
     }
 
     #[test]
