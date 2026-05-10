@@ -4,7 +4,7 @@ mod watchdog;
 
 use std::fs;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -477,12 +477,17 @@ pub async fn run_host(
 
         let cancel = CancellationToken::new();
         let last_keepalive = Arc::new(AtomicU64::new(now_monotonic_us()));
+        // Shared flag: control loop sets this when viewer requests an IDR;
+        // video loop reads+clears it before each encode call.
+        // Mirrors last_keepalive: Arc<AtomicU64> (same task-safety pattern).
+        let force_idr_flag = Arc::new(AtomicBool::new(false));
 
         // Spawn video loop. `handshake_complete_at` anchors the first-frame-latency
         // measurement (Phase 4 acceptance: ≤ 500ms max-of-20 cold-start).
         let tx_video = Arc::clone(&transport);
         let cancel_video = cancel.clone();
         let cancel_video_propagate = cancel.clone();
+        let video_force_idr = Arc::clone(&force_idr_flag);
         let handshake_complete_at = std::time::Instant::now();
         let video = tokio::spawn(async move {
             let mut frames_sent = 0u64;
@@ -493,6 +498,10 @@ pub async fn run_host(
                 tokio::select! {
                     _ = cancel_video.cancelled() => break,
                     _ = async {
+                        if video_force_idr.swap(false, Ordering::AcqRel) {
+                            producer.request_idr();
+                            info!("viewer requested IDR; producer.request_idr() called");
+                        }
                         match producer.next_frame().await {
                             Ok(frame) => {
                                 if !first_frame_logged {
@@ -611,6 +620,7 @@ pub async fn run_host(
         let cancel_input = cancel.clone();
         let cancel_input_propagate = cancel.clone();
         let last_ka_input = Arc::clone(&last_keepalive);
+        let input_force_idr = Arc::clone(&force_idr_flag);
         let input = tokio::spawn(async move {
             let mut ft_rx = TransferReceiver::new(FILE_RECV_DIR, DEFAULT_MAX_TRANSFER_BYTES);
             loop {
@@ -658,6 +668,10 @@ pub async fn run_host(
                                     present_p99_us,
                                     "viewer latency report",
                                 );
+                            }
+                            Ok(ReceivedMessage::Control(ControlMessage::RequestIdr)) => {
+                                info!("viewer requested IDR; setting force_idr for next encode");
+                                input_force_idr.store(true, Ordering::Release);
                             }
                             Ok(ReceivedMessage::Control(msg)) => {
                                 let _ = ft_rx.handle(msg);
