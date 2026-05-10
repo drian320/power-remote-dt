@@ -230,14 +230,14 @@ pub struct Args {
     /// the viewer will not send `ControlMessage::SetBitrate` to the host
     /// and the host's encoder will run at its CLI-configured bitrate for
     /// the entire session. Use for A/B regression comparisons.
-    #[arg(long, default_value_t = false)]
+    #[arg(long)]
     pub no_adaptive_bitrate: bool,
 
     /// Hint to the controller about the host's max bitrate, in Mbps. Used
     /// as the upper clamp for AIMD. If you don't know it, leave the
     /// default — the controller will start at this value and never exceed
     /// it. Should match the host's `--bitrate-mbps`.
-    #[arg(long, default_value_t = 30u32)]
+    #[arg(long, default_value_t = 30u32, value_parser = clap::value_parser!(u32).range(1..=4000))]
     pub bitrate_mbps: u32,
 }
 
@@ -985,6 +985,7 @@ pub fn run_with_args(
         viewer_kp,
         args.no_adaptive_bitrate,
         args.bitrate_mbps.saturating_mul(1_000_000),
+        Arc::new(std::sync::atomic::AtomicU64::new(0)),
     );
 
     // Build the event loop + app.
@@ -1039,6 +1040,7 @@ fn spawn_worker_tasks(
     viewer_kp: KeyPair,
     no_adaptive_bitrate: bool,
     max_bitrate_bps: u32,
+    purged_since_tick: Arc<std::sync::atomic::AtomicU64>,
 ) {
     handle.clone().spawn(async move {
         // CLI --bind supplies the local UDP bind (default 0.0.0.0:0). We only
@@ -1363,6 +1365,7 @@ fn spawn_worker_tasks(
         let recv_decoder = Arc::clone(&audio_decoder);
         let recv_audio_tx = audio_pcm_tx;
         let recv_ft_dir = recv_dir.clone();
+        let purged_since_tick_recv = Arc::clone(&purged_since_tick);
         let recv_task = tokio::spawn(async move {
             info!("recv_task started");
             let mut ft_rx = TransferReceiver::new(recv_ft_dir, DEFAULT_MAX_TRANSFER_BYTES);
@@ -1402,7 +1405,12 @@ fn spawn_worker_tasks(
                     Err(_) => {
                         timeouts += 1;
                         let purged = recv_transport.purge_assembler().await;
-                        if !purged.is_empty() {
+                        let purged_n = purged.len() as u64;
+                        if purged_n > 0 {
+                            purged_since_tick_recv.fetch_add(
+                                purged_n,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
                             idr_req.mark();
                         }
                         try_send_idr_request(&mut idr_req, &recv_transport);
@@ -1677,6 +1685,7 @@ fn spawn_worker_tasks(
             prdt_transport::bitrate_control::BitrateController::new(cfg)
         };
         let bitrate_transport = Arc::clone(&transport);
+        let purged_since_tick_latency = Arc::clone(&purged_since_tick);
         let latency_task = tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(1));
             ticker.tick().await; // fire first tick immediately; skip it
@@ -1724,32 +1733,46 @@ fn spawn_worker_tasks(
                 }
 
                 // L3: adaptive bitrate step.
-                let purged = bitrate_transport.purge_assembler().await;
-                let lost = purged.len() as u64;
+                // recv_task is the sole owner of purge_assembler(); we
+                // read its accumulated count via an atomic swap to avoid
+                // the double-purge race that would silence IDR detection.
+                let lost = purged_since_tick_latency
+                    .swap(0, std::sync::atomic::Ordering::Relaxed);
                 let curr_total_samples = snap
                     .present
                     .map(|p| p.samples as u64)
                     .unwrap_or(last_total_samples);
                 let delta_total = curr_total_samples.saturating_sub(last_total_samples);
+                // Always update baseline so it is ready when present arrives.
                 last_total_samples = curr_total_samples;
                 let total_window = delta_total.saturating_add(lost);
-                bitrate_controller.observe(lost, total_window);
-                bitrate_controller.aimd_step(std::time::Instant::now());
-                bitrate_controller.reset_window();
-                if bitrate_controller.should_send() {
-                    let target_bps = bitrate_controller.target_bps();
-                    let msg = ControlMessage::SetBitrate { target_bps };
-                    match bitrate_transport.send_control(msg).await {
-                        Ok(()) => {
-                            bitrate_controller.mark_sent();
-                            info!(
-                                target_bps,
-                                lost_in_window = lost,
-                                total_in_window = total_window,
-                                "L3 sent SetBitrate"
-                            );
+                // L3 warmup guard: skip controller until at least one present
+                // sample has been observed or we have a non-zero baseline.
+                // Without this, tick-1 connection-setup purges (lost > 0) with
+                // no present samples (delta_total = 0) yield total_window =
+                // lost, which the controller reads as 100% loss and fires an
+                // immediate multiplicative-decrease before any real frames are
+                // decoded.
+                let has_baseline = snap.present.is_some() || last_total_samples > 0;
+                if has_baseline {
+                    bitrate_controller.observe(lost, total_window);
+                    bitrate_controller.aimd_step(std::time::Instant::now());
+                    bitrate_controller.reset_window();
+                    if bitrate_controller.should_send() {
+                        let target_bps = bitrate_controller.target_bps();
+                        let msg = ControlMessage::SetBitrate { target_bps };
+                        match bitrate_transport.send_control(msg).await {
+                            Ok(()) => {
+                                bitrate_controller.mark_sent();
+                                info!(
+                                    target_bps,
+                                    lost_in_window = lost,
+                                    total_in_window = total_window,
+                                    "L3 sent SetBitrate"
+                                );
+                            }
+                            Err(e) => warn!(?e, "L3 send SetBitrate failed"),
                         }
-                        Err(e) => warn!(?e, "L3 send SetBitrate failed"),
                     }
                 }
 
