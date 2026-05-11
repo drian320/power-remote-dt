@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use prdt_gui_common::t;
+use prdt_protocol::PermissionSet;
 
 use crate::ipc::{self, StatsPayload};
 
@@ -69,6 +70,9 @@ impl eframe::App for OverlayApp {
                     ui.add_space(8.0);
                     ui.label(t!("overlay-stats-decoder", name => backend_label));
                     ui.label(format!("FPS: {:.1}", s.fps_observed));
+                    if let Some(perms) = &s.granted_permissions {
+                        render_permission_line(ui, perms);
+                    }
                 }
                 Some(s) => {
                     let backend_label = s.encoder_backend.as_deref().unwrap_or(s.decoder.as_str());
@@ -76,6 +80,9 @@ impl eframe::App for OverlayApp {
                     ui.add_space(4.0);
                     ui.label(t!("overlay-host-label", host => s.host_label.as_str()));
                     ui.label(t!("overlay-stats-decoder", name => backend_label));
+                    if let Some(perms) = &s.granted_permissions {
+                        render_permission_line(ui, perms);
+                    }
                 }
                 None => {
                     ui.heading(t!("overlay-stats-connecting"));
@@ -108,4 +115,22 @@ impl eframe::App for OverlayApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
+}
+
+fn perm_color(on: bool) -> egui::Color32 {
+    if on {
+        egui::Color32::WHITE
+    } else {
+        egui::Color32::DARK_GRAY
+    }
+}
+
+fn render_permission_line(ui: &mut egui::Ui, perms: &PermissionSet) {
+    ui.horizontal(|ui| {
+        ui.label("Perms:");
+        ui.colored_label(perm_color(perms.input), "🖱️⌨️");
+        ui.colored_label(perm_color(perms.clipboard), "📋");
+        ui.colored_label(perm_color(perms.file_transfer), "📁");
+        ui.colored_label(perm_color(perms.audio), "🔊");
+    });
 }

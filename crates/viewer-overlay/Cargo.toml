@@ -8,6 +8,7 @@ build = "build.rs"
 
 [dependencies]
 prdt-gui-common = { path = "../gui-common" }
+prdt-protocol = { path = "../protocol" }
 eframe = { workspace = true }
 egui = { workspace = true }
 serde = { workspace = true }

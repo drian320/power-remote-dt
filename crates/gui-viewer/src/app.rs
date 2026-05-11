@@ -94,6 +94,14 @@ impl eframe::App for LauncherApp {
 impl LauncherApp {
     pub(crate) fn try_connect(&mut self) {
         let Some(idx) = self.selected else { return };
+        // Update last_connected before reading the entry for connect args.
+        {
+            let mut cfg = self.config.lock().unwrap();
+            if let Some(entry) = cfg.viewer.hosts.get_mut(idx) {
+                entry.last_connected = std::time::SystemTime::now();
+            }
+            let _ = cfg.save(&self.config_path);
+        }
         let cfg = self.config.lock().unwrap();
         let Some(entry) = cfg.viewer.hosts.get(idx) else {
             return;

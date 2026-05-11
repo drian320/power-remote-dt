@@ -1,6 +1,7 @@
 //! Read-side IPC: pull StatsPayload out of stats.json and write control flags
 //! back into control.json.
 
+use prdt_protocol::PermissionSet;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -27,6 +28,10 @@ pub struct StatsPayload {
     /// `None` on old payloads that pre-date this field.
     #[serde(default)]
     pub encoder_backend: Option<String>,
+    /// Permissions granted by the host in HelloAck (P6 T5).
+    /// `None` on old payloads that pre-date this field, or before handshake completes.
+    #[serde(default)]
+    pub granted_permissions: Option<PermissionSet>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -94,6 +99,7 @@ mod tests {
             }),
             fps_observed: 59.8,
             encoder_backend: Some("🚀 HW nvdec".into()),
+            granted_permissions: None,
         }
     }
 
@@ -163,5 +169,13 @@ mod tests {
         std::fs::write(stats_path(dir.path()), raw).unwrap();
         let parsed = read_stats(dir.path()).unwrap();
         assert!(parsed.encoder_backend.is_none());
+    }
+
+    #[test]
+    fn stats_payload_legacy_no_perms_parses() {
+        // Pre-P6 payloads have no granted_permissions field; must default to None.
+        let json = r#"{"version":1,"viewer_pid":1,"updated_at_unix_ms":0,"connection_state":"connecting","host_label":"h","decoder":"mf","latency_us":null,"fps_observed":0.0}"#;
+        let p: StatsPayload = serde_json::from_str(json).unwrap();
+        assert!(p.granted_permissions.is_none());
     }
 }
