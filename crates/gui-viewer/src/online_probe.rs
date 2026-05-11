@@ -1,8 +1,6 @@
 //! 30s background task that polls the signaling server for which saved hosts
 //! are currently online. Runs only while the hosts_list view is open; cancelled
 //! when the caller drops the returned `StopHandle` or calls `stop()`.
-//!
-//! TODO(P6 T8): wire result_sink into hosts_list rendering.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

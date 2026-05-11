@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use prdt_gui_common::{t, Config};
+use tracing::warn;
 
 use crate::LaunchOutcome;
 
@@ -14,6 +16,12 @@ pub struct LauncherApp {
     pub(crate) settings_open: bool,
     pub(crate) error: Option<String>,
     pub(crate) draft_host: crate::connect_form::DraftHost,
+    /// Shared map written by the OnlineProbe background task (host addr/id → online).
+    pub(crate) online_sink: Arc<Mutex<HashMap<String, bool>>>,
+    /// Keep the tokio runtime alive for the duration of the launcher window.
+    _runtime: tokio::runtime::Runtime,
+    /// Keep the probe stop handle alive; dropping it cancels the background task.
+    _probe_handle: Option<crate::online_probe::StopHandle>,
 }
 
 impl LauncherApp {
@@ -22,6 +30,39 @@ impl LauncherApp {
         config_path: PathBuf,
         outcome: Arc<Mutex<Option<LaunchOutcome>>>,
     ) -> Self {
+        let online_sink: Arc<Mutex<HashMap<String, bool>>> = Arc::new(Mutex::new(HashMap::new()));
+
+        // Build a tokio runtime for the OnlineProbe background task.
+        let runtime =
+            tokio::runtime::Runtime::new().expect("failed to create tokio runtime for OnlineProbe");
+
+        // Spawn the probe only when a signaling URL is configured.
+        let probe_handle = {
+            let cfg = config.lock().unwrap();
+            let signaling_url_str = cfg.viewer.signaling_url.clone();
+            let host_ids: Vec<String> = cfg
+                .viewer
+                .hosts
+                .iter()
+                .filter(|h| h.mode == "signaling" && !h.host_id.is_empty())
+                .map(|h| h.host_id.clone())
+                .collect();
+            drop(cfg);
+
+            if !signaling_url_str.is_empty() {
+                if let Ok(url) = url::Url::parse(&signaling_url_str) {
+                    let ids = Arc::new(Mutex::new(host_ids));
+                    let sink = online_sink.clone();
+                    let _guard = runtime.enter();
+                    Some(crate::online_probe::spawn(url, ids, sink))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
         Self {
             config,
             config_path,
@@ -31,6 +72,9 @@ impl LauncherApp {
             settings_open: false,
             error: None,
             draft_host: crate::connect_form::DraftHost::default(),
+            online_sink,
+            _runtime: runtime,
+            _probe_handle: probe_handle,
         }
     }
 }
@@ -94,13 +138,21 @@ impl eframe::App for LauncherApp {
 impl LauncherApp {
     pub(crate) fn try_connect(&mut self) {
         let Some(idx) = self.selected else { return };
-        // Update last_connected before reading the entry for connect args.
+        // Stamp last_connected at button-press time. The launcher closes
+        // immediately after this call (window Close command), so there is no
+        // async success callback available in this architecture. The actual
+        // connection attempt happens in the caller of run_viewer_launcher.
+        // TODO(P6 T8 follow-up): move stamp to actual connect-success site
+        // once the viewer crate exposes a result channel.
         {
             let mut cfg = self.config.lock().unwrap();
             if let Some(entry) = cfg.viewer.hosts.get_mut(idx) {
                 entry.last_connected = std::time::SystemTime::now();
             }
-            let _ = cfg.save(&self.config_path);
+            if let Err(e) = cfg.save(&self.config_path) {
+                warn!(error = %e, path = ?self.config_path,
+                    "failed to save config after last_connected update");
+            }
         }
         let cfg = self.config.lock().unwrap();
         let Some(entry) = cfg.viewer.hosts.get(idx) else {

@@ -1,5 +1,4 @@
 use std::cmp::Reverse;
-use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use prdt_gui_common::t;
@@ -33,9 +32,9 @@ pub fn format_relative(t: SystemTime) -> String {
 pub fn render(ui: &mut egui::Ui, app: &mut LauncherApp) {
     // Snapshot config and online state under the lock; release before UI work.
     let mut cfg = app.config.lock().unwrap().clone();
+    let online = app.online_sink.lock().unwrap().clone();
 
     // Sort: online-first, then last_connected DESC (most recent first).
-    let online: HashMap<String, bool> = HashMap::new(); // placeholder until OnlineProbe wired
     cfg.viewer.hosts.sort_by_key(|e| {
         let is_online = online
             .get(&e.addr)
@@ -65,8 +64,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut LauncherApp) {
             let row_text = format!(
                 "{badge} {} · {} · {}",
                 h.label,
-                detail,
-                format_relative(h.last_connected)
+                format_relative(h.last_connected),
+                detail
             );
             if ui.selectable_label(selected, row_text).clicked() {
                 app.selected = Some(orig_i);
@@ -82,6 +81,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut LauncherApp) {
 mod tests {
     use super::*;
     use prdt_gui_common::HostEntry;
+    use std::collections::HashMap;
 
     #[test]
     fn relative_time_buckets() {
@@ -101,6 +101,15 @@ mod tests {
     #[test]
     fn relative_time_epoch_shows_never() {
         assert_eq!(format_relative(UNIX_EPOCH), "never");
+    }
+
+    #[test]
+    fn relative_time_long_ago_bucket() {
+        let now = SystemTime::now();
+        assert_eq!(
+            format_relative(now - Duration::from_secs(86400 * 31)),
+            "long ago"
+        );
     }
 
     #[test]
