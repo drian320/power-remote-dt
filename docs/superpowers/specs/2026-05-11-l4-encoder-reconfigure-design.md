@@ -4,7 +4,7 @@
 **Phase:** L4 (post-L3 adaptive bitrate)
 **Branch (suggested):** `phase-l4-encoder-reconfigure`
 **Cross-platform:** Linux (OpenH264) + Windows (NVENC), regression bar = 0
-**Estimated LoC:** ~400 across 2 modify + 1 new + 1 new script
+**Estimated LoC:** ~450 across 3 modify + 1 new + 1 new script
 **Predecessor:** L3 adaptive bitrate (`docs/superpowers/specs/2026-05-11-l3-adaptive-bitrate-design.md`, master `fbc031a`)
 
 ---
@@ -113,22 +113,31 @@ fn set_target_bitrate(&mut self, bps: u32) {
 
 ### 3.3 NVENC reconfigure (`crates/media-win/src/nvenc/encoder.rs:328`)
 
-Replace the warn-only body with `nvEncReconfigureEncoder`:
+The codex review (HIGH #1, LOW #7) revealed that `NvencEncoder` already has an `_init_params: InitParams` field at `encoder.rs:73`, and `InitParams` owns a `Box<NV_ENC_CONFIG>` (`nvenc/config.rs:83`) that the embedded `NV_ENC_INITIALIZE_PARAMS.encodeConfig: *mut NV_ENC_CONFIG` pointer references. **Copying `InitParams` would risk a double-free.** Correct approach: mutate the owned `encodeConfig` in place via a `&mut self.init_params` accessor, then pass a by-value copy of the inner `NV_ENC_INITIALIZE_PARAMS` struct (whose `encodeConfig` pointer remains valid because the Box is still owned by `self`).
 
 ```rust
 fn set_target_bitrate(&mut self, bps: u32) {
-    let mut new_params = self.init_params; // requires self.init_params: InitParams field
+    let fps_num = self.init_params.fps_numerator();
+    let fps_den = self.init_params.fps_denominator().max(1);
+    let fps = (fps_num / fps_den).max(1);
     {
-        let cfg = new_params.encode_config_mut();
+        // Mutate in place; the Box stays alive on self.
+        let cfg = self.init_params.encode_config_mut();
         cfg.rcParams.averageBitRate = bps;
         cfg.rcParams.maxBitRate = bps;
+        // codex review #6: VBV must track bitrate or rate control becomes loose.
+        cfg.rcParams.vbvBufferSize = vbv_buffer_size_for(bps, fps);
+        cfg.rcParams.vbvInitialDelay = vbv_initial_delay_for(bps, fps);
     }
     let mut reconf = ffi::NV_ENC_RECONFIGURE_PARAMS::default();
     reconf.version = nv_enc_reconfigure_params_ver();
-    reconf.reInitEncodeParams = new_params.into_inner();
-    // Bit-fields: keep encoder state (DPB), force a clean IDR cut.
-    reconf.set_resetEncoder(0);
-    reconf.set_forceIDR(1);
+    // SAFETY: by-value copy of NV_ENC_INITIALIZE_PARAMS POD. Its encodeConfig
+    // pointer refers to the Box owned by self.init_params, which outlives this
+    // call. We never mutate via reconf.reInitEncodeParams; mutation already
+    // happened above through the &mut accessor.
+    reconf.reInitEncodeParams = *self.init_params.as_ffi();
+    reconf.set_resetEncoder(0); // keep DPB / ref frames
+    reconf.set_forceIDR(1);     // clean cut so viewer doesn't see ref-loss
     let reconfigure_fn = match self.fn_table.nvEncReconfigureEncoder {
         Some(f) => f,
         None => {
@@ -142,37 +151,59 @@ fn set_target_bitrate(&mut self, bps: u32) {
             "NVENC nvEncReconfigureEncoder failed");
         return;
     }
-    self.init_params = new_params;
     tracing::info!(target_bps = bps, "NVENC bitrate reconfigured");
 }
 ```
 
-**Required struct change**: `NvencEncoder` must hold `init_params: InitParams` as a field so the L4 reconfigure can rebuild a modified copy. T0 verifies whether the field exists today (likely consumed by `new()` and discarded, so will need adding).
+**No `Copy` on InitParams** (codex HIGH #1): the embedded Box prohibits `Copy`. The by-value copy on `reconf.reInitEncodeParams = *self.init_params.as_ffi()` only duplicates the outer POD whose pointer fields refer back to `self`-owned memory.
 
-**Apply timing**: With `forceIDR=1`, the next `EncodePicture` call emits an IDR carrying SPS/PPS at the new rate. With `forceIDR=0`, would apply at the next natural IDR boundary (gop_length=60 → up to 1 second delay). Force-IDR is preferred to give the viewer an immediate clean cut without ref-frame loss.
+**VBV updated** (codex MEDIUM #6): `vbv_buffer_size_for(bps, fps)` and `vbv_initial_delay_for(bps, fps)` mirror the formulas at `crates/media-win/src/nvenc/config.rs:105` (T2/Q6 extracts these into reusable `pub(crate) fn` helpers).
 
-**State preservation**: `resetEncoder=0` keeps DPB/refs across the reconfigure — encoder doesn't re-initialize, so no spawn cost.
+**`forceIDR=1`** for reconfigure 直後の clean cut → viewer 側 reference 切れず即適用。
+
+**`resetEncoder=0`** keeps DPB/state — encoder doesn't reinit, no spawn cost.
+
+**`nv_enc_reconfigure_params_ver()` value** (codex MEDIUM #5): T0/Q3 looks up the constant directly from the bindgen output (`OUT_DIR/nvenc_bindings.rs`). If exposed as `ffi::NV_ENC_RECONFIGURE_PARAMS_VER`, use it directly. If only the macro form is present, port the macro to a `const fn` mirroring `nv_enc_pic_params_ver` precedent — but cross-check the value against `nvEncodeAPI.h` to avoid `INVALID_VERSION` errors at runtime.
+
+**Bindings**: T0/Q2 verifies `nvEncReconfigureEncoder` and `NV_ENC_RECONFIGURE_PARAMS` are in bindgen output. The function pointer is part of `NV_ENCODE_API_FUNCTION_LIST` (allowlisted via `allowlist_type("NV_ENC.*")`), so likely already present.
+
+**テスト**: `#[cfg(prdt_nvenc_bindings)] #[ignore]` integration test using **pseudo-random noise input** (codex HIGH #3) so high/low bitrates produce visibly different sizes.
 
 ### 3.4 MF unchanged
 
 `crates/media-win/src/mf/encoder.rs:204` keeps the `warn!+return` body. Comment update: "L5 candidate — MFT vendor-specific behaviour, requires AMD/Intel Windows test host."
 
-### 3.5 NVENC `init_params` storage (open question Q1)
+### 3.4.1 Host video-loop instrumentation (codex HIGH #2)
 
-Current `NvencEncoder` struct (read at `crates/media-win/src/nvenc/encoder.rs:65-100`) likely has shape:
+The current host video loop logs `frames_sent` and `send_errors` but no byte volume, so the smoke procedure cannot directly verify "encoder actually emitted smaller frames." L4 adds a 1-second window byte counter to the same `host tx stats` info! line.
 
 ```rust
-pub struct NvencEncoder {
-    fn_table: ffi::NV_ENCODE_API_FUNCTION_LIST,
-    session: *mut std::ffi::c_void,
-    bitstream_buffer: *mut std::ffi::c_void,
-    width: u32,
-    height: u32,
-    // ... but NOT init_params
+// crates/host/src/lib.rs video task — add bytes_sent_window accumulator
+let mut bytes_sent_window: u64 = 0;
+// ... existing loop ...
+let nal_len = frame.nal_units.len();
+bytes_sent_window += frame.nal_units.iter()
+    .map(|n| n.len() as u64).sum::<u64>();
+if let Err(e) = tx_video.send_video(frame).await { ... } else { frames_sent += 1; }
+if last_log.elapsed() >= Duration::from_secs(1) {
+    info!(frames_sent, send_errors, bytes_sent_window, "host tx stats");
+    bytes_sent_window = 0;
+    last_log = std::time::Instant::now();
 }
 ```
 
-T0 verifies. If absent, T1 adds `init_params: InitParams` and stashes it at the end of `new()` after the `nvEncInitializeEncoder` call succeeds. No Drop impact (InitParams owns no FFI resources directly — they're inline structs).
+This is ~5 lines in T0 (host video loop); included in L4 scope so the smoke DoD becomes verifiable.
+
+### 3.5 NVENC `_init_params` field (codex LOW #7 confirmed)
+
+The codex review confirmed `NvencEncoder` already has `_init_params: InitParams` at `crates/media-win/src/nvenc/encoder.rs:73`, with `InitParams` owning a `Box<NV_ENC_CONFIG>` (`crates/media-win/src/nvenc/config.rs:83`). T2 will:
+
+1. Drop the `_` prefix (rename to `init_params`) since it now has a real consumer beyond construction.
+2. Add `pub(super) fn encode_config_mut(&mut self) -> &mut ffi::NV_ENC_CONFIG` and `pub(super) fn as_ffi(&self) -> &ffi::NV_ENC_INITIALIZE_PARAMS` accessors.
+3. Add `pub(super) fn fps_numerator(&self) -> u32` and `pub(super) fn fps_denominator(&self) -> u32` accessors for the VBV calc.
+4. Extract VBV formulas into `pub(crate) fn vbv_buffer_size_for(bps: u32, fps: u32) -> u32` and `pub(crate) fn vbv_initial_delay_for(bps: u32, fps: u32) -> u32` in `nvenc/config.rs`, mirroring the values used at line 105.
+
+No `Copy` is added to `InitParams` (would double-free the Box).
 
 ### 3.6 Bindgen visibility (open question Q2)
 
@@ -238,9 +269,13 @@ ACTION="${1:?usage: $0 <add|del|status> <iface> [loss_pct]}"
 IFACE="${2:?missing iface (e.g. eth0)}"
 case "$ACTION" in
   add)
-    LOSS="${3:?missing loss percent (e.g. 5)}"
-    tc qdisc add dev "$IFACE" root netem loss "${LOSS}%"
-    echo "netem added: $IFACE loss ${LOSS}%"
+    LOSS="${3:?missing loss percent (e.g. 15)}"
+    # codex review MEDIUM #4: pure 5% loss is fully recovered by FEC k=64 m=6
+    # (tolerance 8.5%) so purge=0 and controller never sees loss. Use 15% loss
+    # plus burst-amplifying delay/jitter to push past the FEC threshold and
+    # actually trigger purge_assembler() in the viewer.
+    tc qdisc add dev "$IFACE" root netem loss "${LOSS}%" delay 50ms 20ms distribution normal
+    echo "netem added: $IFACE loss ${LOSS}% delay 50ms±20ms"
     ;;
   del)
     tc qdisc del dev "$IFACE" root || true
@@ -262,8 +297,8 @@ Permissions: `chmod +x scripts/l4-netem-smoke.sh`. Requires `sudo` because `tc q
 | 1 | — | Start host: `RUST_LOG=info prdt host --bind 0.0.0.0:9000 --bitrate-mbps 30 --encoder openh264 --silent-allow` | host listens, pubkey printed |
 | 2 | — | Start viewer: `RUST_LOG=info prdt connect --host <wsl-ip>:9000 --host-pubkey ... --codec h264 --decoder openh264 2>&1 \| tee /tmp/prdt-viewer-l4.log` | handshake complete, frames flowing |
 | 3 | 30 s | (no action — baseline) | `frames_received` climbing, no `SetBitrate` log |
-| 4 | — | `sudo ./scripts/l4-netem-smoke.sh add eth0 5` | netem confirmed added |
-| 5 | 30 s | (loss inject active) | viewer: `L3 sent SetBitrate target_bps=N` repeats with N descending 30M → 21M → 14M → 10M → 7M → 5M (or further). Host: `viewer requested bitrate change target_bps=N` matching, `OpenH264 set_option(BITRATE)` not warning, `host tx stats` `bytes_sent`/`fps_sent` reflecting smaller frames |
+| 4 | — | `sudo ./scripts/l4-netem-smoke.sh add eth0 15` | netem confirmed added (15% loss + jitter — see below) |
+| 5 | 60 s | (loss inject active) | viewer: `L3 sent SetBitrate target_bps=N` repeats with N descending 30M → 21M → 14M → 10M → 7M → 5M (or further). Host: `viewer requested bitrate change target_bps=N` matching, `OpenH264 set_option(BITRATE)` not warning, `host tx stats` `bytes_sent_window` reflecting smaller frames |
 | 6 | — | `sudo ./scripts/l4-netem-smoke.sh del eth0` | netem removed |
 | 7 | 60 s | (recovery) | viewer: `target_bps` rises by ~200 kbps every second, host bytes track upward |
 | 8 | — | viewer Ctrl+C, `pkill -f prdt host` | clean shutdown, watchdog kill is normal |
@@ -272,9 +307,11 @@ Permissions: `chmod +x scripts/l4-netem-smoke.sh`. Requires `sudo` because `tc q
 
 - Viewer log contains at least 3 distinct `target_bps` values during the loss-inject window, with the lowest ≤ 5_000_000
 - Host log contains matching `viewer requested bitrate change` for each
-- Host `host tx stats bytes_sent / 1s` window during loss = ≤ 50% of baseline window (encoder actually shrunk frames)
+- Host `host tx stats bytes_sent_window` (added in T0 per §3.4.1) during loss = ≤ 50% of baseline window (encoder actually shrunk frames — this is the ground-truth signal that L4's encoder reconfigure works)
 - During recovery, `target_bps` increases monotonically for at least 5 ticks
 - No `host watchdog … session kill` for 5+ minutes total session
+
+If `bytes_sent_window` does NOT drop with `target_bps`, encoder reconfigure is broken — DoD fails even if all other observations pass. This is the critical regression signal codex flagged (HIGH #2).
 
 ---
 
@@ -284,9 +321,10 @@ Permissions: `chmod +x scripts/l4-netem-smoke.sh`. Requires `sudo` because `tc q
 
 `set_target_bitrate_runtime_changes_emitted_size`:
 - Build encoder with `target_bitrate_bps = 30_000_000`, 1920×1080
-- Encode 60 frames of a constant grey I420, accumulate total emitted size, average over 60 → `hi_avg`
+- **Use a pseudo-random noise pattern** (codex HIGH #3): `xorshift64` seed `0xDEADBEEF`, fill Y plane each frame so the encoder sees high spatial entropy and rate-control has real work. Constant grey would compress so well at both bitrates that the size difference would be noise-bounded.
+- Encode 60 frames, accumulate total emitted size, average over 60 → `hi_avg`
 - Call `enc.set_target_bitrate(2_000_000)`
-- Encode 60 more frames, average → `lo_avg`
+- Encode 60 more frames with the SAME noise stream (continue the xorshift state) → `lo_avg`
 - Assert `lo_avg < hi_avg * 70 / 100`
 
 The 30% margin accommodates OpenH264's gradual rate-control convergence (a few frames of overshoot are normal after a step change).
@@ -295,7 +333,8 @@ The 30% margin accommodates OpenH264's gradual rate-control convergence (a few f
 
 `nvenc_set_target_bitrate_changes_emitted_size`:
 - Same shape as A but using `D3d11Device::create_default()` and `D3d11Texture::new_default(&dev, 1920, 1080, TextureFormat::Bgra8)`
-- Identical assertion
+- BGRA texture filled with the same xorshift64 pattern (high spatial entropy)
+- Identical assertion (`lo_avg < hi_avg * 70 / 100`)
 
 Windows CI runs with `cargo test ... -- --ignored` so this fires when SDK + GPU are present.
 
@@ -327,22 +366,25 @@ Read the existing `InitParams` Rust newtype definition (likely in `crates/media-
 ### Q5: OpenH264 `Encoder::raw_api()` on stable
 `pub const unsafe fn raw_api(&mut self) -> &mut EncoderRawAPI` exists at `~/.cargo/registry/src/.../openh264-0.9.3/src/encoder.rs:1062` (verified). Confirm the `openh264-sys2` re-exports `ENCODER_OPTION_BITRATE`, `SBitrateInfo`, `SPATIAL_LAYER_ALL` at the public crate root or via `openh264_sys2::generated::types::*`. May need `use openh264_sys2 as ohsys;` then `ohsys::ENCODER_OPTION_BITRATE`.
 
+### Q6: VBV helpers
+Extract the inline VBV values used at `crates/media-win/src/nvenc/config.rs:105` into `pub(crate) fn vbv_buffer_size_for(bps: u32, fps: u32) -> u32` and `pub(crate) fn vbv_initial_delay_for(bps: u32, fps: u32) -> u32`. Read the existing assignment to derive the formula (commonly `vbvBufferSize = bps / fps`, `vbvInitialDelay = vbvBufferSize`). Call the helper from BOTH init (replacing the inline value) and L4 reconfigure (codex MEDIUM #6).
+
 ---
 
 ## 7. Implementation Task Skeleton
 
 | Task | Files | LoC | TDD |
 |---|---|---|---|
-| T0 | baseline + Q1–Q5 resolved | 0 | research only |
-| T1 | OpenH264 reconfigure body + `openh264-sys2` dep + 1 unit test | ~80 | yes |
-| T2 | NVENC `InitParams` field on `NvencEncoder` (Q1) + Q4 accessors | ~50 | indirect (compile only) |
-| T3 | NVENC reconfigure body + `nv_enc_reconfigure_params_ver()` helper + gated `#[ignore]` test | ~120 | yes (gated) |
-| T4 | `scripts/l4-netem-smoke.sh` + chmod | ~50 | manual |
+| T0 | baseline + Q1–Q6 resolved + host `bytes_sent_window` log (§3.4.1) | ~20 | research + host edit |
+| T1 | OpenH264 reconfigure body + `openh264-sys2` dep + 1 unit test (xorshift noise input) | ~100 | yes |
+| T2 | NVENC `init_params` rename + Q4 accessors + Q6 VBV helpers | ~80 | indirect (compile only) |
+| T3 | NVENC reconfigure body + `nv_enc_reconfigure_params_ver()` helper + gated `#[ignore]` test (xorshift noise) | ~130 | yes (gated) |
+| T4 | `scripts/l4-netem-smoke.sh` (loss + delay/jitter per codex MEDIUM #4) + chmod | ~60 | manual |
 | T5 | workspace build/clippy/test sweep + draft PR | 0 | manual |
 | T6 | Linux Wayland smoke walkthrough (DoD #1) per §4 | 0 | manual |
 | T7 | STATUS update + tag | ~20 (STATUS only) | manual |
 
-Total: ~320 LoC src + ~50 script + ~20 docs = **~400 LoC**, 7 tasks (T0–T7).
+Total: ~330 LoC src + ~60 script + ~20 docs + ~20 host log = **~430 LoC**, 8 tasks (T0–T7).
 
 ---
 
@@ -355,6 +397,8 @@ Total: ~320 LoC src + ~50 script + ~20 docs = **~400 LoC**, 7 tasks (T0–T7).
 | OpenH264 `set_option(ENCODER_OPTION_BITRATE)` returns non-zero on the source-built variant (some SDK builds hard-disable runtime reconfigure) | The trait method already logs and continues — the warn is the user-facing signal. T1 unit test will catch this on Linux x86_64 release builds. If broken, fall back to encoder reinit (expensive but correct) gated on prior failure. |
 | NVENC `forceIDR=1` causes a visible quality dip + large IDR fragment | Acceptable trade-off — the alternative (waiting for natural IDR up to 1 second) means viewer keeps decoding wrong-bitrate P-frames and the controller's response is invisible. Quality dip from the IDR is bounded by encoder rate-control. |
 | `tc qdisc netem` unavailable on user's WSLg (`iproute2` package or NET_ADMIN cap missing) | Document the alternative: physical WiFi attenuation (move device far from AP). Script includes a `status` action so user can verify before running. |
+| `tc netem` qdisc on WSLg eth0 only affects egress (host→viewer), not ingress (viewer→host KeepAlive may stay clean → no watchdog noise) | Egress-only is actually the correct direction to test L3's controller because viewer-detected loss measures host→viewer delivery (per L3 spec §3.6). The KeepAlive direction is irrelevant to MD trigger. Documented in T4 script comment. |
+| `tc netem loss 5%` doesn't trigger purge because FEC k=64 m=6 recovers up to 8.5% | Use 15% loss + delay 50ms±20ms (in script default) — past the FEC threshold and burst-amplifying via jitter. Documented in script comment per codex MEDIUM #4. |
 | Auto-mode classifier blocks `sudo tc` | Surface via `!` prefix to the user (same workaround as L1.5b/L2 0.0.0.0:9000 bind and L3 PR merge). Wrap in `scripts/l4-netem-smoke.sh` to make it a single command. |
 | Smoke shows controller MD but encoder doesn't actually shrink frames (encoder reconfig silently no-ops) | The `host tx stats bytes_sent / 1s` is the ground-truth signal — if it doesn't drop with `target_bps`, encoder reconfig is broken. Write the expected ratio (≤50%) into DoD #1 explicitly. |
 | MF backend is now the only stub left and may surprise a future user (`--encoder mf` + adaptive bitrate doesn't react) | Update `--encoder` help text to note that adaptive bitrate is OpenH264/NVENC only on this build. STATUS L4 entry calls out MF as L5 candidate prominently. |
