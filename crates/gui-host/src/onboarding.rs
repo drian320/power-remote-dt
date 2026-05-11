@@ -132,10 +132,19 @@ impl WizardState {
                     ui.add_space(8.0);
                     ui.label(format!("Host ID: {host_id}"));
                     ui.add_space(16.0);
-                    if ui.button("Next").clicked() {
-                        self.step = WizardStep::AuthMode;
-                        self.error = None;
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Next").clicked() {
+                            self.step = WizardStep::AuthMode;
+                            self.error = None;
+                        }
+                        if ui.button("Skip").clicked() {
+                            result = Some(WizardSubmission {
+                                mode: AuthMode::Tofu,
+                                pin_plain: None,
+                                default_permissions: PermissionSet::all(),
+                            });
+                        }
+                    });
                 }
 
                 WizardStep::AuthMode => {
@@ -169,6 +178,13 @@ impl WizardState {
                             } else {
                                 self.step = WizardStep::Defaults;
                             }
+                        }
+                        if ui.button("Skip").clicked() {
+                            result = Some(WizardSubmission {
+                                mode: AuthMode::Tofu,
+                                pin_plain: None,
+                                default_permissions: PermissionSet::all(),
+                            });
                         }
                     });
                 }

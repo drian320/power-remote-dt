@@ -98,6 +98,12 @@ impl KnownPeersFile {
         self.entries.get(pk).map(|s| s.as_str())
     }
 
+    /// Iterate over all `(PubKey, label)` pairs. Used for migration to the
+    /// P6 TOML `KnownPeers` format.
+    pub fn entries_iter(&self) -> impl Iterator<Item = (&PubKey, &str)> {
+        self.entries.iter().map(|(pk, label)| (pk, label.as_str()))
+    }
+
     pub fn insert(&mut self, pk: PubKey, label: String) {
         self.entries.insert(pk, label);
     }
@@ -190,12 +196,19 @@ impl KnownPeers {
 
     /// Atomically write to `path` using a PID-suffixed temp file so concurrent
     /// processes do not clobber each other's in-progress writes.
+    ///
+    /// Peers are sorted by `pubkey_b64` before serialising so repeated save
+    /// operations on logically identical stores produce byte-identical output
+    /// (deterministic, git-stable, no spurious diffs).
     pub fn save(&self, path: &Path) -> Result<(), KnownPeersError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let tmp = path.with_extension(format!("toml.tmp.{}", std::process::id()));
-        let s = toml::to_string_pretty(self).map_err(|e| KnownPeersError::Parse {
+        // Clone + sort so insertion order in self.peers is preserved for callers.
+        let mut sorted = self.clone();
+        sorted.peers.sort_by(|a, b| a.pubkey_b64.cmp(&b.pubkey_b64));
+        let s = toml::to_string_pretty(&sorted).map_err(|e| KnownPeersError::Parse {
             line: 0,
             reason: e.to_string(),
         })?;
@@ -406,5 +419,37 @@ label = "old-laptop"
         let final_store = KnownPeers::load_or_default(&path).unwrap();
         assert_eq!(final_store.peers.len(), 1);
         assert_eq!(final_store.peers[0].pubkey_b64, "BBBB");
+    }
+
+    #[test]
+    fn save_is_deterministic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path1 = dir.path().join("peers-a.toml");
+        let path2 = dir.path().join("peers-b.toml");
+
+        // Insert in reverse order — save should sort both times and produce identical bytes.
+        let mut store = KnownPeers::default();
+        store.peers.push(make_peer("ZZZZ", "zara"));
+        store.peers.push(make_peer("AAAA", "alice"));
+        store.peers.push(make_peer("MMMM", "mallory"));
+        store.save(&path1).unwrap();
+        store.save(&path2).unwrap();
+
+        let bytes1 = std::fs::read(&path1).unwrap();
+        let bytes2 = std::fs::read(&path2).unwrap();
+        assert_eq!(
+            bytes1, bytes2,
+            "two saves of identical store must be byte-equal"
+        );
+
+        // Reload and save again — still deterministic.
+        let reloaded = KnownPeers::load_or_default(&path1).unwrap();
+        let path3 = dir.path().join("peers-c.toml");
+        reloaded.save(&path3).unwrap();
+        let bytes3 = std::fs::read(&path3).unwrap();
+        assert_eq!(
+            bytes1, bytes3,
+            "reload-then-save must be byte-equal to original"
+        );
     }
 }

@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use prdt_crypto::known_peers::KnownPeers;
 use prdt_gui_common::{auth_config::HostAuthConfig, AuthMode};
 use prdt_protocol::PermissionSet;
+use tracing::warn;
 
 use crate::onboarding::WizardError;
 
@@ -98,8 +99,20 @@ impl AuthSettingsState {
     ///
     /// Returns `true` if the caller should flush `self.host_auth` to disk
     /// (i.e., the user changed something and confirmed).
+    ///
+    /// Reloads the known-peers list from disk on every call so that peers
+    /// accepted by a concurrently-running host task appear immediately without
+    /// needing to reopen the Settings panel.
     pub fn show(&mut self, ui: &mut egui::Ui) -> bool {
         let mut dirty = false;
+
+        // Refresh peers from disk each frame. Settings panels are infrequently
+        // opened so the I/O cost is negligible and the list stays current.
+        self.known_peers =
+            KnownPeers::load_or_default(&self.known_peers_path).unwrap_or_else(|e| {
+                warn!(error = %e, path = %self.known_peers_path.display(), "failed to reload known peers");
+                std::mem::take(&mut self.known_peers)
+            });
 
         ui.heading("Authentication");
         ui.add_space(4.0);
@@ -303,7 +316,14 @@ impl AuthSettingsState {
                 self.known_peers.remove_by_pubkey(&pk);
                 match self.known_peers.save(&self.known_peers_path) {
                     Ok(()) => self.peers_save_error = None,
-                    Err(e) => self.peers_save_error = Some(format!("Save failed: {e}")),
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            path = %self.known_peers_path.display(),
+                            "failed to save host-peers.toml after Delete"
+                        );
+                        self.peers_save_error = Some(format!("Save failed: {e}"));
+                    }
                 }
             }
 

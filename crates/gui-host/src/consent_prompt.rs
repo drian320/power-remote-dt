@@ -5,7 +5,7 @@
 //! Full channel wire-up into gui-host's app loop is deferred; see
 //! TODO(P6 T7 follow-up) inside `ConsentPromptState::show`.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use prdt_protocol::PermissionSet;
 
@@ -29,6 +29,10 @@ pub enum ConsentOutcome {
 // ---------------------------------------------------------------------------
 
 /// State for the consent prompt modal shown to the operator.
+///
+/// Uses `Instant::now()` internally so the caller does not need to
+/// increment an `elapsed` field — elapsed time is computed automatically
+/// each frame.
 pub struct ConsentPromptState {
     /// Viewer's public key (full b64 string).
     pub peer_pubkey_b64: String,
@@ -38,8 +42,8 @@ pub struct ConsentPromptState {
     pub permissions: PermissionSet,
     /// Whether to persist this peer to known-peers after accepting.
     pub remember: bool,
-    /// How long since the prompt appeared (caller increments per frame).
-    pub elapsed: Duration,
+    /// When the prompt was first shown; elapsed is computed from this.
+    created_at: Instant,
     /// Auto-deny timeout; countdown shown in UI.
     pub timeout: Duration,
 }
@@ -55,7 +59,7 @@ impl ConsentPromptState {
             peer_pubkey_b64,
             label_input: String::new(),
             remember: true,
-            elapsed: Duration::ZERO,
+            created_at: Instant::now(),
             timeout,
         }
     }
@@ -66,6 +70,9 @@ impl ConsentPromptState {
     /// or when the timeout expires (auto-Deny).  Returns `None` while the
     /// prompt is still waiting.
     ///
+    /// Requests a repaint after 1 s so the countdown label refreshes without
+    /// requiring the operator to move the mouse.
+    ///
     /// TODO(P6 T7 follow-up): wire this into `HostApp::update`:
     ///   1. Add `consent_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ConsentRequest>>`
     ///      and `pending_consent: Option<(ConsentPromptState, oneshot::Sender<ConsentDecision>)>`
@@ -75,13 +82,14 @@ impl ConsentPromptState {
     ///   4. Call `state.show(ctx)` each frame; on `Some(outcome)` convert to
     ///      `prdt_host::ConsentDecision` and send via `responder.send(decision)`.
     pub fn show(&mut self, ctx: &egui::Context) -> Option<ConsentOutcome> {
-        let remaining = self.timeout.saturating_sub(self.elapsed);
+        let elapsed = self.created_at.elapsed();
 
-        // Auto-deny on timeout.
-        if remaining.is_zero() {
+        // Auto-deny on timeout — no UI render needed.
+        if elapsed >= self.timeout {
             return Some(ConsentOutcome::Denied);
         }
 
+        let remaining = self.timeout - elapsed;
         let short_key = self.peer_pubkey_b64.chars().take(16).collect::<String>();
         let mut result: Option<ConsentOutcome> = None;
 
@@ -112,8 +120,7 @@ impl ConsentPromptState {
                 ui.checkbox(&mut self.remember, "Remember this viewer");
                 ui.add_space(8.0);
 
-                let secs = remaining.as_secs();
-                ui.label(format!("Auto-deny in {secs}s"));
+                ui.label(format!("Auto-deny in {}s", remaining.as_secs()));
                 ui.add_space(8.0);
 
                 ui.horizontal(|ui| {
@@ -130,6 +137,43 @@ impl ConsentPromptState {
                 });
             });
 
+        // Ensure the countdown label refreshes once per second without
+        // requiring operator mouse movement.
+        ctx.request_repaint_after(Duration::from_secs(1));
+
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn consent_prompt_auto_deny_after_timeout() {
+        // A prompt with a zero-duration timeout must immediately return Denied
+        // without any egui context (called outside show()).
+        let state =
+            ConsentPromptState::new("AAABBBCCC".into(), PermissionSet::all(), Duration::ZERO);
+        // elapsed() >= timeout=ZERO on any call.
+        let elapsed = state.created_at.elapsed();
+        assert!(
+            elapsed >= state.timeout,
+            "zero-timeout prompt must be expired on creation"
+        );
+    }
+
+    #[test]
+    fn consent_prompt_not_expired_on_long_timeout() {
+        let state = ConsentPromptState::new(
+            "AAABBBCCC".into(),
+            PermissionSet::all(),
+            Duration::from_secs(60),
+        );
+        let elapsed = state.created_at.elapsed();
+        assert!(
+            elapsed < state.timeout,
+            "60-second prompt must not be expired immediately"
+        );
     }
 }

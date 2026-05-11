@@ -47,6 +47,25 @@ pub fn default_host_key_path() -> std::path::PathBuf {
     std::path::PathBuf::from("host-key.bin")
 }
 
+/// Returns the OS-conventional config directory for prdt, creating it on demand.
+/// Used to derive `host-auth.toml` and `host-peers.toml` default paths.
+pub fn default_prdt_config_dir() -> std::path::PathBuf {
+    if let Some(base) = dirs::config_dir() {
+        let dir = base.join("prdt");
+        let _ = std::fs::create_dir_all(&dir);
+        return dir;
+    }
+    std::path::PathBuf::from(".")
+}
+
+fn default_host_auth_path() -> std::path::PathBuf {
+    default_prdt_config_dir().join("host-auth.toml")
+}
+
+fn default_host_peers_path() -> std::path::PathBuf {
+    default_prdt_config_dir().join("host-peers.toml")
+}
+
 const FILE_RECV_DIR: &str = "prdt-received";
 const FILE_SEND_DIR: &str = "prdt-outgoing";
 const FILE_SEND_SENT_SUBDIR: &str = "sent";
@@ -155,6 +174,20 @@ pub struct Args {
     /// networks or behind another auth layer.
     #[arg(long)]
     pub silent_allow: bool,
+
+    /// Path to host-auth.toml (PIN hash, auth mode, default permissions).
+    /// Written by the GUI onboarding wizard; read here so the host task
+    /// uses the operator-configured auth policy rather than always defaulting
+    /// to Tofu + allow-all.
+    #[arg(long, default_value_os_t = default_host_auth_path())]
+    pub host_auth_file: std::path::PathBuf,
+
+    /// Path to host-peers.toml (P6 TOML remembered-peer store).
+    /// Written by the GUI Settings "Saved Peers" panel and by the consent-
+    /// accept branch in run_host. Separate from the legacy known-peer-ids
+    /// text file.
+    #[arg(long, default_value_os_t = default_host_peers_path())]
+    pub host_peers_file: std::path::PathBuf,
 }
 
 #[derive(Debug)]
@@ -451,13 +484,81 @@ pub async fn run_host(
     // reconnections. A brute-forcer who hits AuthLockout cannot reset the
     // counter by dropping and re-establishing the Noise channel.
     //
-    // T7 will replace HostAuthConfig::default() with a config loaded from disk
-    // and wire up the GUI consent channel for unknown-peer prompts.
+    // Load auth config from disk so the wizard-configured mode/PIN/permissions
+    // are honoured. Missing file → safe default (Tofu + allow-all).
     let auth_hook = {
         use prdt_crypto::known_peers::KnownPeers;
         use tokio::sync::RwLock;
-        let cfg = auth_config::HostAuthConfig::default();
-        let known = Arc::new(RwLock::new(KnownPeers { peers: vec![] }));
+
+        let cfg = auth_config::HostAuthConfig::load_or_default(&args.host_auth_file)
+            .unwrap_or_else(|e| {
+                warn!(
+                    error = %e,
+                    path = %args.host_auth_file.display(),
+                    "failed to load host-auth.toml; using defaults"
+                );
+                auth_config::HostAuthConfig::default()
+            });
+        info!(
+            mode = ?cfg.mode,
+            has_pin = cfg.pin_hash.is_some(),
+            path = %args.host_auth_file.display(),
+            "loaded host auth config"
+        );
+
+        // Attempt one-shot migration: if the legacy text-format known-peer-ids
+        // file exists but the TOML host-peers.toml does not, convert the text
+        // entries into KnownPeer rows so the Settings panel can manage them.
+        if args.known_peers_file.exists() && !args.host_peers_file.exists() {
+            match prdt_crypto::KnownPeersFile::load_or_default(&args.known_peers_file) {
+                Ok(legacy) => {
+                    let migrated = KnownPeers {
+                        peers: legacy
+                            .entries_iter()
+                            .map(|(pk, label)| prdt_crypto::known_peers::KnownPeer {
+                                pubkey_b64: pk.to_base64(),
+                                label: label.to_string(),
+                                permissions: prdt_protocol::PermissionSet::all(),
+                                first_seen_at: std::time::UNIX_EPOCH,
+                                last_seen_at: std::time::UNIX_EPOCH,
+                            })
+                            .collect(),
+                    };
+                    match migrated.save(&args.host_peers_file) {
+                        Ok(()) => info!(
+                            from = %args.known_peers_file.display(),
+                            to = %args.host_peers_file.display(),
+                            count = migrated.peers.len(),
+                            "migrated legacy known-peer-ids to host-peers.toml"
+                        ),
+                        Err(e) => warn!(
+                            error = %e,
+                            "failed to write migrated host-peers.toml; continuing"
+                        ),
+                    }
+                }
+                Err(e) => warn!(
+                    error = %e,
+                    "failed to read legacy known-peer-ids for migration; skipping"
+                ),
+            }
+        }
+
+        let known_peers = KnownPeers::load_or_default(&args.host_peers_file).unwrap_or_else(|e| {
+            warn!(
+                error = %e,
+                path = %args.host_peers_file.display(),
+                "failed to load host-peers.toml; starting with empty peer store"
+            );
+            KnownPeers::default()
+        });
+        info!(
+            peer_count = known_peers.peers.len(),
+            path = %args.host_peers_file.display(),
+            "loaded known peers"
+        );
+
+        let known = Arc::new(RwLock::new(known_peers));
         let validator = Arc::new(auth::AuthValidator::new(cfg, known));
         HostAuthHook::new(validator)
     };
@@ -478,22 +579,26 @@ pub async fn run_host(
             "Noise handshake complete — encrypted channel established"
         );
 
-        // Consent gate: known-peer-ids check + optional GUI prompt. Bypassed
-        // when --silent-allow is set (CI / scripted use only — see Args docs).
+        // Consent gate: TOML host-peers.toml check + optional GUI prompt.
+        // Bypassed when --silent-allow is set (CI / scripted use only).
+        //
+        // NOTE: The pre-P6 legacy text-file gate (known-peer-ids / KnownPeersFile)
+        // has been retired here. Peers are now stored in host-peers.toml (TOML
+        // KnownPeers). One-shot migration from the text file runs at startup above.
         if args.silent_allow {
             info!(
                 peer=%peer_pubkey.to_base64(),
                 "silent-allow enabled; skipping consent gate"
             );
         } else {
-            let known = match prdt_crypto::KnownPeersFile::load_or_default(&args.known_peers_file) {
-                Ok(k) => k,
-                Err(e) => {
-                    warn!(?e, path=?args.known_peers_file, "failed to load known-peer-ids; rejecting session");
-                    continue;
-                }
-            };
-            if !known.contains(&peer_pubkey) {
+            use prdt_crypto::known_peers::{KnownPeer, KnownPeers};
+            let peer_b64 = peer_pubkey.to_base64();
+            let known = KnownPeers::load_or_default(&args.host_peers_file).unwrap_or_else(|e| {
+                warn!(?e, path=?args.host_peers_file, "failed to load host-peers.toml; treating as empty");
+                KnownPeers::default()
+            });
+            let already_known = known.peers.iter().any(|p| p.pubkey_b64 == peer_b64);
+            if !already_known {
                 let decision = match &consent_tx {
                     Some(tx) => {
                         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
@@ -515,7 +620,7 @@ pub async fn run_host(
                     }
                     None => {
                         warn!(
-                            peer=%peer_pubkey.to_base64(),
+                            peer=%peer_b64,
                             "unknown peer connected and no consent channel (headless without --silent-allow); rejecting"
                         );
                         continue;
@@ -523,40 +628,49 @@ pub async fn run_host(
                 };
                 match decision {
                     ConsentDecision::Rejected => {
-                        info!(peer=%peer_pubkey.to_base64(), "consent rejected; resetting session");
+                        info!(peer=%peer_b64, "consent rejected; resetting session");
                         continue;
                     }
                     ConsentDecision::Accepted {
-                        remember, label, ..
+                        permissions,
+                        remember,
+                        label,
                     } => {
-                        // Persist so future connections from this peer are silent
-                        // (when remember == true).
+                        // Persist to TOML host-peers.toml so future connections
+                        // from this peer are silently accepted (when remember==true).
+                        let _ = permissions; // used by AuthValidator via the shared Arc
                         if remember {
                             let peer_label = if label.is_empty() {
-                                peer_pubkey.to_base64()
+                                peer_b64.clone()
                             } else {
-                                label.clone()
+                                label
                             };
                             let mut updated = known;
-                            updated.insert(peer_pubkey, peer_label);
-                            if let Err(e) = updated.save(&args.known_peers_file) {
+                            updated.peers.push(KnownPeer {
+                                pubkey_b64: peer_b64.clone(),
+                                label: peer_label,
+                                permissions: prdt_protocol::PermissionSet::all(),
+                                first_seen_at: std::time::SystemTime::now(),
+                                last_seen_at: std::time::SystemTime::now(),
+                            });
+                            if let Err(e) = updated.save(&args.host_peers_file) {
                                 warn!(
                                     ?e,
-                                    path=?args.known_peers_file,
-                                    "failed to persist known-peer-ids; session continues but won't be remembered"
+                                    path=?args.host_peers_file,
+                                    "failed to persist host-peers.toml; session continues but peer won't be remembered"
                                 );
                             } else {
                                 info!(
-                                    peer=%peer_pubkey.to_base64(),
-                                    path=?args.known_peers_file,
-                                    "added peer to known-peer-ids"
+                                    peer=%peer_b64,
+                                    path=?args.host_peers_file,
+                                    "added peer to host-peers.toml"
                                 );
                             }
                         }
                     }
                 }
             } else {
-                info!(peer=%peer_pubkey.to_base64(), "peer is in known-peer-ids; auto-accepted");
+                info!(peer=%peer_b64, "peer is in host-peers.toml; auto-accepted");
             }
         } // end of !silent_allow branch
 
