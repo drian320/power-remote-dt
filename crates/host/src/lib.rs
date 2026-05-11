@@ -220,11 +220,14 @@ impl AuthHook for HostAuthHook {
 
 /// Returns `true` if `msg` is permitted under `perms`.
 ///
-/// Input and audio are gated at task-spawn time (not here) because they arrive
-/// on a separate channel (`ReceivedMessage::Input`) rather than as
-/// `ControlMessage` variants. All other `ControlMessage` variants that are
-/// not listed below are always allowed (Ping, Pong, KeepAlive, RequestIdr,
-/// SetBitrate, LatencyReport, Bye, Noise*, Probe/ProbeAck).
+/// `ControlMessage`-based channels (clipboard, file-transfer) are gated here.
+/// Input dispatch is gated inside the input task's receive arm (the task itself
+/// always runs to handle KeepAlive/Bye/RequestIdr). The audio capture thread
+/// is conditionally spawned based on `perms.audio`; the encode task is always
+/// spawned and exits immediately if the PCM sender was dropped (audio denied).
+/// All other `ControlMessage` variants not listed below are always allowed
+/// (Ping, Pong, KeepAlive, RequestIdr, SetBitrate, LatencyReport, Bye,
+/// Noise*, Probe/ProbeAck).
 pub fn channel_allowed(perms: &PermissionSet, msg: &ControlMessage) -> bool {
     match msg {
         ControlMessage::ClipboardText { .. } => perms.clipboard,
