@@ -1,8 +1,11 @@
 //! P6 AuthValidator — single source of truth for the Hello-time auth decision.
 //!
-//! Drives the §6 state machine: protocol_version → codec → dispatch on
-//! `config.mode` → mode-specific verification (TOFU consent prompt, PIN bcrypt,
-//! Ephemeral constant-time compare) → AuthVerdict.
+//! Drives the §6 state machine: protocol_version → auth_payload size cap →
+//! dispatch on `config.mode` → mode-specific verification (TOFU consent
+//! prompt, PIN bcrypt, Ephemeral constant-time compare) → AuthVerdict.
+//!
+//! Codec validity is enforced downstream by the encoder negotiation layer
+//! (the transport `host_handshake` function), not here.
 //!
 //! Per-mode known_peers semantics (see spec §6.3):
 //! - Tofu: known_peers means "auto-accept, skip prompt".
@@ -57,6 +60,8 @@ struct PinAttemptState {
 #[derive(Debug, Clone)]
 struct EphemeralState {
     value: String,
+    /// Process-local monotonic timestamp; ephemerals are RAM-only and do not
+    /// survive host restart (spec §5.1).
     created_at: Instant,
 }
 
@@ -65,12 +70,20 @@ struct EphemeralState {
 /// One instance lives for the lifetime of the host process (shared across
 /// concurrent session accept loops via `Arc`). Mutable state is behind
 /// interior-mutability primitives (Mutex / RwLock).
+///
+/// **Config lifecycle**: `config` is captured by value at construction. If
+/// `HostAuthConfig` is edited after the validator was built (e.g. T7's wizard
+/// changes the PIN or mode), the validator must be rebuilt — live edits do NOT
+/// propagate. In practice this is fine because the host drops and recreates the
+/// validator between sessions; a mid-session Settings change takes effect on
+/// the next incoming connection.
 pub struct AuthValidator {
     config: HostAuthConfig,
     known_peers: Arc<RwLock<KnownPeers>>,
     ephemeral: Arc<Mutex<Option<EphemeralState>>>,
-    /// Keyed by peer_pubkey_b64; entries with failed_count == 0 and no
-    /// active lockout are pruned on each check to bound memory.
+    /// Keyed by peer_pubkey_b64. Stale tombstone entries (failed_count == 0,
+    /// no active lockout) are pruned unconditionally on every PIN validate call
+    /// to bound map growth regardless of whether the lockout fast-path fires.
     pin_attempts: Arc<Mutex<HashMap<String, PinAttemptState>>>,
 }
 
@@ -100,6 +113,8 @@ impl AuthValidator {
     /// Synchronous wrapper around `rotate_ephemeral` for use in tests that
     /// run inside a `#[tokio::test]` context but cannot easily `.await` in
     /// the test setup section.
+    ///
+    /// Requires the multi-thread tokio runtime; will panic under current_thread.
     #[doc(hidden)]
     pub fn rotate_ephemeral_for_test(&self) -> String {
         tokio::task::block_in_place(|| {
@@ -202,6 +217,11 @@ impl AuthValidator {
         // Lockout check — hold the lock briefly, then release before bcrypt.
         {
             let mut attempts = self.pin_attempts.lock().await;
+            // Prune stale tombstones unconditionally (before any early return)
+            // so map growth is bounded regardless of whether lockout fires.
+            attempts.retain(|_, s| {
+                s.failed_count > 0 || s.locked_until.map(|t| Instant::now() < t).unwrap_or(false)
+            });
             if let Some(state) = attempts.get(peer) {
                 if let Some(locked_until) = state.locked_until {
                     if Instant::now() < locked_until {
@@ -213,10 +233,6 @@ impl AuthValidator {
                     }
                 }
             }
-            // Prune entries that are no longer relevant to bound map growth.
-            attempts.retain(|_, s| {
-                s.failed_count > 0 || s.locked_until.map(|t| Instant::now() < t).unwrap_or(false)
-            });
         }
 
         // UTF-8 decode (bcrypt operates on &str).
@@ -241,8 +257,8 @@ impl AuthValidator {
             });
             entry.failed_count += 1;
             if entry.failed_count >= self.config.max_pin_attempts {
-                let until =
-                    Instant::now() + Duration::from_secs(self.config.pin_lockout_seconds as u64);
+                let until = Instant::now()
+                    + Duration::from_secs(u64::from(self.config.pin_lockout_seconds));
                 entry.locked_until = Some(until);
                 warn!(
                     peer = %peer,
@@ -313,7 +329,7 @@ impl AuthValidator {
 
         // Expiry check.
         let age = Instant::now().duration_since(eph.created_at);
-        if age > Duration::from_secs(self.config.ephemeral_lifetime_seconds as u64) {
+        if age > Duration::from_secs(u64::from(self.config.ephemeral_lifetime_seconds)) {
             warn!(peer = %peer, age_ms = age.as_millis(), "ephemeral expired");
             return AuthVerdict::Rejected {
                 code: HelloRejectCode::AuthFailed,
