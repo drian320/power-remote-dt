@@ -187,9 +187,8 @@ impl VideoProducer for DxgiNvencProducer {
         self.idr_pending = true;
     }
 
-    fn set_target_bitrate(&mut self, _bps: u32) {
-        // Phase 0 Plan 2c: bitrate is fixed at construction time. Reconfigure
-        // via NvencEncoder::reconfigure will be wired in Plan 3+.
+    fn set_target_bitrate(&mut self, bps: u32) {
+        self.encoder.set_target_bitrate(bps);
     }
 
     fn backend_name(&self) -> &'static str {
