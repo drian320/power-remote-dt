@@ -38,7 +38,8 @@ use crate::error::{MediaError, Result};
 use crate::nvenc::config::{
     nv_enc_create_bitstream_buffer_ver, nv_enc_lock_bitstream_ver, nv_enc_map_input_resource_ver,
     nv_enc_open_encode_session_ex_params_ver, nv_enc_pic_params_ver, nv_enc_register_resource_ver,
-    nv_encode_api_function_list_ver, InitParams, NvencEncoderConfig,
+    nv_encode_api_function_list_ver, vbv_buffer_size_for, vbv_initial_delay_for, InitParams,
+    NvencEncoderConfig,
 };
 use crate::nvenc::ffi;
 use crate::nvenc::loader::NvEncLibrary;
@@ -70,7 +71,9 @@ pub struct NvencEncoder {
     config: NvencEncoderConfig,
     /// Keep init params alive so the `encodeConfig` pointer inside `params`
     /// remains valid for the life of the session (NVENC does not copy it).
-    _init_params: InitParams,
+    /// L4 also mutates this in place via `set_target_bitrate` to call
+    /// `nvEncReconfigureEncoder` without copying the Box.
+    init_params: InitParams,
     _dev: D3d11Device,
 }
 
@@ -149,8 +152,10 @@ impl NvencEncoder {
                 ffi::NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CBR;
             init_params.config.rcParams.averageBitRate = cfg.bitrate_bps;
             init_params.config.rcParams.maxBitRate = cfg.bitrate_bps;
-            init_params.config.rcParams.vbvBufferSize = cfg.bitrate_bps / cfg.fps_numerator.max(1);
-            init_params.config.rcParams.vbvInitialDelay = init_params.config.rcParams.vbvBufferSize;
+            init_params.config.rcParams.vbvBufferSize =
+                vbv_buffer_size_for(cfg.bitrate_bps, cfg.fps_numerator);
+            init_params.config.rcParams.vbvInitialDelay =
+                vbv_initial_delay_for(cfg.bitrate_bps, cfg.fps_numerator);
             init_params.config.gopLength = cfg.gop_length;
             init_params.config.frameIntervalP = 1;
             // After overwriting encodeConfig, we must reinstall the pointer
@@ -189,7 +194,7 @@ impl NvencEncoder {
                 session,
                 bitstream_buffer: buf_params.bitstreamBuffer,
                 config: *cfg,
-                _init_params: init_params,
+                init_params,
                 _dev: dev.clone(),
             })
         }
