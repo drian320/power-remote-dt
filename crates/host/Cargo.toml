@@ -20,6 +20,7 @@ prdt-protocol = { path = "../protocol" }
 prdt-signaling-client = { path = "../signaling-client" }
 prdt-signaling-proto = { path = "../signaling-proto" }
 prdt-transport = { path = "../transport" }
+prdt-gui-host = { path = "../gui-host" }
 tokio = { workspace = true, features = ["signal", "fs", "io-util", "time"] }
 url = { workspace = true }
 clap = { workspace = true }
@@ -46,7 +47,6 @@ prdt-media-win = { path = "../media-win" }
 prdt-media-sw = { path = "../media-sw" }
 prdt-input-win = { path = "../input-win" }
 tokio-util = { version = "0.7", features = ["rt"] }
-prdt-gui-host = { path = "../gui-host" }
 prdt-gui-common = { path = "../gui-common" }
 
 [lints.rust]

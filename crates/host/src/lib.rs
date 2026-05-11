@@ -190,34 +190,10 @@ pub struct Args {
     pub host_peers_file: std::path::PathBuf,
 }
 
-// On Windows the GUI crate owns the canonical consent-channel types; re-export
-// them here so the rest of this crate and any integration tests can use
-// `prdt_host::ConsentDecision` etc. regardless of platform.
-#[cfg(windows)]
+// The GUI crate owns the canonical consent-channel types; re-export them here
+// so the rest of this crate and any integration tests can use
+// `prdt_host::ConsentDecision` etc. without a separate import path.
 pub use prdt_gui_host::consent_channel::{ConsentDecision, ConsentRequest, ConsentSender};
-
-// On non-Windows platforms (Linux headless host, CI) define the types locally
-// since prdt-gui-host is a Windows-only dependency.
-#[cfg(not(windows))]
-#[derive(Debug)]
-pub struct ConsentRequest {
-    pub peer_pubkey: prdt_crypto::PubKey,
-    pub responder: tokio::sync::oneshot::Sender<ConsentDecision>,
-}
-
-#[cfg(not(windows))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConsentDecision {
-    Accepted {
-        permissions: prdt_protocol::control::PermissionSet,
-        remember: bool,
-        label: String,
-    },
-    Rejected,
-}
-
-#[cfg(not(windows))]
-pub type ConsentSender = tokio::sync::mpsc::UnboundedSender<ConsentRequest>;
 
 // ---------------------------------------------------------------------------
 // AuthHook implementation for the host
@@ -230,8 +206,16 @@ pub type ConsentSender = tokio::sync::mpsc::UnboundedSender<ConsentRequest>;
 ///
 /// - `Granted` → `AuthDecision::Grant(permissions)`
 /// - `Rejected` → `AuthDecision::Reject { .. }`
-/// - `NeedsConsent` → auto-reject with `ConsentDenied` in headless mode
-///   (T7 will plug in the real GUI prompt via a consent channel)
+/// - `NeedsConsent` → auto-reject with `ConsentDenied`
+///
+/// The Hello-time NeedsConsent path is only ever reached when the pre-Hello
+/// consent gate in `run_host` failed to bring the peer into the validator's
+/// known-peers cache (e.g. headless mode with no GUI consent channel, or a
+/// race where the GUI rejected after disk persistence). In every well-formed
+/// flow the operator's consent decision is applied before Hello via the
+/// pre-Hello gate, so by the time `validate()` runs the peer is already
+/// either accepted (Granted via known-peer fast path) or refused (loop
+/// continues without entering Hello).
 pub struct HostAuthHook {
     validator: std::sync::Arc<auth::AuthValidator>,
 }
@@ -255,7 +239,10 @@ impl AuthHook for HostAuthHook {
             } => AuthDecision::Grant(permissions),
             AuthVerdict::Rejected { code, reason } => AuthDecision::Reject { code, reason },
             AuthVerdict::NeedsConsent { .. } => {
-                // T4: headless stub — auto-reject. T7 will wire the GUI prompt.
+                // Fallthrough: the pre-Hello consent gate should have already
+                // either accepted (and updated known_peers) or short-circuited
+                // the session. Reaching this arm means no GUI channel was
+                // available — typically a headless CLI run.
                 tracing::warn!(
                     peer = %peer_pubkey_b64,
                     "unknown peer needs consent but no GUI prompt available (headless); rejecting"
