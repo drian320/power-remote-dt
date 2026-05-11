@@ -9,6 +9,7 @@ use prdt_gui_common::{generate_qr, Config, TailHandle};
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 
+use crate::consent_channel::{ConsentDecision, ConsentReceiver};
 use crate::keygen;
 use crate::onboarding::{apply_wizard, WizardState};
 
@@ -17,6 +18,11 @@ pub enum Stage {
     NeedsKey,
     Idle,
     Listening,
+}
+
+pub(crate) struct PendingPrompt {
+    state: crate::consent_prompt::ConsentPromptState,
+    responder: tokio::sync::oneshot::Sender<ConsentDecision>,
 }
 
 pub struct HostApp {
@@ -50,6 +56,10 @@ pub struct HostApp {
     host_auth: HostAuthConfig,
     /// Path to host-auth.toml for persistence.
     host_auth_path: PathBuf,
+    /// Receiver half of the consent channel; populated when listening starts.
+    consent_rx: Option<ConsentReceiver>,
+    /// In-flight consent prompt, if any.
+    pending_consent: Option<PendingPrompt>,
 }
 
 impl HostApp {
@@ -98,6 +108,8 @@ impl HostApp {
             wizard: WizardState::new(),
             host_auth,
             host_auth_path,
+            consent_rx: None,
+            pending_consent: None,
         };
         if app.stage == Stage::Idle {
             app.try_load_key(&key_path);
@@ -130,14 +142,12 @@ impl HostApp {
 
     fn start_listening(&mut self) {
         let cancel = CancellationToken::new();
-        // Spawn the host main loop via the injected closure. The closure
-        // is responsible for capturing the current Args, spawning a
-        // tokio task that calls run_host(args, None, cancel), and
-        // returning the JoinHandle.
+        let (consent_tx, consent_rx) = tokio::sync::mpsc::unbounded_channel();
         let _enter = self.rt_handle.enter();
-        let join = (self.run_host)(cancel.clone());
+        let join = (self.run_host)(cancel.clone(), consent_tx);
         self.cancel = Some(cancel);
         self.join = Some(join);
+        self.consent_rx = Some(consent_rx);
         self.stage = Stage::Listening;
     }
 
@@ -147,7 +157,25 @@ impl HostApp {
         }
         // Don't block on join here — let it drop / clean up async.
         self.join = None;
+        self.consent_rx = None;
+        if let Some(p) = self.pending_consent.take() {
+            // sender side will treat the dropped responder as rejection
+            let _ = p.responder.send(ConsentDecision::Rejected);
+        }
         self.stage = Stage::Idle;
+    }
+
+    /// Poll for new consent requests from the host network task.
+    ///
+    /// Drains exactly one pending request into `pending_consent` (only if
+    /// `pending_consent` is currently `None`). On channel disconnect, clears
+    /// `consent_rx`.
+    pub(crate) fn poll_consent_requests(&mut self) {
+        poll_consent_requests_impl(
+            &mut self.consent_rx,
+            &mut self.pending_consent,
+            &self.host_auth,
+        );
     }
 
     fn current_tray_state(&self) -> crate::tray::HostState {
@@ -196,6 +224,38 @@ impl HostApp {
             {
                 self.notifier.fire(crate::notif::NotifKind::Error, last);
             }
+        }
+    }
+}
+
+/// Free function implementing the consent-poll logic so it can be tested
+/// without constructing a full `HostApp`.
+pub(crate) fn poll_consent_requests_impl(
+    rx: &mut Option<ConsentReceiver>,
+    pending: &mut Option<PendingPrompt>,
+    host_auth: &HostAuthConfig,
+) {
+    if pending.is_some() {
+        return;
+    }
+    let Some(rx_ref) = rx.as_mut() else { return };
+    use tokio::sync::mpsc::error::TryRecvError;
+    match rx_ref.try_recv() {
+        Ok(req) => {
+            use std::time::Duration;
+            let state = crate::consent_prompt::ConsentPromptState::new(
+                req.peer_pubkey.to_base64(),
+                host_auth.default_permissions,
+                Duration::from_secs(u64::from(host_auth.consent_timeout_seconds)),
+            );
+            *pending = Some(PendingPrompt {
+                state,
+                responder: req.responder,
+            });
+        }
+        Err(TryRecvError::Empty) => {}
+        Err(TryRecvError::Disconnected) => {
+            *rx = None;
         }
     }
 }
@@ -285,6 +345,18 @@ impl eframe::App for HostApp {
                 }
             }
             return; // block normal UI while wizard is active
+        }
+
+        // Consent prompt: poll for new requests and render any in-flight prompt.
+        // Placed after the wizard return (wizard takes priority) and before
+        // the Settings panel so the prompt overlays Settings if both are active.
+        self.poll_consent_requests();
+        if let Some(p) = self.pending_consent.as_mut() {
+            if let Some(decision) = p.state.show(ctx) {
+                if let Some(p) = self.pending_consent.take() {
+                    let _ = p.responder.send(decision);
+                }
+            }
         }
 
         if self.settings_open {
@@ -389,5 +461,60 @@ impl HostApp {
             ui.add_space(8.0);
             ui.image(egui::load::SizedTexture::new(qr.id(), qr.size_vec2()));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::consent_channel::{ConsentDecision, ConsentRequest};
+    use prdt_gui_common::auth_config::HostAuthConfig;
+
+    #[test]
+    fn poll_consent_requests_picks_up_request() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let _guard = rt.enter();
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ConsentRequest>();
+        let mut consent_rx: Option<ConsentReceiver> = Some(rx);
+        let mut pending: Option<PendingPrompt> = None;
+        let host_auth = HostAuthConfig::default();
+
+        // Send a consent request with a dummy pubkey.
+        let peer_key = prdt_crypto::PubKey([0u8; 32]);
+        let (resp_tx, _resp_rx) = tokio::sync::oneshot::channel::<ConsentDecision>();
+        tx.send(ConsentRequest {
+            peer_pubkey: peer_key,
+            responder: resp_tx,
+        })
+        .unwrap();
+
+        poll_consent_requests_impl(&mut consent_rx, &mut pending, &host_auth);
+
+        assert!(pending.is_some(), "pending_consent should be populated");
+        assert!(consent_rx.is_some(), "rx should still be open");
+    }
+
+    #[test]
+    fn poll_consent_requests_clears_rx_on_disconnect() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let _guard = rt.enter();
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ConsentRequest>();
+        let mut consent_rx: Option<ConsentReceiver> = Some(rx);
+        let mut pending: Option<PendingPrompt> = None;
+        let host_auth = HostAuthConfig::default();
+
+        // Drop the sender so the channel is disconnected.
+        drop(tx);
+
+        poll_consent_requests_impl(&mut consent_rx, &mut pending, &host_auth);
+
+        assert!(consent_rx.is_none(), "rx should be cleared on disconnect");
+        assert!(pending.is_none(), "no pending prompt expected");
     }
 }
