@@ -171,15 +171,6 @@ pub struct KnownPeers {
     pub peers: Vec<KnownPeer>,
 }
 
-// Keep the old name as a type alias so existing `prdt_crypto::KnownPeers`
-// call-sites in host/src/lib.rs continue to compile without modification.
-// The alias points to `KnownPeersFile` which has the text-file API.
-/// Alias for backward-compat with pre-P6 call sites in prdt-host.
-///
-/// New code should use [`KnownPeers`] (TOML-based) or [`KnownPeersFile`]
-/// explicitly.
-pub type KnownPeersLegacy = KnownPeersFile;
-
 #[cfg(test)]
 mod tests {
     use super::*;

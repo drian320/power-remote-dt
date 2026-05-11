@@ -70,7 +70,13 @@ impl HostAuthConfig {
 
     pub fn verify_pin(&self, plain: &str) -> bool {
         match &self.pin_hash {
-            Some(h) => bcrypt::verify(plain, h).unwrap_or(false),
+            Some(h) => bcrypt::verify(plain, h).unwrap_or_else(|e| {
+                tracing::warn!(
+                    error = %e,
+                    "bcrypt::verify failed (corrupted pin_hash?); treating as wrong PIN"
+                );
+                false
+            }),
             None => false,
         }
     }
