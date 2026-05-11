@@ -1,6 +1,62 @@
 use crate::frame::Codec;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum AuthMethod {
+    Tofu = 0,
+    Pin = 1,
+    Ephemeral = 2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PermissionSet {
+    pub input: bool,
+    pub clipboard: bool,
+    pub file_transfer: bool,
+    pub audio: bool,
+}
+
+impl PermissionSet {
+    pub const fn all() -> Self {
+        Self {
+            input: true,
+            clipboard: true,
+            file_transfer: true,
+            audio: true,
+        }
+    }
+    pub const fn view_only() -> Self {
+        Self {
+            input: false,
+            clipboard: false,
+            file_transfer: false,
+            audio: true,
+        }
+    }
+    pub const fn deny_all() -> Self {
+        Self {
+            input: false,
+            clipboard: false,
+            file_transfer: false,
+            audio: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum HelloRejectCode {
+    Unspecified = 0,
+    ProtocolVersionMismatch = 1,
+    UnsupportedCodec = 2,
+    PinRequired = 3,
+    EphemeralRequired = 4,
+    AuthFailed = 5,
+    AuthLockout = 6,
+    ConsentDenied = 7,
+}
+
 /// Rectangle in Windows virtual-desktop coordinate space (inclusive-left,
 /// inclusive-top, exclusive-right, exclusive-bottom — matches Win32 RECT).
 /// Used by HelloAck so the viewer can map local window coordinates into the
@@ -46,6 +102,10 @@ pub enum ControlMessage {
         /// replies with HelloReject if the codec is not in its supported
         /// set.
         codec: Codec,
+        /// P6: authentication method the viewer is using.
+        auth_method: AuthMethod,
+        /// P6: opaque authentication payload (e.g. PIN bytes, ephemeral token).
+        auth_payload: Vec<u8>,
     },
     /// Host → Viewer.
     HelloAck {
@@ -67,6 +127,8 @@ pub enum ControlMessage {
         /// Full set of codecs the host can drive. The viewer uses this for
         /// `--codec auto` fallback selection in later phases.
         host_supported_codecs: Vec<Codec>,
+        /// P6: permissions granted to this viewer session.
+        granted_permissions: PermissionSet,
     },
     /// Bidirectional.
     Bye,
@@ -140,7 +202,11 @@ pub enum ControlMessage {
     /// Host → Viewer. Sent in response to a Hello whose requested codec is
     /// not in the host's supported set, or whose protocol_version is
     /// otherwise incompatible. The viewer should surface `reason` and exit.
-    HelloReject { reason: String },
+    HelloReject {
+        reason: String,
+        /// P6: machine-readable rejection code.
+        code: HelloRejectCode,
+    },
     // DO NOT INSERT VARIANTS ABOVE THIS LINE — bincode discriminants are wire-stable
 }
 
@@ -178,11 +244,13 @@ mod tests {
     #[test]
     fn control_kinds_are_stable() {
         let hello = ControlMessage::Hello {
-            protocol_version: 2,
+            protocol_version: 3,
             req_width: 3840,
             req_height: 2160,
             req_fps: 60,
             codec: Codec::H265,
+            auth_method: AuthMethod::Tofu,
+            auth_payload: vec![],
         };
         assert_eq!(hello.kind_u8(), 0);
         assert_eq!(ControlMessage::Bye.kind_u8(), 2);
@@ -193,6 +261,7 @@ mod tests {
     fn helloreject_kind_is_stable() {
         let r = ControlMessage::HelloReject {
             reason: "nope".into(),
+            code: HelloRejectCode::Unspecified,
         };
         assert_eq!(r.kind_u8(), 22);
     }
@@ -201,6 +270,7 @@ mod tests {
     fn helloreject_round_trip() {
         let msg = ControlMessage::HelloReject {
             reason: "host does not support h264".to_string(),
+            code: HelloRejectCode::Unspecified,
         };
         let bytes = bincode::serialize(&msg).unwrap();
         let back: ControlMessage = bincode::deserialize(&bytes).unwrap();
@@ -220,10 +290,142 @@ mod tests {
             host_virtual_desktop_rect: MonitorRect::new(0, 0, 1920, 1080),
             negotiated_codec: Codec::H264,
             host_supported_codecs: vec![Codec::H265, Codec::H264],
+            granted_permissions: PermissionSet::all(),
         };
         let bytes = bincode::serialize(&msg).unwrap();
         let back: ControlMessage = bincode::deserialize(&bytes).unwrap();
         assert_eq!(msg, back);
+    }
+
+    #[test]
+    fn auth_method_round_trip() {
+        for m in [AuthMethod::Tofu, AuthMethod::Pin, AuthMethod::Ephemeral] {
+            let bytes = bincode::serialize(&m).unwrap();
+            let back: AuthMethod = bincode::deserialize(&bytes).unwrap();
+            assert_eq!(m, back);
+        }
+    }
+
+    #[test]
+    fn auth_method_discriminants_stable() {
+        assert_eq!(bincode::serialize(&AuthMethod::Tofu).unwrap()[0], 0);
+        assert_eq!(bincode::serialize(&AuthMethod::Pin).unwrap()[0], 1);
+        assert_eq!(bincode::serialize(&AuthMethod::Ephemeral).unwrap()[0], 2);
+    }
+
+    #[test]
+    fn permission_set_round_trip_and_constructors() {
+        let s = PermissionSet {
+            input: true,
+            clipboard: false,
+            file_transfer: true,
+            audio: false,
+        };
+        let bytes = bincode::serialize(&s).unwrap();
+        let back: PermissionSet = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(s, back);
+
+        let all = PermissionSet::all();
+        assert!(all.input && all.clipboard && all.file_transfer && all.audio);
+
+        let vo = PermissionSet::view_only();
+        assert!(!vo.input && !vo.clipboard && !vo.file_transfer && vo.audio);
+
+        let deny = PermissionSet::deny_all();
+        assert!(!deny.input && !deny.clipboard && !deny.file_transfer && !deny.audio);
+    }
+
+    #[test]
+    fn hello_reject_code_round_trip_and_discriminants() {
+        let codes = [
+            (HelloRejectCode::Unspecified, 0u8),
+            (HelloRejectCode::ProtocolVersionMismatch, 1),
+            (HelloRejectCode::UnsupportedCodec, 2),
+            (HelloRejectCode::PinRequired, 3),
+            (HelloRejectCode::EphemeralRequired, 4),
+            (HelloRejectCode::AuthFailed, 5),
+            (HelloRejectCode::AuthLockout, 6),
+            (HelloRejectCode::ConsentDenied, 7),
+        ];
+        for (c, disc) in codes {
+            let bytes = bincode::serialize(&c).unwrap();
+            assert_eq!(bytes[0], disc, "{c:?} discriminant changed");
+            let back: HelloRejectCode = bincode::deserialize(&bytes).unwrap();
+            assert_eq!(c, back);
+        }
+    }
+
+    #[test]
+    fn hello_round_trip_with_auth_fields() {
+        let h = ControlMessage::Hello {
+            protocol_version: 3,
+            req_width: 1920,
+            req_height: 1080,
+            req_fps: 60,
+            codec: Codec::H265,
+            auth_method: AuthMethod::Pin,
+            auth_payload: b"correct horse battery staple".to_vec(),
+        };
+        let bytes = bincode::serialize(&h).unwrap();
+        let back: ControlMessage = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(h, back);
+    }
+
+    #[test]
+    fn hello_ack_round_trip_with_permissions() {
+        let h = ControlMessage::HelloAck {
+            session_id: 0xDEADBEEF,
+            host_monotonic_base_us: 42,
+            neg_width: 1920,
+            neg_height: 1080,
+            neg_fps: 60,
+            neg_bitrate_bps: 30_000_000,
+            host_monitor_rect: MonitorRect::new(0, 0, 1920, 1080),
+            host_virtual_desktop_rect: MonitorRect::new(0, 0, 1920, 1080),
+            negotiated_codec: Codec::H265,
+            host_supported_codecs: vec![Codec::H265, Codec::H264],
+            granted_permissions: PermissionSet::view_only(),
+        };
+        let bytes = bincode::serialize(&h).unwrap();
+        let back: ControlMessage = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(h, back);
+    }
+
+    #[test]
+    fn hello_reject_round_trip_with_code() {
+        let r = ControlMessage::HelloReject {
+            reason: "PIN required".into(),
+            code: HelloRejectCode::PinRequired,
+        };
+        let bytes = bincode::serialize(&r).unwrap();
+        let back: ControlMessage = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(r, back);
+    }
+
+    #[test]
+    fn kind_u8_values_unchanged_by_p6() {
+        // P6 only extends existing variants; no new discriminants.
+        assert_eq!(
+            ControlMessage::Hello {
+                protocol_version: 3,
+                req_width: 0,
+                req_height: 0,
+                req_fps: 0,
+                codec: Codec::H265,
+                auth_method: AuthMethod::Tofu,
+                auth_payload: vec![],
+            }
+            .kind_u8(),
+            0
+        );
+        assert_eq!(
+            ControlMessage::HelloReject {
+                reason: "".into(),
+                code: HelloRejectCode::Unspecified,
+            }
+            .kind_u8(),
+            22
+        );
     }
 
     #[test]

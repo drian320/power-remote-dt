@@ -1,6 +1,10 @@
 use std::time::Duration;
 
-use prdt_protocol::{control::ControlMessage, frame::Codec, MonitorRect};
+use prdt_protocol::{
+    control::{AuthMethod, ControlMessage, HelloRejectCode, PermissionSet},
+    frame::Codec,
+    MonitorRect,
+};
 
 use crate::error::TransportError;
 use crate::transport_trait::{ReceivedMessage, Transport};
@@ -9,8 +13,8 @@ pub const DEFAULT_HELLO_TIMEOUT: Duration = Duration::from_secs(3);
 pub const DEFAULT_HELLO_RETRIES: u8 = 3;
 
 /// Wire-level protocol_version that this build of the codebase speaks.
-/// Bumped to 2 in the software-codec / codec-negotiation phase.
-pub const HELLO_PROTOCOL_VERSION: u8 = 2;
+/// Bumped to 3 in the P6 auth phase.
+pub const HELLO_PROTOCOL_VERSION: u8 = 3;
 
 #[derive(Debug, Clone)]
 pub struct HelloRequest {
@@ -56,6 +60,8 @@ pub async fn viewer_handshake<T: Transport>(
             req_height: req.req_height,
             req_fps: req.req_fps,
             codec: req.codec,
+            auth_method: AuthMethod::Tofu,
+            auth_payload: vec![],
         };
         transport.send_control(hello).await?;
 
@@ -73,6 +79,7 @@ pub async fn viewer_handshake<T: Transport>(
                         host_virtual_desktop_rect,
                         negotiated_codec,
                         host_supported_codecs,
+                        granted_permissions: _,
                     }) => {
                         return Ok::<SessionAck, TransportError>(SessionAck {
                             session_id,
@@ -87,7 +94,7 @@ pub async fn viewer_handshake<T: Transport>(
                             host_supported_codecs,
                         });
                     }
-                    ReceivedMessage::Control(ControlMessage::HelloReject { reason }) => {
+                    ReceivedMessage::Control(ControlMessage::HelloReject { reason, code: _ }) => {
                         return Err(TransportError::HelloRejected(reason));
                     }
                     // ignore other messages during handshake
@@ -130,6 +137,8 @@ pub async fn host_handshake<T: Transport>(
                     req_height,
                     req_fps,
                     codec,
+                    auth_method: _,
+                    auth_payload: _,
                 }) => {
                     if protocol_version != HELLO_PROTOCOL_VERSION {
                         // Tell the viewer why and surface UnsupportedVersion.
@@ -138,7 +147,10 @@ pub async fn host_handshake<T: Transport>(
                             HELLO_PROTOCOL_VERSION, protocol_version
                         );
                         let _ = transport
-                            .send_control(ControlMessage::HelloReject { reason })
+                            .send_control(ControlMessage::HelloReject {
+                                reason,
+                                code: HelloRejectCode::ProtocolVersionMismatch,
+                            })
                             .await;
                         return Err(TransportError::Protocol(
                             prdt_protocol::ProtocolError::UnsupportedVersion(protocol_version),
@@ -149,6 +161,7 @@ pub async fn host_handshake<T: Transport>(
                         transport
                             .send_control(ControlMessage::HelloReject {
                                 reason: reason.clone(),
+                                code: HelloRejectCode::UnsupportedCodec,
                             })
                             .await?;
                         return Err(TransportError::HelloRejected(reason));
@@ -164,6 +177,7 @@ pub async fn host_handshake<T: Transport>(
                         host_virtual_desktop_rect,
                         negotiated_codec: codec,
                         host_supported_codecs: supported.clone(),
+                        granted_permissions: PermissionSet::all(),
                     };
                     transport.send_control(ack).await?;
                     return Ok(HelloRequest {
@@ -364,6 +378,8 @@ mod tests {
                 req_height: 1080,
                 req_fps: 60,
                 codec: Codec::H265,
+                auth_method: AuthMethod::Tofu,
+                auth_payload: vec![],
             };
             viewer.send_control(hello).await.unwrap();
             // Drain one inbound control to absorb the HelloReject.
