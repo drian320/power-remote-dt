@@ -2,7 +2,7 @@
 //! are currently online. Runs only while the hosts_list view is open; cancelled
 //! when the caller drops the returned `StopHandle` or calls `stop()`.
 //!
-//! T8 will wire `result_sink` into the actual hosts_list rendering.
+//! TODO(P6 T8): wire result_sink into hosts_list rendering.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -45,8 +45,10 @@ pub fn spawn(
 
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_secs(30));
-        // Tick immediately so the first probe fires without waiting 30s.
-        ticker.tick().await;
+        // MissedTickBehavior::Delay avoids burst catch-up probes if the task
+        // wakes late (e.g. system sleep). The first tick resolves immediately
+        // (tokio interval default), so the initial probe fires without delay.
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
@@ -89,10 +91,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stop_handle_drop_does_not_panic() {
-        // Ensure the StopHandle can be dropped without a running runtime.
-        // The watch channel itself is sync; only the spawned task needs tokio.
-        let (tx, _rx) = watch::channel(true);
+    fn stop_handle_drop_does_not_panic_with_dead_receiver() {
+        // Simulate the spawned task having already exited (receiver dropped).
+        // The `let _ =` in Drop must not panic even with no receiver.
+        let (tx, rx) = watch::channel(true);
+        drop(rx);
         let handle = StopHandle { tx };
         drop(handle); // must not panic
     }
