@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use clap::Parser as _;
+use prdt_gui_common::auth_config::HostAuthConfig;
 use prdt_gui_common::Config;
 use tokio::runtime;
 use tokio::sync::oneshot;
@@ -13,6 +14,11 @@ use tokio_util::sync::CancellationToken;
 enum Tab {
     ThisDevice,
     Connect,
+}
+
+struct PendingPrompt {
+    state: prdt_gui_host::consent_prompt::ConsentPromptState,
+    responder: tokio::sync::oneshot::Sender<prdt_gui_host::consent_channel::ConsentDecision>,
 }
 
 pub struct ClientApp {
@@ -40,10 +46,12 @@ pub struct ClientApp {
     /// Receiver for incoming consent requests from the host listener task.
     /// Polled in `update()` each frame; first request becomes `pending_consent`.
     consent_rx: Option<tokio::sync::mpsc::UnboundedReceiver<prdt_host::ConsentRequest>>,
-    /// The dialog currently being shown to the user. Holds the responder
-    /// oneshot — dropping the Option without sending is treated as Reject by
-    /// `host`'s `resp_rx.await` (Closed → continue / reject).
-    pending_consent: Option<prdt_host::ConsentRequest>,
+    /// In-flight consent prompt state machine + responder oneshot. Dropping
+    /// the `PendingPrompt` without sending is treated as Reject by the host.
+    pending_consent: Option<PendingPrompt>,
+    /// Host-auth config (default permissions, consent timeout). Loaded from
+    /// host-auth.toml at startup; used to initialise each consent prompt.
+    host_auth: HostAuthConfig,
 }
 
 struct ListenerState {
@@ -57,6 +65,13 @@ struct ListenerState {
 
 impl ClientApp {
     pub fn new(cfg: Arc<Mutex<Config>>, config_path: PathBuf, rt_handle: runtime::Handle) -> Self {
+        // Derive host-auth.toml path from the config directory (mirrors gui-host).
+        let host_auth_path = config_path
+            .parent()
+            .map(|p| p.join("host-auth.toml"))
+            .unwrap_or_else(|| PathBuf::from("host-auth.toml"));
+        let host_auth = HostAuthConfig::load_or_default(&host_auth_path).unwrap_or_default();
+
         let mut app = Self {
             cfg,
             config_path,
@@ -71,6 +86,7 @@ impl ClientApp {
             connect_status: None,
             consent_rx: None,
             pending_consent: None,
+            host_auth,
         };
         app.refresh_pubkey();
         app
@@ -178,23 +194,28 @@ impl ClientApp {
             join,
             result_rx: Some(result_rx),
         });
-        self.host_status = Some("starting listener…".into());
+        self.host_status = Some("starting listener\u{2026}".into());
     }
 
     fn stop_listener(&mut self) {
         if let Some(state) = self.listener.take() {
             state.cancel.cancel();
             // Detach: let the wrapper task wind down on the runtime. We don't
-            // need the result here — Stop is user-initiated.
+            // need the result here -- Stop is user-initiated.
             drop(self.rt_handle.spawn(async move {
                 let _ = state.join.await;
             }));
             self.host_status = Some("listener stopped".into());
         }
-        // Drop any consent state. Dropping `pending_consent` closes its
-        // responder oneshot, which the host treats as a reject.
+        // Drop the consent channel first so no new requests arrive.
         self.consent_rx = None;
-        self.pending_consent = None;
+        // Explicitly reject any in-flight prompt so the host task unblocks
+        // immediately rather than waiting for the oneshot to drop.
+        if let Some(p) = self.pending_consent.take() {
+            let _ = p
+                .responder
+                .send(prdt_gui_host::consent_channel::ConsentDecision::Rejected);
+        }
     }
 
     /// Drain the listener result without awaiting. Called every frame; once
@@ -326,7 +347,9 @@ impl ClientApp {
                 ui.colored_label(egui::Color32::LIGHT_RED, err);
             }
             (None, None) => {
-                ui.label("Pubkey: (not generated yet — start the listener to create host-key.bin)");
+                ui.label(
+                    "Pubkey: (not generated yet \u{2014} start the listener to create host-key.bin)",
+                );
             }
         }
 
@@ -338,12 +361,12 @@ impl ClientApp {
         let listening = self.is_listening();
         ui.horizontal(|ui| {
             if listening {
-                ui.colored_label(egui::Color32::LIGHT_GREEN, "● Listening");
+                ui.colored_label(egui::Color32::LIGHT_GREEN, "\u{25cf} Listening");
                 if ui.button("Stop Listener").clicked() {
                     self.stop_listener();
                 }
             } else {
-                ui.colored_label(egui::Color32::GRAY, "○ Idle");
+                ui.colored_label(egui::Color32::GRAY, "\u{25cb} Idle");
                 if ui.button("Start Listener").clicked() {
                     self.start_listener();
                     self.refresh_pubkey();
@@ -373,58 +396,20 @@ impl ClientApp {
     /// buffered in the unbounded channel until the user dismisses the
     /// current dialog.
     fn poll_consent_channel(&mut self) {
-        if self.pending_consent.is_some() {
-            return;
-        }
-        if let Some(rx) = self.consent_rx.as_mut() {
-            if let Ok(req) = rx.try_recv() {
-                self.pending_consent = Some(req);
-            }
-        }
+        poll_consent_channel_impl(
+            &mut self.consent_rx,
+            &mut self.pending_consent,
+            &self.host_auth,
+        );
     }
 
     fn draw_consent_dialog(&mut self, ctx: &egui::Context) {
-        if self.pending_consent.is_none() {
+        let Some(p) = self.pending_consent.as_mut() else {
             return;
-        }
-        let mut decision: Option<prdt_host::ConsentDecision> = None;
-        egui::Window::new("Incoming connection")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .show(ctx, |ui| {
-                let req = self.pending_consent.as_ref().unwrap();
-                ui.label("An unknown viewer is requesting to connect:");
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.label("pubkey:");
-                    ui.monospace(req.peer_pubkey.to_base64());
-                });
-                ui.add_space(8.0);
-                ui.label(
-                    "Accepting will add this peer to known-peer-ids — \
-                     future connections from this pubkey will be silent.",
-                );
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Reject").clicked() {
-                        decision = Some(prdt_host::ConsentDecision::Rejected);
-                    }
-                    // TODO(P6 T7 follow-up): replace this hard-coded accept with
-                    // ConsentPromptState modal so the operator gets per-prompt
-                    // permission toggles + label input (same UX as gui-host).
-                    if ui.button("Accept and remember").clicked() {
-                        decision = Some(prdt_host::ConsentDecision::Accepted {
-                            permissions: prdt_protocol::PermissionSet::all(),
-                            remember: true,
-                            label: String::new(),
-                        });
-                    }
-                });
-            });
-        if let Some(d) = decision {
-            if let Some(req) = self.pending_consent.take() {
-                let _ = req.responder.send(d);
+        };
+        if let Some(decision) = p.state.show(ctx) {
+            if let Some(p) = self.pending_consent.take() {
+                let _ = p.responder.send(decision);
             }
         }
     }
@@ -453,5 +438,94 @@ impl ClientApp {
                 ui.label(status);
             }
         }
+    }
+}
+
+/// Free function implementing the consent-poll logic so it can be tested
+/// without constructing a full `ClientApp`.
+fn poll_consent_channel_impl(
+    rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<prdt_host::ConsentRequest>>,
+    pending: &mut Option<PendingPrompt>,
+    host_auth: &HostAuthConfig,
+) {
+    if pending.is_some() {
+        return;
+    }
+    let Some(rx_ref) = rx.as_mut() else { return };
+    use tokio::sync::mpsc::error::TryRecvError;
+    match rx_ref.try_recv() {
+        Ok(req) => {
+            let state = prdt_gui_host::consent_prompt::ConsentPromptState::new(
+                req.peer_pubkey.to_base64(),
+                host_auth.default_permissions,
+                std::time::Duration::from_secs(u64::from(host_auth.consent_timeout_seconds)),
+            );
+            *pending = Some(PendingPrompt {
+                state,
+                responder: req.responder,
+            });
+        }
+        Err(TryRecvError::Empty) => {}
+        Err(TryRecvError::Disconnected) => {
+            *rx = None;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prdt_gui_host::consent_channel::{ConsentDecision, ConsentRequest};
+
+    #[test]
+    fn poll_consent_channel_picks_up_request() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let _guard = rt.enter();
+
+        let (tx, rx) =
+            tokio::sync::mpsc::unbounded_channel::<prdt_host::ConsentRequest>();
+        let mut consent_rx: Option<tokio::sync::mpsc::UnboundedReceiver<prdt_host::ConsentRequest>> =
+            Some(rx);
+        let mut pending: Option<PendingPrompt> = None;
+        let host_auth = HostAuthConfig::default();
+
+        // Send a consent request with a dummy pubkey.
+        let peer_key = prdt_crypto::PubKey([0u8; 32]);
+        let (resp_tx, _resp_rx) = tokio::sync::oneshot::channel::<ConsentDecision>();
+        tx.send(ConsentRequest {
+            peer_pubkey: peer_key,
+            responder: resp_tx,
+        })
+        .unwrap();
+
+        poll_consent_channel_impl(&mut consent_rx, &mut pending, &host_auth);
+
+        assert!(pending.is_some(), "pending_consent should be populated");
+        assert!(consent_rx.is_some(), "rx should still be open");
+    }
+
+    #[test]
+    fn poll_consent_channel_clears_rx_on_disconnect() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let _guard = rt.enter();
+
+        let (tx, rx) =
+            tokio::sync::mpsc::unbounded_channel::<prdt_host::ConsentRequest>();
+        let mut consent_rx: Option<tokio::sync::mpsc::UnboundedReceiver<prdt_host::ConsentRequest>> =
+            Some(rx);
+        let mut pending: Option<PendingPrompt> = None;
+        let host_auth = HostAuthConfig::default();
+
+        // Drop the sender so the channel is disconnected.
+        drop(tx);
+
+        poll_consent_channel_impl(&mut consent_rx, &mut pending, &host_auth);
+
+        assert!(consent_rx.is_none(), "rx should be cleared on disconnect");
+        assert!(pending.is_none(), "no pending prompt expected");
     }
 }
