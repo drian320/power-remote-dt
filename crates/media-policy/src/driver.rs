@@ -39,7 +39,7 @@ impl PolicyDriven {
         if ranked.is_empty() {
             return Err(FactoryError::Unavailable(
                 BackendKind::Openh264,
-                "no candidate survived policy filter".into(),
+                "policy filter rejected all probed backends; this is not an Openh264-specific failure".into(),
             ));
         }
         let mut last_err: Option<FactoryError> = None;
@@ -135,27 +135,37 @@ impl PolicyDriven {
 #[async_trait]
 impl VideoProducer for PolicyDriven {
     async fn next_frame(&mut self) -> Result<EncodedFrame, ProducerError> {
-        let t0 = Instant::now();
-        match self.inner.next_frame().await {
-            Ok(frame) => {
-                let encode_us = t0.elapsed().as_micros() as u64;
-                self.history.update_encode_p95(self.inner_kind, encode_us);
-                self.history.record_success(self.inner_kind);
-                let action = self.monitor.record_encode(encode_us);
-                self.handle_action(action)?;
-                Ok(frame)
-            }
-            Err(e) => {
-                let action = self.monitor.record_failure(&e);
-                if action.is_some() {
+        // Loop up to twice: first attempt on current backend, second attempt
+        // on the new backend after a failover. Both attempts go through the
+        // full Ok/Err instrumentation path.
+        for attempt in 0..2 {
+            let t0 = Instant::now();
+            match self.inner.next_frame().await {
+                Ok(frame) => {
+                    let encode_us = t0.elapsed().as_micros() as u64;
+                    self.history.update_encode_p95(self.inner_kind, encode_us);
+                    self.history.record_success(self.inner_kind);
+                    let action = self.monitor.record_encode(encode_us);
                     self.handle_action(action)?;
-                    // Retry on the new backend.
-                    self.inner.next_frame().await
-                } else {
-                    Err(e)
+                    return Ok(frame);
+                }
+                Err(e) => {
+                    let action = self.monitor.record_failure(&e);
+                    match (action, attempt) {
+                        // First attempt failed with an action: handle (e.g. swap), retry.
+                        (Some(a), 0) => {
+                            self.handle_action(Some(a))?;
+                            continue;
+                        }
+                        // First attempt failed but no action returned: bubble up.
+                        // Or: retry after swap also failed (any reason): bubble up.
+                        _ => return Err(e),
+                    }
                 }
             }
         }
+        // Unreachable: the loop returns on every iteration.
+        unreachable!("next_frame loop should always return")
     }
 
     fn request_idr(&mut self) { self.inner.request_idr(); }
