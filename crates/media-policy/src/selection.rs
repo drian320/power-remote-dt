@@ -70,13 +70,17 @@ impl HistoryTable {
     }
     pub fn record_failure(&mut self, backend: BackendKind, now: Instant) {
         let s = self.counts.entry(backend).or_default();
+        // Read previous cooldown LENGTH before mutating last_failure_at.
+        // Sequence: failure → cooldown of duration D from that failure → next failure
+        // doubles D. Cap at 300s.
+        let prev = match (s.cooldown_until, s.last_failure_at) {
+            (Some(c), Some(prev_failure)) => c
+                .checked_duration_since(prev_failure)
+                .unwrap_or(Duration::from_secs(5)),
+            _ => Duration::from_secs(5),
+        };
         s.failures += 1;
         s.last_failure_at = Some(now);
-        // Exponential backoff capped at 300s.
-        let prev = s
-            .cooldown_until
-            .and_then(|t| t.checked_duration_since(s.last_failure_at.unwrap_or(now)))
-            .unwrap_or(Duration::from_secs(5));
         let next = (prev * 2).min(Duration::from_secs(300));
         s.cooldown_until = Some(now + next.max(Duration::from_secs(10)));
     }
@@ -125,11 +129,31 @@ impl ScoringPolicy {
     /// Reads `dirs::config_dir()/prdt/policy.toml` if present; falls back to
     /// defaults on any read/parse error. No CLI flag override in P5A.
     pub fn load_default_or_fallback() -> Self {
-        let path = dirs::config_dir().map(|d| d.join("prdt").join("policy.toml"));
-        let weights = path
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|s| toml::from_str::<ScoringWeights>(&s).ok())
-            .unwrap_or_default();
+        let Some(path) = dirs::config_dir().map(|d| d.join("prdt").join("policy.toml")) else {
+            return Self { weights: ScoringWeights::default() };
+        };
+        let weights = match std::fs::read_to_string(&path) {
+            Ok(s) => match toml::from_str::<ScoringWeights>(&s) {
+                Ok(w) => w,
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "policy.toml parse failed; using default weights"
+                    );
+                    ScoringWeights::default()
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => ScoringWeights::default(),
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "policy.toml read failed; using default weights"
+                );
+                ScoringWeights::default()
+            }
+        };
         Self { weights }
     }
 }
@@ -331,18 +355,46 @@ mod tests {
     }
 
     #[test]
+    fn record_failure_doubles_cooldown_on_repeat() {
+        let mut h = HistoryTable::new();
+        let t0 = Instant::now();
+        // First failure: cooldown should be 10s (5s default × 2 = 10s, clamped to min 10s).
+        h.record_failure(BackendKind::Nvenc, t0);
+        let cd1 = h.stats(BackendKind::Nvenc).cooldown_until.unwrap();
+        let dur1 = cd1.duration_since(t0);
+        assert_eq!(dur1, Duration::from_secs(10), "first cooldown should be 10s");
+
+        // Second failure AT cooldown end (so prev = 10s exactly): next = 20s.
+        let t1 = cd1; // exactly when first cooldown expires
+        h.record_failure(BackendKind::Nvenc, t1);
+        let cd2 = h.stats(BackendKind::Nvenc).cooldown_until.unwrap();
+        let dur2 = cd2.duration_since(t1);
+        assert_eq!(dur2, Duration::from_secs(20), "second cooldown should double to 20s");
+
+        // Third failure: next = 40s.
+        let t2 = cd2;
+        h.record_failure(BackendKind::Nvenc, t2);
+        let cd3 = h.stats(BackendKind::Nvenc).cooldown_until.unwrap();
+        let dur3 = cd3.duration_since(t2);
+        assert_eq!(dur3, Duration::from_secs(40), "third cooldown should double to 40s");
+    }
+
+    #[test]
     fn beta_posterior_cold_start_is_half() {
         assert!((beta_posterior(0, 0) - 0.5).abs() < 1e-9);
     }
 
     proptest::proptest! {
-        /// Property: for any input ordering of the same set of candidates,
-        /// `rank` returns the same result. Determinism across shuffles.
+        /// Property: reversing the input candidate list does not change the
+        /// rank output. A focused regression for the deterministic tie-break
+        /// — a fuller permutation test would require a proper shuffle strategy
+        /// (deferred; see follow-up).
         #[test]
-        fn rank_is_invariant_under_input_shuffle(
+        fn rank_reversed_input_yields_same_ordering(
             seed in 0u64..1000,
         ) {
-            let _ = seed; // explicit seed argument keeps proptest stable
+            use proptest::prelude::*;
+            let _ = seed;
             let mut candidates = vec![
                 cap(BackendKind::Nvenc, Codec::H265, 100, true),
                 cap(BackendKind::MfHevc, Codec::H265, 80, true),
@@ -350,10 +402,9 @@ mod tests {
             ];
             let p = ScoringPolicy::new(ScoringWeights::default());
             let baseline = p.rank(&candidates, &ctx_h265_1080p60(), &HistoryTable::new());
-            // Reverse the input — same result.
             candidates.reverse();
             let reversed = p.rank(&candidates, &ctx_h265_1080p60(), &HistoryTable::new());
-            proptest::prop_assert_eq!(baseline, reversed);
+            prop_assert_eq!(baseline, reversed);
         }
     }
 }
