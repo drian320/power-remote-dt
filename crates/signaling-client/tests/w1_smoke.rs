@@ -2,6 +2,8 @@
 //! CustomUdpTransport Noise handshake + Hello/HelloAck. Must complete within 15s.
 //!
 //! Locks in the Phase 2 W1 exit criterion: same-machine LAN loopback works through signaling.
+// viewer_handshake is deprecated for production use; kept for transport integration tests.
+#![allow(deprecated)]
 
 use prdt_crypto::KeyPair;
 use prdt_protocol::control::PermissionSet;

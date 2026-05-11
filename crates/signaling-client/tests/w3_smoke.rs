@@ -2,6 +2,8 @@
 //! signaling-server + probe_and_commit_peer + Noise + Hello/HelloAck.
 //! Proves the full pipeline wires up correctly and the probe selects a
 //! reachable candidate.
+// viewer_handshake is deprecated for production use; kept for transport integration tests.
+#![allow(deprecated)]
 
 use bytecodec::{DecodeExt, EncodeExt};
 use prdt_crypto::KeyPair;

@@ -92,8 +92,17 @@ pub struct SessionAck {
 }
 
 /// Send Hello, await HelloAck (or HelloReject). Retries on timeout, returns
-/// session info on success. Returns `HelloRejected` immediately if the host
-/// replies with HelloReject — there's no point retrying a rejection.
+/// session info on success. Returns `HelloRejectedWithCode` immediately if the
+/// host replies with HelloReject — there's no point retrying a rejection.
+///
+/// # Deprecation
+///
+/// Production viewer code should use `run_viewer_auth_loop` (in `prdt-viewer`)
+/// which handles PIN/Ephemeral re-prompts and maps all `HelloRejectCode` variants
+/// to user-visible errors. This function is retained only for transport-layer
+/// integration tests (signaling smoke tests) that need a minimal one-shot handshake.
+#[deprecated(note = "Use `run_viewer_auth_loop` for production viewer code; \
+            `viewer_handshake` is kept for transport-layer integration tests only.")]
 pub async fn viewer_handshake<T: Transport>(
     transport: &T,
     req: &HelloRequest,
@@ -283,6 +292,7 @@ pub async fn host_handshake<T: Transport, A: AuthHook>(
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // viewer_handshake is tested here as a transport primitive
 mod tests {
     use super::*;
     use crate::loopback::{InProcTransport, LoopbackOptions};

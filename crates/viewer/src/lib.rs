@@ -449,8 +449,8 @@ struct ViewerShared {
     /// applies it in `about_to_wait`. `None` until we have a first value.
     status_title: Mutex<Option<String>>,
     /// Permissions granted by the host in HelloAck (P6 T5).
-    /// Written once by the worker task after handshake; read by the overlay.
-    #[cfg(windows)]
+    /// Written once by the worker task after handshake; read by the overlay
+    /// (Windows) and available for future Linux overlay consumers.
     granted_permissions: Mutex<Option<prdt_protocol::PermissionSet>>,
 }
 
@@ -1125,10 +1125,13 @@ impl HelloTransport for TransportAdapter {
 /// CLI-side prompt provider. Uses the pre-supplied `--pin` / `--ephemeral`
 /// values on the first call; subsequent calls (after `AuthFailed`) return
 /// `PromptDisabled` — the CLI has no interactive stdin prompt in headless mode,
-/// and `--no-auth-prompt` explicitly blocks re-prompting.
+/// and `--no-auth-prompt` explicitly blocks all credential supply.
 struct CliPromptProvider {
     pin: Option<String>,
     ephemeral: Option<String>,
+    /// When true, return `PromptDisabled` immediately if no cached value exists.
+    /// Corresponds to the `--no-auth-prompt` CLI flag.
+    no_prompt: bool,
     /// Tracks whether we've already consumed the pre-supplied pin.
     pin_used: std::sync::atomic::AtomicBool,
     /// Tracks whether we've already consumed the pre-supplied ephemeral.
@@ -1136,10 +1139,11 @@ struct CliPromptProvider {
 }
 
 impl CliPromptProvider {
-    fn new(pin: Option<String>, ephemeral: Option<String>, _no_prompt: bool) -> Self {
+    fn new(pin: Option<String>, ephemeral: Option<String>, no_prompt: bool) -> Self {
         Self {
             pin,
             ephemeral,
+            no_prompt,
             pin_used: std::sync::atomic::AtomicBool::new(false),
             eph_used: std::sync::atomic::AtomicBool::new(false),
         }
@@ -1150,6 +1154,10 @@ impl CliPromptProvider {
 impl AuthPromptProvider for CliPromptProvider {
     async fn get_pin(&self) -> Result<String, AuthLoopError> {
         use std::sync::atomic::Ordering;
+        // Honour --no-auth-prompt: if set and no cached PIN was provided, fail fast.
+        if self.no_prompt && self.pin.is_none() {
+            return Err(AuthLoopError::PromptDisabled);
+        }
         if !self.pin_used.swap(true, Ordering::Relaxed) {
             if let Some(ref p) = self.pin {
                 return Ok(p.clone());
@@ -1160,6 +1168,10 @@ impl AuthPromptProvider for CliPromptProvider {
 
     async fn get_ephemeral(&self) -> Result<String, AuthLoopError> {
         use std::sync::atomic::Ordering;
+        // Honour --no-auth-prompt: if set and no cached ephemeral was provided, fail fast.
+        if self.no_prompt && self.ephemeral.is_none() {
+            return Err(AuthLoopError::PromptDisabled);
+        }
         if !self.eph_used.swap(true, Ordering::Relaxed) {
             if let Some(ref e) = self.ephemeral {
                 return Ok(e.clone());
@@ -1280,7 +1292,6 @@ pub fn run_with_args(
         file_drop_tx,
         latency: Arc::new(LatencyProbe::new()),
         status_title: Mutex::new(None),
-        #[cfg(windows)]
         granted_permissions: Mutex::new(None),
     });
 
@@ -1600,11 +1611,9 @@ fn spawn_worker_tasks(
                 return;
             }
         };
-        // Store granted_permissions for the overlay stats payload.
-        #[cfg(windows)]
-        {
-            *shared.granted_permissions.lock().unwrap() = Some(ack.granted_permissions);
-        }
+        // Store granted_permissions on all platforms (overlay IPC is Windows-only
+        // today, but Linux will grow an overlay consumer; the Mutex costs nothing).
+        *shared.granted_permissions.lock().unwrap() = Some(ack.granted_permissions);
         info!(
             session_id = format!("{:#x}", ack.session_id),
             neg = format!("{}x{}@{}", ack.neg_width, ack.neg_height, ack.neg_fps),

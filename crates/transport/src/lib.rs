@@ -13,6 +13,7 @@ pub mod udp;
 pub use assembler::{FeedResult, FrameAssembler, DEFAULT_ASSEMBLY_TIMEOUT, STALE_SEQ_WINDOW};
 pub use error::TransportError;
 pub use fec::{FecCodec, DEFAULT_K, DEFAULT_M};
+#[allow(deprecated)] // re-export viewer_handshake for downstream integration tests
 pub use handshake::{
     host_handshake, viewer_handshake, AuthDecision, AuthHook, HelloRequest, HostHandshakeResult,
     SessionAck, DEFAULT_HELLO_RETRIES, DEFAULT_HELLO_TIMEOUT,

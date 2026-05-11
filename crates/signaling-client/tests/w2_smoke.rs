@@ -3,6 +3,8 @@
 //! Asserts both peers see Host in peer_candidates (Srflx is observational due
 //! to the commit-on-first-Host race) and still establish a working encrypted
 //! channel (peer_addr still = Host candidate in W2).
+// viewer_handshake is deprecated for production use; kept for transport integration tests.
+#![allow(deprecated)]
 
 use bytecodec::{DecodeExt, EncodeExt};
 use prdt_crypto::KeyPair;
