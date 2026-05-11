@@ -986,6 +986,7 @@ pub fn run_with_args(
         args.no_adaptive_bitrate,
         args.bitrate_mbps.saturating_mul(1_000_000),
         Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        Arc::new(std::sync::atomic::AtomicU64::new(0)),
     );
 
     // Build the event loop + app.
@@ -1041,6 +1042,7 @@ fn spawn_worker_tasks(
     no_adaptive_bitrate: bool,
     max_bitrate_bps: u32,
     purged_since_tick: Arc<std::sync::atomic::AtomicU64>,
+    frames_recv_since_tick: Arc<std::sync::atomic::AtomicU64>,
 ) {
     handle.clone().spawn(async move {
         // CLI --bind supplies the local UDP bind (default 0.0.0.0:0). We only
@@ -1366,6 +1368,7 @@ fn spawn_worker_tasks(
         let recv_audio_tx = audio_pcm_tx;
         let recv_ft_dir = recv_dir.clone();
         let purged_since_tick_recv = Arc::clone(&purged_since_tick);
+        let frames_recv_since_tick_recv = Arc::clone(&frames_recv_since_tick);
         let recv_task = tokio::spawn(async move {
             info!("recv_task started");
             let mut ft_rx = TransferReceiver::new(recv_ft_dir, DEFAULT_MAX_TRANSFER_BYTES);
@@ -1441,6 +1444,8 @@ fn spawn_worker_tasks(
                 match recv_result {
                     Ok(ReceivedMessage::Video(frame)) => {
                         frame_count += 1;
+                        frames_recv_since_tick_recv
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let seq = frame.seq;
                         let host_ts_us = frame.timestamp_host_us;
                         let is_kf = frame.is_keyframe;
@@ -1686,12 +1691,11 @@ fn spawn_worker_tasks(
         };
         let bitrate_transport = Arc::clone(&transport);
         let purged_since_tick_latency = Arc::clone(&purged_since_tick);
+        let frames_recv_since_tick_latency = Arc::clone(&frames_recv_since_tick);
         let latency_task = tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(1));
             ticker.tick().await; // fire first tick immediately; skip it
             let mut ticks_since_report: u32 = 0;
-            // L3: caller-side rolling window state.
-            let mut last_total_samples: u64 = 0;
             loop {
                 ticker.tick().await;
 
@@ -1732,28 +1736,21 @@ fn spawn_worker_tasks(
                     );
                 }
 
-                // L3: adaptive bitrate step.
-                // recv_task is the sole owner of purge_assembler(); we
-                // read its accumulated count via an atomic swap to avoid
-                // the double-purge race that would silence IDR detection.
+                // L3: adaptive bitrate step. Use monotonic frame-arrival counter
+                // from recv_task (saturating-incremented per received frame) instead
+                // of LatencyProbe.samples which is capped at SAMPLE_WINDOW=240 and
+                // would saturate after ~10s, making delta_total=0 → spurious 100%
+                // loss on any purge.
                 let lost = purged_since_tick_latency
                     .swap(0, std::sync::atomic::Ordering::Relaxed);
-                let curr_total_samples = snap
-                    .present
-                    .map(|p| p.samples as u64)
-                    .unwrap_or(last_total_samples);
-                let delta_total = curr_total_samples.saturating_sub(last_total_samples);
-                // Always update baseline so it is ready when present arrives.
-                last_total_samples = curr_total_samples;
-                let total_window = delta_total.saturating_add(lost);
-                // L3 warmup guard: skip controller until at least one present
-                // sample has been observed or we have a non-zero baseline.
-                // Without this, tick-1 connection-setup purges (lost > 0) with
-                // no present samples (delta_total = 0) yield total_window =
-                // lost, which the controller reads as 100% loss and fires an
-                // immediate multiplicative-decrease before any real frames are
-                // decoded.
-                let has_baseline = snap.present.is_some() || last_total_samples > 0;
+                let received_in_window = frames_recv_since_tick_latency
+                    .swap(0, std::sync::atomic::Ordering::Relaxed);
+                let total_window = received_in_window.saturating_add(lost);
+                // Warmup guard: skip controller until we've actually seen at least
+                // one received frame OR a purge event in the window. Tick-1 with
+                // both counters zero would otherwise feed (0, 0) to the controller
+                // which is a no-op anyway, but skip explicitly for clarity.
+                let has_baseline = received_in_window > 0 || lost > 0;
                 if has_baseline {
                     bitrate_controller.observe(lost, total_window);
                     bitrate_controller.aimd_step(std::time::Instant::now());

@@ -25,7 +25,7 @@ use prdt_transport::{
     UdpTransportConfig,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use status::SharedStatus;
 
@@ -510,7 +510,7 @@ pub async fn run_host(
                         }
                         if let Some(bps) = latest_bps {
                             producer.set_target_bitrate(bps);
-                            info!(target_bps = bps, "applied viewer-requested bitrate");
+                            debug!(target_bps = bps, "applied viewer-requested bitrate");
                         }
                         if video_force_idr.swap(false, Ordering::AcqRel) {
                             producer.request_idr();
@@ -635,6 +635,7 @@ pub async fn run_host(
         let cancel_input_propagate = cancel.clone();
         let last_ka_input = Arc::clone(&last_keepalive);
         let input_force_idr = Arc::clone(&force_idr_flag);
+        let host_max_bps = args.bitrate_mbps.saturating_mul(1_000_000);
         let input = tokio::spawn(async move {
             let mut ft_rx = TransferReceiver::new(FILE_RECV_DIR, DEFAULT_MAX_TRANSFER_BYTES);
             loop {
@@ -690,8 +691,21 @@ pub async fn run_host(
                             Ok(ReceivedMessage::Control(ControlMessage::SetBitrate {
                                 target_bps,
                             })) => {
-                                info!(target_bps, "viewer requested bitrate change");
-                                let _ = bitrate_tx.send(target_bps);
+                                const HOST_MIN_BPS: u32 = 1_000_000;
+                                let clamped = target_bps.clamp(HOST_MIN_BPS, host_max_bps);
+                                if clamped != target_bps {
+                                    warn!(
+                                        target_bps,
+                                        clamped,
+                                        host_max_bps,
+                                        "viewer SetBitrate out of host range; clamping"
+                                    );
+                                }
+                                info!(
+                                    target_bps = clamped,
+                                    "viewer requested bitrate change"
+                                );
+                                let _ = bitrate_tx.send(clamped);
                             }
                             Ok(ReceivedMessage::Control(msg)) => {
                                 let _ = ft_rx.handle(msg);
