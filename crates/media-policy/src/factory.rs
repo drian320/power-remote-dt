@@ -39,8 +39,10 @@ mod tests {
     use prdt_protocol::{EncodedFrame, ProducerError, VideoProducer};
     use std::sync::Mutex;
 
-    /// In-memory producer that records every method call and returns a
-    /// configurable result. Re-used in T6 integration test.
+    /// Deterministic in-memory producer used in this file's unit tests.
+    /// Integration tests in `tests/` and downstream tasks (T6) define their
+    /// own scripted producer inline (the `cfg(test)` module is not reachable
+    /// across crate boundaries).
     pub struct ScriptedProducer {
         pub name: &'static str,
     }
