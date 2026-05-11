@@ -101,9 +101,10 @@ impl InitParams {
         config.rcParams.rateControlMode = ffi::NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CBR;
         config.rcParams.averageBitRate = cfg.bitrate_bps;
         config.rcParams.maxBitRate = cfg.bitrate_bps;
-        // VBV buffer = 1 frame at target bitrate for low-latency.
-        config.rcParams.vbvBufferSize = cfg.bitrate_bps / cfg.fps_numerator.max(1);
-        config.rcParams.vbvInitialDelay = config.rcParams.vbvBufferSize;
+        // VBV buffer = 1 frame at target bitrate for low-latency. Helper
+        // shared with L4 reconfigure so init and reconfigure stay coupled.
+        config.rcParams.vbvBufferSize = vbv_buffer_size_for(cfg.bitrate_bps, cfg.fps_numerator);
+        config.rcParams.vbvInitialDelay = vbv_initial_delay_for(cfg.bitrate_bps, cfg.fps_numerator);
         config.gopLength = cfg.gop_length;
         config.frameIntervalP = 1; // IPP only, no B-frames
 
@@ -126,6 +127,29 @@ impl InitParams {
         params.enableRepeatSPSPPS = 1;
 
         InitParams { params, config }
+    }
+
+    /// L4: live access to the embedded NV_ENC_CONFIG so reconfigure can
+    /// mutate rate-control params (averageBitRate, maxBitRate, vbvBufferSize,
+    /// vbvInitialDelay) without copying the Box (which would invalidate
+    /// the encodeConfig pointer NVENC holds).
+    pub(crate) fn encode_config_mut(&mut self) -> &mut ffi::NV_ENC_CONFIG {
+        &mut self.config
+    }
+
+    /// L4: by-reference view of the outer NV_ENC_INITIALIZE_PARAMS so the
+    /// caller can copy the POD struct (whose encodeConfig pointer remains
+    /// valid because self owns the underlying Box).
+    pub(crate) fn as_ffi(&self) -> &ffi::NV_ENC_INITIALIZE_PARAMS {
+        &self.params
+    }
+
+    pub(crate) fn fps_numerator(&self) -> u32 {
+        self.params.frameRateNum
+    }
+
+    pub(crate) fn fps_denominator(&self) -> u32 {
+        self.params.frameRateDen
     }
 }
 
@@ -207,6 +231,31 @@ pub fn nv_encode_api_function_list_ver() -> u32 {
 #[cfg(prdt_nvenc_bindings)]
 pub fn nv_enc_preset_config_ver() -> u32 {
     nv_enc_struct_version(5) | (1 << 31)
+}
+
+/// L4: VBV buffer size at the given bitrate and FPS. Mirrors the inline
+/// formula at the call site in `InitParams::new` (1-frame buffer at target
+/// bitrate for low-latency screen-share). Used by both init and L4
+/// reconfigure so the values stay coupled.
+#[cfg(prdt_nvenc_bindings)]
+pub(crate) const fn vbv_buffer_size_for(bps: u32, fps: u32) -> u32 {
+    bps / if fps == 0 { 1 } else { fps }
+}
+
+/// L4: VBV initial delay matches buffer size for the same low-latency
+/// reasoning.
+#[cfg(prdt_nvenc_bindings)]
+pub(crate) const fn vbv_initial_delay_for(bps: u32, fps: u32) -> u32 {
+    vbv_buffer_size_for(bps, fps)
+}
+
+/// L4: NV_ENC_RECONFIGURE_PARAMS version. SDK 13 nvEncodeAPI.h:
+/// `#define NV_ENC_RECONFIGURE_PARAMS_VER (NVENCAPI_STRUCT_VERSION(1) | (1<<31))`
+/// The high bit is required for this struct (and a few others); see SDK
+/// header comments. Mirrors the pattern of `nv_enc_initialize_params_ver`.
+#[cfg(prdt_nvenc_bindings)]
+pub(crate) const fn nv_enc_reconfigure_params_ver() -> u32 {
+    nv_enc_struct_version(1) | (1 << 31)
 }
 
 #[cfg(test)]
