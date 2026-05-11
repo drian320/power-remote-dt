@@ -670,12 +670,15 @@ mod control_tests {
 
     #[test]
     fn control_hello_round_trip() {
+        use crate::control::AuthMethod;
         let msg = ControlMessage::Hello {
-            protocol_version: 2,
+            protocol_version: 3,
             req_width: 3840,
             req_height: 2160,
             req_fps: 60,
             codec: Codec::H265,
+            auth_method: AuthMethod::Tofu,
+            auth_payload: vec![],
         };
         let buf = encode_control(&msg).unwrap();
         assert_eq!(buf[0], msg.kind_u8());
@@ -685,8 +688,10 @@ mod control_tests {
 
     #[test]
     fn control_helloreject_round_trip() {
+        use crate::control::HelloRejectCode;
         let msg = ControlMessage::HelloReject {
             reason: "host does not support h264".to_string(),
+            code: HelloRejectCode::Unspecified,
         };
         let buf = encode_control(&msg).unwrap();
         assert_eq!(buf[0], 22);
@@ -696,8 +701,12 @@ mod control_tests {
 
     #[test]
     fn control_kind_22_accepted() {
+        use crate::control::HelloRejectCode;
         // kind 22 (HelloReject) must pass the upper-bound check.
-        let msg = ControlMessage::HelloReject { reason: "x".into() };
+        let msg = ControlMessage::HelloReject {
+            reason: "x".into(),
+            code: HelloRejectCode::Unspecified,
+        };
         let buf = encode_control(&msg).unwrap();
         assert!(decode_control(&buf).is_ok());
     }

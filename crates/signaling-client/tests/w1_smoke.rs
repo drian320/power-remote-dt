@@ -2,17 +2,28 @@
 //! CustomUdpTransport Noise handshake + Hello/HelloAck. Must complete within 15s.
 //!
 //! Locks in the Phase 2 W1 exit criterion: same-machine LAN loopback works through signaling.
+// viewer_handshake is deprecated for production use; kept for transport integration tests.
+#![allow(deprecated)]
 
 use prdt_crypto::KeyPair;
+use prdt_protocol::control::PermissionSet;
 use prdt_protocol::{frame::Codec, MonitorRect};
 use prdt_signaling_client::{
     rendezvous_as_host, rendezvous_as_viewer, HostIdentity, RendezvousConfig,
 };
 use prdt_signaling_server::{router, ServerConfig, ServerState};
 use prdt_transport::{
-    host_handshake, viewer_handshake, CustomUdpTransport, HelloRequest, UdpTransportConfig,
-    DEFAULT_HANDSHAKE_TIMEOUT,
+    host_handshake, viewer_handshake, AuthDecision, AuthHook, CustomUdpTransport, HelloRequest,
+    UdpTransportConfig, DEFAULT_HANDSHAKE_TIMEOUT,
 };
+
+struct GrantAllHook;
+#[async_trait::async_trait]
+impl AuthHook for GrantAllHook {
+    async fn evaluate(&self, _hello: &prdt_protocol::ControlMessage, _peer: &str) -> AuthDecision {
+        AuthDecision::Grant(PermissionSet::all())
+    }
+}
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -84,6 +95,8 @@ async fn w1_smoke_signaling_noise_hello_ack_completes() {
         // Hello/HelloAck
         let _req = host_handshake(
             &*transport,
+            &GrantAllHook,
+            "smoke-peer",
             0xABCD_EF01,
             42,
             10_000_000,

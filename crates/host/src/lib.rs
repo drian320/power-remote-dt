@@ -1,3 +1,5 @@
+pub mod auth;
+pub mod auth_config;
 mod platform;
 mod status;
 mod watchdog;
@@ -20,9 +22,10 @@ use prdt_crypto::KeyPair;
 use prdt_filetransfer::{send_file, TransferReceiver, DEFAULT_MAX_TRANSFER_BYTES};
 use prdt_protocol::{wire::AudioPacket, Codec, ControlMessage, MonitorRect};
 
+use prdt_protocol::control::PermissionSet;
 use prdt_transport::{
-    host_handshake, now_monotonic_us, CustomUdpTransport, ReceivedMessage, Transport,
-    UdpTransportConfig,
+    host_handshake, now_monotonic_us, AuthDecision, AuthHook, CustomUdpTransport, ReceivedMessage,
+    Transport, UdpTransportConfig,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -42,6 +45,25 @@ pub fn default_host_key_path() -> std::path::PathBuf {
         return dir.join("host-key.bin");
     }
     std::path::PathBuf::from("host-key.bin")
+}
+
+/// Returns the OS-conventional config directory for prdt, creating it on demand.
+/// Used to derive `host-auth.toml` and `host-peers.toml` default paths.
+pub fn default_prdt_config_dir() -> std::path::PathBuf {
+    if let Some(base) = dirs::config_dir() {
+        let dir = base.join("prdt");
+        let _ = std::fs::create_dir_all(&dir);
+        return dir;
+    }
+    std::path::PathBuf::from(".")
+}
+
+fn default_host_auth_path() -> std::path::PathBuf {
+    default_prdt_config_dir().join("host-auth.toml")
+}
+
+fn default_host_peers_path() -> std::path::PathBuf {
+    default_prdt_config_dir().join("host-peers.toml")
 }
 
 const FILE_RECV_DIR: &str = "prdt-received";
@@ -152,6 +174,20 @@ pub struct Args {
     /// networks or behind another auth layer.
     #[arg(long)]
     pub silent_allow: bool,
+
+    /// Path to host-auth.toml (PIN hash, auth mode, default permissions).
+    /// Written by the GUI onboarding wizard; read here so the host task
+    /// uses the operator-configured auth policy rather than always defaulting
+    /// to Tofu + allow-all.
+    #[arg(long, default_value_os_t = default_host_auth_path())]
+    pub host_auth_file: std::path::PathBuf,
+
+    /// Path to host-peers.toml (P6 TOML remembered-peer store).
+    /// Written by the GUI Settings "Saved Peers" panel and by the consent-
+    /// accept branch in run_host. Separate from the legacy known-peer-ids
+    /// text file.
+    #[arg(long, default_value_os_t = default_host_peers_path())]
+    pub host_peers_file: std::path::PathBuf,
 }
 
 #[derive(Debug)]
@@ -160,13 +196,145 @@ pub struct ConsentRequest {
     pub responder: tokio::sync::oneshot::Sender<ConsentDecision>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConsentDecision {
-    Accept,
-    Reject,
+    /// Viewer is accepted. `permissions` caps the session, `remember` causes
+    /// the peer to be persisted to known-peers so future connections are
+    /// silent, and `label` is the human-readable name to store.
+    Accepted {
+        permissions: prdt_protocol::control::PermissionSet,
+        remember: bool,
+        label: String,
+    },
+    Rejected,
 }
 
 pub type ConsentSender = tokio::sync::mpsc::UnboundedSender<ConsentRequest>;
+
+// ---------------------------------------------------------------------------
+// AuthHook implementation for the host
+// ---------------------------------------------------------------------------
+
+/// Host-side [`AuthHook`] implementation.
+///
+/// Wraps an [`AuthValidator`] and maps every possible [`AuthVerdict`] to an
+/// [`AuthDecision`] that the transport's `host_handshake` can act on:
+///
+/// - `Granted` → `AuthDecision::Grant(permissions)`
+/// - `Rejected` → `AuthDecision::Reject { .. }`
+/// - `NeedsConsent` → auto-reject with `ConsentDenied` in headless mode
+///   (T7 will plug in the real GUI prompt via a consent channel)
+pub struct HostAuthHook {
+    validator: std::sync::Arc<auth::AuthValidator>,
+}
+
+impl HostAuthHook {
+    pub fn new(validator: std::sync::Arc<auth::AuthValidator>) -> Self {
+        Self { validator }
+    }
+}
+
+#[async_trait::async_trait]
+impl AuthHook for HostAuthHook {
+    async fn evaluate(&self, hello: &ControlMessage, peer_pubkey_b64: &str) -> AuthDecision {
+        use auth::AuthVerdict;
+        use prdt_protocol::control::HelloRejectCode;
+
+        match self.validator.validate(hello, peer_pubkey_b64).await {
+            AuthVerdict::Granted {
+                permissions,
+                remember: _,
+            } => AuthDecision::Grant(permissions),
+            AuthVerdict::Rejected { code, reason } => AuthDecision::Reject { code, reason },
+            AuthVerdict::NeedsConsent { .. } => {
+                // T4: headless stub — auto-reject. T7 will wire the GUI prompt.
+                tracing::warn!(
+                    peer = %peer_pubkey_b64,
+                    "unknown peer needs consent but no GUI prompt available (headless); rejecting"
+                );
+                AuthDecision::Reject {
+                    code: HelloRejectCode::ConsentDenied,
+                    reason: "headless host: no consent prompt available".into(),
+                }
+            }
+        }
+    }
+}
+
+/// Returns `true` if `msg` is permitted under `perms`.
+///
+/// `ControlMessage`-based channels (clipboard, file-transfer) are gated here.
+/// Input dispatch is gated inside the input task's receive arm (the task itself
+/// always runs to handle KeepAlive/Bye/RequestIdr). The audio capture thread
+/// is conditionally spawned based on `perms.audio`; the encode task is always
+/// spawned and exits immediately if the PCM sender was dropped (audio denied).
+/// All other `ControlMessage` variants not listed below are always allowed
+/// (Ping, Pong, KeepAlive, RequestIdr, SetBitrate, LatencyReport, Bye,
+/// Noise*, Probe/ProbeAck).
+pub fn channel_allowed(perms: &PermissionSet, msg: &ControlMessage) -> bool {
+    match msg {
+        ControlMessage::ClipboardText { .. } => perms.clipboard,
+        ControlMessage::FileTransferBegin { .. }
+        | ControlMessage::FileChunk { .. }
+        | ControlMessage::FileTransferEnd { .. } => perms.file_transfer,
+        _ => true,
+    }
+}
+
+/// Gate for physical input dispatch.
+///
+/// Called from the input task's receive arm when `ReceivedMessage::Input`
+/// arrives. Returns `true` if `dispatch` was called, `false` if the event
+/// was silently dropped due to `perms.input == false`.
+///
+/// Extracting this from `run_host` makes the gate unit-testable without
+/// spinning up the full host stack: tests call `handle_input_event` directly
+/// and verify the return value, binding to the same code production uses.
+pub fn handle_input_event(
+    perms: &PermissionSet,
+    ev: prdt_protocol::input::InputEvent,
+    dispatch: impl FnOnce(prdt_protocol::input::InputEvent),
+) -> bool {
+    if !perms.input {
+        tracing::debug!("input channel denied; dropping InputEvent");
+        return false;
+    }
+    dispatch(ev);
+    true
+}
+
+/// Gate for the audio PCM sender.
+///
+/// Production usage in `run_host`:
+/// ```text
+/// let (pcm_async_tx, mut pcm_async_rx) = unbounded_channel();
+/// let tx_opt = apply_audio_permission_gate(&session_permissions, pcm_async_tx);
+/// if let Some(tx) = tx_opt {
+///     // spawn capture thread, hand `tx` to it
+/// }
+/// // encode task reads from pcm_async_rx; gets None immediately if gate denied
+/// ```
+///
+/// When `perms.audio == false`, `tx` is dropped inside this function, which
+/// causes the encode task's `pcm_rx.recv()` to return `None` and exit cleanly.
+/// When `perms.audio == true`, `tx` is returned so the caller can hand it to
+/// the audio capture thread.
+///
+/// Extracting this from `run_host` makes the gate unit-testable without
+/// spinning up the full host stack.
+pub fn apply_audio_permission_gate(
+    perms: &PermissionSet,
+    tx: tokio::sync::mpsc::UnboundedSender<Vec<f32>>,
+) -> Option<tokio::sync::mpsc::UnboundedSender<Vec<f32>>> {
+    if perms.audio {
+        Some(tx)
+    } else {
+        info!("audio channel denied for this session; skipping audio capture");
+        // Dropping `tx` closes the channel; pcm_async_rx.recv() → None.
+        drop(tx);
+        None
+    }
+}
 
 pub async fn run_host(
     args: Args,
@@ -311,6 +479,90 @@ pub async fn run_host(
         info!("no --signaling-url; using LAN fixed-address mode");
     }
 
+    // Build the AuthValidator once, outside the reconnect loop, so that
+    // per-peer state (PIN attempt counter, active ephemeral) survives across
+    // reconnections. A brute-forcer who hits AuthLockout cannot reset the
+    // counter by dropping and re-establishing the Noise channel.
+    //
+    // Load auth config from disk so the wizard-configured mode/PIN/permissions
+    // are honoured. Missing file → safe default (Tofu + allow-all).
+    let auth_hook = {
+        use prdt_crypto::known_peers::KnownPeers;
+        use tokio::sync::RwLock;
+
+        let cfg = auth_config::HostAuthConfig::load_or_default(&args.host_auth_file)
+            .unwrap_or_else(|e| {
+                warn!(
+                    error = %e,
+                    path = %args.host_auth_file.display(),
+                    "failed to load host-auth.toml; using defaults"
+                );
+                auth_config::HostAuthConfig::default()
+            });
+        info!(
+            mode = ?cfg.mode,
+            has_pin = cfg.pin_hash.is_some(),
+            path = %args.host_auth_file.display(),
+            "loaded host auth config"
+        );
+
+        // Attempt one-shot migration: if the legacy text-format known-peer-ids
+        // file exists but the TOML host-peers.toml does not, convert the text
+        // entries into KnownPeer rows so the Settings panel can manage them.
+        if args.known_peers_file.exists() && !args.host_peers_file.exists() {
+            match prdt_crypto::KnownPeersFile::load_or_default(&args.known_peers_file) {
+                Ok(legacy) => {
+                    let migrated = KnownPeers {
+                        peers: legacy
+                            .entries_iter()
+                            .map(|(pk, label)| prdt_crypto::known_peers::KnownPeer {
+                                pubkey_b64: pk.to_base64(),
+                                label: label.to_string(),
+                                permissions: prdt_protocol::PermissionSet::all(),
+                                first_seen_at: std::time::UNIX_EPOCH,
+                                last_seen_at: std::time::UNIX_EPOCH,
+                            })
+                            .collect(),
+                    };
+                    match migrated.save(&args.host_peers_file) {
+                        Ok(()) => info!(
+                            from = %args.known_peers_file.display(),
+                            to = %args.host_peers_file.display(),
+                            count = migrated.peers.len(),
+                            "migrated legacy known-peer-ids to host-peers.toml"
+                        ),
+                        Err(e) => warn!(
+                            error = %e,
+                            "failed to write migrated host-peers.toml; continuing"
+                        ),
+                    }
+                }
+                Err(e) => warn!(
+                    error = %e,
+                    "failed to read legacy known-peer-ids for migration; skipping"
+                ),
+            }
+        }
+
+        let known_peers = KnownPeers::load_or_default(&args.host_peers_file).unwrap_or_else(|e| {
+            warn!(
+                error = %e,
+                path = %args.host_peers_file.display(),
+                "failed to load host-peers.toml; starting with empty peer store"
+            );
+            KnownPeers::default()
+        });
+        info!(
+            peer_count = known_peers.peers.len(),
+            path = %args.host_peers_file.display(),
+            "loaded known peers"
+        );
+
+        let known = Arc::new(RwLock::new(known_peers));
+        let validator = Arc::new(auth::AuthValidator::new(cfg, known));
+        HostAuthHook::new(validator)
+    };
+
     loop {
         transport.reset_session().await;
 
@@ -327,22 +579,26 @@ pub async fn run_host(
             "Noise handshake complete — encrypted channel established"
         );
 
-        // Consent gate: known-peer-ids check + optional GUI prompt. Bypassed
-        // when --silent-allow is set (CI / scripted use only — see Args docs).
+        // Consent gate: TOML host-peers.toml check + optional GUI prompt.
+        // Bypassed when --silent-allow is set (CI / scripted use only).
+        //
+        // NOTE: The pre-P6 legacy text-file gate (known-peer-ids / KnownPeersFile)
+        // has been retired here. Peers are now stored in host-peers.toml (TOML
+        // KnownPeers). One-shot migration from the text file runs at startup above.
         if args.silent_allow {
             info!(
                 peer=%peer_pubkey.to_base64(),
                 "silent-allow enabled; skipping consent gate"
             );
         } else {
-            let known = match prdt_crypto::KnownPeers::load_or_default(&args.known_peers_file) {
-                Ok(k) => k,
-                Err(e) => {
-                    warn!(?e, path=?args.known_peers_file, "failed to load known-peer-ids; rejecting session");
-                    continue;
-                }
-            };
-            if !known.contains(&peer_pubkey) {
+            use prdt_crypto::known_peers::{KnownPeer, KnownPeers};
+            let peer_b64 = peer_pubkey.to_base64();
+            let known = KnownPeers::load_or_default(&args.host_peers_file).unwrap_or_else(|e| {
+                warn!(?e, path=?args.host_peers_file, "failed to load host-peers.toml; treating as empty");
+                KnownPeers::default()
+            });
+            let already_known = known.peers.iter().any(|p| p.pubkey_b64 == peer_b64);
+            if !already_known {
                 let decision = match &consent_tx {
                     Some(tx) => {
                         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
@@ -364,38 +620,57 @@ pub async fn run_host(
                     }
                     None => {
                         warn!(
-                            peer=%peer_pubkey.to_base64(),
+                            peer=%peer_b64,
                             "unknown peer connected and no consent channel (headless without --silent-allow); rejecting"
                         );
                         continue;
                     }
                 };
                 match decision {
-                    ConsentDecision::Reject => {
-                        info!(peer=%peer_pubkey.to_base64(), "consent rejected; resetting session");
+                    ConsentDecision::Rejected => {
+                        info!(peer=%peer_b64, "consent rejected; resetting session");
                         continue;
                     }
-                    ConsentDecision::Accept => {
-                        // Persist so future connections from this peer are silent.
-                        let mut updated = known;
-                        updated.insert(peer_pubkey, peer_pubkey.to_base64());
-                        if let Err(e) = updated.save(&args.known_peers_file) {
-                            warn!(
-                                ?e,
-                                path=?args.known_peers_file,
-                                "failed to persist known-peer-ids; session continues but won't be remembered"
-                            );
-                        } else {
-                            info!(
-                                peer=%peer_pubkey.to_base64(),
-                                path=?args.known_peers_file,
-                                "added peer to known-peer-ids"
-                            );
+                    ConsentDecision::Accepted {
+                        permissions,
+                        remember,
+                        label,
+                    } => {
+                        // Persist to TOML host-peers.toml so future connections
+                        // from this peer are silently accepted (when remember==true).
+                        let _ = permissions; // used by AuthValidator via the shared Arc
+                        if remember {
+                            let peer_label = if label.is_empty() {
+                                peer_b64.clone()
+                            } else {
+                                label
+                            };
+                            let mut updated = known;
+                            updated.peers.push(KnownPeer {
+                                pubkey_b64: peer_b64.clone(),
+                                label: peer_label,
+                                permissions: prdt_protocol::PermissionSet::all(),
+                                first_seen_at: std::time::SystemTime::now(),
+                                last_seen_at: std::time::SystemTime::now(),
+                            });
+                            if let Err(e) = updated.save(&args.host_peers_file) {
+                                warn!(
+                                    ?e,
+                                    path=?args.host_peers_file,
+                                    "failed to persist host-peers.toml; session continues but peer won't be remembered"
+                                );
+                            } else {
+                                info!(
+                                    peer=%peer_b64,
+                                    path=?args.host_peers_file,
+                                    "added peer to host-peers.toml"
+                                );
+                            }
                         }
                     }
                 }
             } else {
-                info!(peer=%peer_pubkey.to_base64(), "peer is in known-peer-ids; auto-accepted");
+                info!(peer=%peer_b64, "peer is in host-peers.toml; auto-accepted");
             }
         } // end of !silent_allow branch
 
@@ -449,8 +724,10 @@ pub async fn run_host(
         };
         #[cfg(target_os = "linux")]
         let host_supported: Vec<Codec> = vec![Codec::H264];
-        let req = match host_handshake(
+        let hs_result = match host_handshake(
             &*transport,
+            &auth_hook,
+            &peer_pubkey.to_base64(),
             session_id,
             now_monotonic_us(),
             bitrate_bps,
@@ -467,7 +744,9 @@ pub async fn run_host(
                 continue;
             }
         };
-        info!(?req, "handshake complete");
+        let req = hs_result.req;
+        let session_permissions = hs_result.granted_permissions;
+        info!(?req, ?session_permissions, "handshake complete");
 
         // P5A: Parse --encoder-hint and --force-sw into policy types.
         let (user_override, _encoder_strict) = match args.encoder.as_str() {
@@ -687,28 +966,35 @@ pub async fn run_host(
         // (WASAPI streams are bound to the creating thread via COM), so it lives
         // on a dedicated OS thread. The thread hands PCM frames over to the
         // async encode/send task via a tokio mpsc.
+        //
+        // P6 T4: audio channel is gated by session_permissions.audio via
+        // `apply_audio_permission_gate`. When denied the gate drops the sender,
+        // causing pcm_async_rx.recv() to return None immediately so the encode
+        // task exits without processing any audio.
         let (pcm_async_tx, mut pcm_async_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
-        std::thread::Builder::new()
-            .name("prdt-host-audio-capture".into())
-            .spawn(move || match LoopbackCapture::start() {
-                Ok((cap, mut pcm_rx)) => {
-                    // Keep the capture stream alive for the thread's lifetime.
-                    let _cap = cap;
-                    // Bridge the std-thread-owned blocking receiver to the async
-                    // side. The cpal callback sends into a tokio UnboundedReceiver
-                    // via `unbounded_send`, which doesn't require a runtime, so we
-                    // can block_recv and forward.
-                    while let Some(frame) = pcm_rx.blocking_recv() {
-                        if pcm_async_tx.send(frame).is_err() {
-                            break; // async side gone
+        if let Some(capture_tx) = apply_audio_permission_gate(&session_permissions, pcm_async_tx) {
+            std::thread::Builder::new()
+                .name("prdt-host-audio-capture".into())
+                .spawn(move || match LoopbackCapture::start() {
+                    Ok((cap, mut pcm_rx)) => {
+                        // Keep the capture stream alive for the thread's lifetime.
+                        let _cap = cap;
+                        // Bridge the std-thread-owned blocking receiver to the async
+                        // side. The cpal callback sends into a tokio UnboundedReceiver
+                        // via `unbounded_send`, which doesn't require a runtime, so we
+                        // can block_recv and forward.
+                        while let Some(frame) = pcm_rx.blocking_recv() {
+                            if capture_tx.send(frame).is_err() {
+                                break; // async side gone
+                            }
                         }
                     }
-                }
-                Err(e) => {
-                    warn!(?e, "audio capture failed; skipping audio");
-                }
-            })
-            .expect("spawn audio capture thread");
+                    Err(e) => {
+                        warn!(?e, "audio capture failed; skipping audio");
+                    }
+                })
+                .expect("spawn audio capture thread");
+        }
 
         let audio_transport = Arc::clone(&transport);
         let cancel_audio = cancel.clone();
@@ -761,6 +1047,11 @@ pub async fn run_host(
             Arc::new(tokio::sync::Mutex::new(None));
 
         // Spawn input injection loop.
+        // P6 T4: `session_permissions` is captured here and used to:
+        //   - Gate physical input dispatch (ReceivedMessage::Input)
+        //   - Gate ControlMessages via channel_allowed()
+        // The task itself always runs (it owns KeepAlive / Bye / RequestIdr
+        // handling which must work regardless of permissions).
         let rx_input = Arc::clone(&transport);
         let input_last_remote = Arc::clone(&last_remote_clipboard);
         let cancel_input = cancel.clone();
@@ -768,6 +1059,7 @@ pub async fn run_host(
         let last_ka_input = Arc::clone(&last_keepalive);
         let input_force_idr = Arc::clone(&force_idr_flag);
         let host_max_bps = args.bitrate_mbps.saturating_mul(1_000_000);
+        let input_perms = session_permissions;
         let input = tokio::spawn(async move {
             let mut ft_rx = TransferReceiver::new(FILE_RECV_DIR, DEFAULT_MAX_TRANSFER_BYTES);
             loop {
@@ -776,12 +1068,24 @@ pub async fn run_host(
                     msg = rx_input.recv() => {
                         match msg {
                             Ok(ReceivedMessage::Input(ev)) => {
-                                if let Err(e) = dispatch_input(ev) {
-                                    warn!(error = %e, "inject error");
-                                }
+                                // P6 T4: gate via handle_input_event so the gate
+                                // logic is testable independently of the full host stack.
+                                handle_input_event(&input_perms, ev, |e| {
+                                    if let Err(err) = dispatch_input(e) {
+                                        warn!(error = %err, "inject error");
+                                    }
+                                });
                             }
                             Ok(ReceivedMessage::Control(ControlMessage::KeepAlive)) => {
                                 last_ka_input.store(now_monotonic_us(), Ordering::Relaxed);
+                            }
+                            Ok(ReceivedMessage::Control(ref ctrl_msg))
+                                if !channel_allowed(&input_perms, ctrl_msg) =>
+                            {
+                                tracing::debug!(
+                                    kind = ctrl_msg.kind_u8(),
+                                    "channel denied; dropping ControlMessage"
+                                );
                             }
                             Ok(ReceivedMessage::Control(ControlMessage::ClipboardText { text })) => {
                                 // Remember this text so the watcher loop doesn't echo it back.

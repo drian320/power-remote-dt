@@ -80,7 +80,8 @@ pub fn render(ctx: &egui::Context, app: &mut LauncherApp) {
             addr: app.draft_host.addr.clone(),
             host_id: app.draft_host.host_id.clone(),
             pubkey: app.draft_host.pubkey.clone(),
-            last_connected: String::new(),
+            last_connected: std::time::UNIX_EPOCH,
+            last_known_online: None,
         };
         let mut cfg = app.config.lock().unwrap();
         cfg.viewer.hosts.push(entry);

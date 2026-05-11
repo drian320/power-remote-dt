@@ -169,6 +169,27 @@ async fn handle_socket(mut socket: WebSocket, app: AppState) {
 
             viewer_loop(socket, state, session_id, viewer_rx).await;
         }
+        ClientMessage::ProbeHosts { host_ids } => {
+            if host_ids.len() > 256 {
+                send_error(
+                    &mut socket,
+                    ErrorCode::ProtocolError,
+                    "too many host_ids (max 256)",
+                )
+                .await;
+                return;
+            }
+            let online: Vec<String> = host_ids
+                .into_iter()
+                .filter(|id| state.hosts.contains_key(id))
+                .collect();
+            if send_message(&mut socket, &ServerMessage::ProbeResult { online })
+                .await
+                .is_err()
+            {
+                warn!("probe_hosts: failed to send ProbeResult");
+            }
+        }
         _ => {
             send_error(
                 &mut socket,

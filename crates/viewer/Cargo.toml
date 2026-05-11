@@ -24,6 +24,8 @@ clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = "1"
+async-trait = "0.1"
+thiserror = { workspace = true }
 winit = "0.30"
 raw-window-handle = "0.6"
 
@@ -39,7 +41,6 @@ windows = { version = "0.58", features = [
 serde = { workspace = true }
 serde_json = { workspace = true }
 dirs = { workspace = true }
-thiserror = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 prdt-media-linux = { path = "../media-linux" }
@@ -50,7 +51,6 @@ bytemuck = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 dirs = { workspace = true }
-thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

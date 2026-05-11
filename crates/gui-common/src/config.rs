@@ -6,12 +6,17 @@
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct GuiConfig {
     /// Locale: "" = auto-detect from OS, "en" / "ja" = forced.
     #[serde(default)]
     pub locale: String,
+    /// Set to `true` after the first-run onboarding wizard completes.
+    /// `false` (the serde default) causes the wizard to appear on next launch.
+    #[serde(default)]
+    pub onboarded: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -110,8 +115,59 @@ pub struct HostEntry {
     pub host_id: String,
     #[serde(default)]
     pub pubkey: String,
-    #[serde(default)]
-    pub last_connected: String,
+    #[serde(
+        deserialize_with = "deser_last_connected",
+        serialize_with = "ser_last_connected",
+        default = "epoch"
+    )]
+    pub last_connected: SystemTime,
+    /// Cached online state from the last OnlineProbe tick. Not persisted to
+    /// disk (serialized as `None` always); used only at runtime.
+    #[serde(default, skip_serializing)]
+    pub last_known_online: Option<bool>,
+}
+
+fn epoch() -> SystemTime {
+    UNIX_EPOCH
+}
+
+/// Serialize `SystemTime` as an RFC3339 string for human-readable TOML.
+fn ser_last_connected<S>(t: &SystemTime, s: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::Error as _;
+    let secs = t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    // Use chrono for RFC3339 formatting.
+    let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(secs as i64, 0)
+        .ok_or_else(|| S::Error::custom("timestamp out of range"))?;
+    s.serialize_str(&dt.to_rfc3339())
+}
+
+/// Deserialize `last_connected` from either an RFC3339 string (legacy) or a
+/// missing field (defaults to UNIX_EPOCH). The `#[serde(default = "epoch")]`
+/// attribute handles the missing-field case before this function is called.
+fn deser_last_connected<'de, D>(d: D) -> Result<SystemTime, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    let s = String::deserialize(d)?;
+    if s.is_empty() {
+        return Ok(UNIX_EPOCH);
+    }
+    // Try RFC3339 parse via chrono.
+    match chrono::DateTime::parse_from_rfc3339(&s) {
+        Ok(dt) => {
+            let secs = dt.timestamp();
+            let nanos = dt.timestamp_subsec_nanos();
+            if secs < 0 {
+                return Ok(UNIX_EPOCH);
+            }
+            Ok(UNIX_EPOCH + std::time::Duration::new(secs as u64, nanos))
+        }
+        Err(_) => Ok(UNIX_EPOCH),
+    }
 }
 
 #[allow(clippy::derivable_impls)]
@@ -230,6 +286,13 @@ known_host_ids = "known-host-ids"
     }
 
     #[test]
+    fn legacy_config_loads_onboarded_false() {
+        let toml = "[gui]\n";
+        let c: Config = toml::from_str(toml).unwrap();
+        assert!(!c.gui.onboarded);
+    }
+
+    #[test]
     fn host_entry_supports_signaling_only() {
         let mut c = Config::default();
         c.viewer.hosts.push(HostEntry {
@@ -238,11 +301,73 @@ known_host_ids = "known-host-ids"
             addr: String::new(),
             host_id: "123-456-789".into(),
             pubkey: String::new(),
-            last_connected: String::new(),
+            last_connected: UNIX_EPOCH,
+            last_known_online: None,
         });
         let s = toml::to_string_pretty(&c).unwrap();
         let parsed: Config = toml::from_str(&s).unwrap();
         assert_eq!(parsed.viewer.hosts.len(), 1);
         assert_eq!(parsed.viewer.hosts[0].host_id, "123-456-789");
+    }
+
+    // Helper: minimal viewer section prefix for TOML tests.
+    fn viewer_prefix() -> &'static str {
+        r#"
+[viewer]
+recv_dir = "prdt-received"
+decoder = "nvdec"
+default_resolution = "1920x1080"
+default_fps = 60
+known_hosts = "known-hosts"
+known_host_ids = "known-host-ids"
+"#
+    }
+
+    #[test]
+    fn host_entry_legacy_string_last_connected_parses() {
+        let toml_str = format!(
+            "{}\n[[viewer.hosts]]\nlabel = \"old\"\nmode = \"direct\"\naddr = \"127.0.0.1:9000\"\npubkey = \"\"\nlast_connected = \"2025-12-01T00:00:00Z\"\n",
+            viewer_prefix()
+        );
+        let c: Config = toml::from_str(&toml_str).unwrap();
+        assert_eq!(c.viewer.hosts.len(), 1);
+        let e = &c.viewer.hosts[0];
+        assert!(e.last_connected > UNIX_EPOCH);
+    }
+
+    #[test]
+    fn host_entry_missing_last_connected_defaults_to_epoch() {
+        let toml_str = format!(
+            "{}\n[[viewer.hosts]]\nlabel = \"fresh\"\nmode = \"direct\"\naddr = \"127.0.0.1:9000\"\npubkey = \"\"\n",
+            viewer_prefix()
+        );
+        let c: Config = toml::from_str(&toml_str).unwrap();
+        assert_eq!(c.viewer.hosts[0].last_connected, UNIX_EPOCH);
+    }
+
+    #[test]
+    fn host_entry_modern_systemtime_round_trips() {
+        // Write a HostEntry with a known time, serialize to TOML, parse back.
+        let mut cfg = Config::default();
+        let t = UNIX_EPOCH + std::time::Duration::from_secs(1_750_000_000);
+        cfg.viewer.hosts.push(HostEntry {
+            label: "rt".into(),
+            mode: "direct".into(),
+            addr: "127.0.0.1:9000".into(),
+            host_id: String::new(),
+            pubkey: String::new(),
+            last_connected: t,
+            last_known_online: None,
+        });
+        let s = toml::to_string_pretty(&cfg).unwrap();
+        // The serialized form must be an RFC3339 string.
+        assert!(s.contains("last_connected"), "field should be present");
+        let parsed: Config = toml::from_str(&s).unwrap();
+        // Allow up to 1 second difference due to subsecond truncation.
+        let diff = parsed.viewer.hosts[0]
+            .last_connected
+            .duration_since(t)
+            .unwrap_or_else(|e| e.duration());
+        assert!(diff.as_secs() < 2, "round-trip drift: {diff:?}");
     }
 }

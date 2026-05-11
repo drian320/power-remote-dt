@@ -1,7 +1,7 @@
 //! End-to-end tests treating the protocol as an opaque byte-stream.
 
 use prdt_protocol::{
-    control::ControlMessage,
+    control::{ControlMessage, PermissionSet},
     decode_control, encode_control,
     input::MouseButton,
     wire::{self, video_flags, InputPacket, PacketHeader, PacketType, VideoPacket, HEADER_LEN},
@@ -88,6 +88,7 @@ fn full_control_datagram_round_trip() {
         host_virtual_desktop_rect: MonitorRect::new(0, 0, 5760, 2160),
         negotiated_codec: prdt_protocol::frame::Codec::H265,
         host_supported_codecs: vec![prdt_protocol::frame::Codec::H265],
+        granted_permissions: PermissionSet::all(),
     };
     let body = encode_control(&msg).unwrap();
     let hdr = PacketHeader {

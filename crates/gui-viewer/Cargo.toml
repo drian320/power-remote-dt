@@ -8,6 +8,7 @@ build = "build.rs"
 
 [dependencies]
 prdt-gui-common = { path = "../gui-common" }
+prdt-signaling-client = { path = "../signaling-client" }
 eframe = { workspace = true }
 egui = { workspace = true }
 rfd = { workspace = true }
@@ -16,6 +17,7 @@ thiserror = { workspace = true }
 url = { workspace = true }
 serde = { workspace = true }
 anyhow = "1"
+tokio = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
