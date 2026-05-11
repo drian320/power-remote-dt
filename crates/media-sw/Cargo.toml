@@ -11,3 +11,4 @@ bytes = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 openh264 = { version = "0.9.3", default-features = false, features = ["source"] }
+openh264-sys2 = "0.9.6"
