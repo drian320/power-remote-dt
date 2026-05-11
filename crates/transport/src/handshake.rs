@@ -86,6 +86,9 @@ pub struct SessionAck {
     pub host_virtual_desktop_rect: MonitorRect,
     pub negotiated_codec: Codec,
     pub host_supported_codecs: Vec<Codec>,
+    /// Permissions granted by the host for this session (P6 T5).
+    /// Populated from the HelloAck wire field.
+    pub granted_permissions: PermissionSet,
 }
 
 /// Send Hello, await HelloAck (or HelloReject). Retries on timeout, returns
@@ -123,7 +126,7 @@ pub async fn viewer_handshake<T: Transport>(
                         host_virtual_desktop_rect,
                         negotiated_codec,
                         host_supported_codecs,
-                        granted_permissions: _, // TODO(P6 T5): surface to viewer stats/overlay
+                        granted_permissions,
                     }) => {
                         return Ok::<SessionAck, TransportError>(SessionAck {
                             session_id,
@@ -136,13 +139,11 @@ pub async fn viewer_handshake<T: Transport>(
                             host_virtual_desktop_rect,
                             negotiated_codec,
                             host_supported_codecs,
+                            granted_permissions,
                         });
                     }
-                    ReceivedMessage::Control(ControlMessage::HelloReject {
-                        reason,
-                        code: _, // TODO(P6 T5): surface code to viewer retry/dialog logic
-                    }) => {
-                        return Err(TransportError::HelloRejected(reason));
+                    ReceivedMessage::Control(ControlMessage::HelloReject { reason, code }) => {
+                        return Err(TransportError::HelloRejectedWithCode { code, reason });
                     }
                     // ignore other messages during handshake
                     _ => continue,
@@ -474,13 +475,13 @@ mod tests {
             .expect("viewer must observe rejection within 100ms");
         let v_err = v_outcome.unwrap().unwrap_err();
         match v_err {
-            TransportError::HelloRejected(reason) => {
+            TransportError::HelloRejectedWithCode { reason, .. } => {
                 assert!(
                     reason.contains("av1") || reason.contains("AV1"),
                     "reason should mention the codec: {reason}",
                 );
             }
-            other => panic!("expected HelloRejected, got {other:?}"),
+            other => panic!("expected HelloRejectedWithCode, got {other:?}"),
         }
 
         let h_err = host_task.await.unwrap().unwrap_err();
@@ -579,7 +580,7 @@ mod tests {
         let (v, h) = tokio::join!(viewer_task, host_task);
         assert!(matches!(
             v.unwrap().unwrap_err(),
-            TransportError::HelloRejected(_)
+            TransportError::HelloRejectedWithCode { .. }
         ));
         assert!(matches!(
             h.unwrap().unwrap_err(),

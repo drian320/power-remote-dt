@@ -1,4 +1,4 @@
-use prdt_protocol::ProtocolError;
+use prdt_protocol::{HelloRejectCode, ProtocolError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
@@ -14,6 +14,13 @@ pub enum TransportError {
     #[error("handshake timeout")]
     HandshakeTimeout,
 
+    #[error("hello rejected by host: {reason}")]
+    HelloRejectedWithCode {
+        code: HelloRejectCode,
+        reason: String,
+    },
+
+    /// Legacy alias kept for call-sites that only need the reason string.
     #[error("hello rejected by host: {0}")]
     HelloRejected(String),
 

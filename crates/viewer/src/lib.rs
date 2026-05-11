@@ -30,8 +30,7 @@ use platform::{
 };
 
 use prdt_transport::{
-    viewer_handshake, CustomUdpTransport, HelloRequest, ReceivedMessage, Transport,
-    UdpTransportConfig, DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_HELLO_RETRIES, DEFAULT_HELLO_TIMEOUT,
+    CustomUdpTransport, ReceivedMessage, Transport, UdpTransportConfig, DEFAULT_HANDSHAKE_TIMEOUT,
 };
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -239,6 +238,22 @@ pub struct Args {
     /// it. Should match the host's `--bitrate-mbps`.
     #[arg(long, default_value_t = 30u32, value_parser = clap::value_parser!(u32).range(1..=4000))]
     pub bitrate_mbps: u32,
+
+    /// PIN to supply when the host requires PIN authentication.
+    /// Provided once; if the host rejects it and re-prompts, the viewer
+    /// exits with an error (use `--no-auth-prompt` to suppress re-prompt).
+    #[arg(long)]
+    pub pin: Option<String>,
+
+    /// Ephemeral token to supply when the host requires ephemeral auth.
+    #[arg(long)]
+    pub ephemeral: Option<String>,
+
+    /// Disable interactive auth re-prompting. When set, the viewer exits
+    /// immediately if the host requires auth that was not pre-supplied
+    /// via `--pin` / `--ephemeral`, or if the supplied credential is wrong.
+    #[arg(long)]
+    pub no_auth_prompt: bool,
 }
 
 /// Normalize a user-supplied host_id for signaling: 9-digit numeric inputs
@@ -433,6 +448,10 @@ struct ViewerShared {
     /// The latency task refreshes it once per second; the main thread
     /// applies it in `about_to_wait`. `None` until we have a first value.
     status_title: Mutex<Option<String>>,
+    /// Permissions granted by the host in HelloAck (P6 T5).
+    /// Written once by the worker task after handshake; read by the overlay.
+    #[cfg(windows)]
+    granted_permissions: Mutex<Option<prdt_protocol::PermissionSet>>,
 }
 
 struct ViewerApp {
@@ -831,6 +850,7 @@ fn build_stats_payload(app: &ViewerApp) -> overlay_ipc::StatsPayload {
         samples: p.samples,
     });
     let encoder_backend = Some(format!("{} {}", backend_badge(decoder.as_str()), decoder));
+    let granted_permissions = app.shared.granted_permissions.lock().unwrap().clone();
     overlay_ipc::StatsPayload {
         version: 1,
         viewer_pid: std::process::id(),
@@ -841,6 +861,7 @@ fn build_stats_payload(app: &ViewerApp) -> overlay_ipc::StatsPayload {
         latency_us,
         fps_observed: 0.0, // approximated; refined in G3+
         encoder_backend,
+        granted_permissions,
     }
 }
 
@@ -903,6 +924,256 @@ fn apply_connect_args(args: &mut Args, c: prdt_gui_viewer::ConnectArgs) {
     args.known_hosts = Some(c.known_hosts_path.clone());
     args.known_host_ids = c.known_host_ids_path.clone();
 }
+
+// ── Auth retry loop (P6 T5) ──────────────────────────────────────────────────
+
+/// Error variants produced by [`run_viewer_auth_loop`].
+#[derive(Debug, thiserror::Error)]
+pub enum AuthLoopError {
+    #[error("transport error: {0}")]
+    TransportError(String),
+    #[error("auth credential not available (pass --pin / --ephemeral or remove --no-auth-prompt)")]
+    PromptDisabled,
+    #[error("host locked out this viewer: {0}")]
+    Locked(String),
+    #[error("host requires a newer viewer (protocol version mismatch)")]
+    HostRequiresUpgrade,
+    #[error("host rejected auth: {0}")]
+    Other(String),
+    #[error("unexpected message before HelloAck")]
+    UnexpectedPreAck,
+}
+
+impl From<prdt_transport::TransportError> for AuthLoopError {
+    fn from(e: prdt_transport::TransportError) -> Self {
+        AuthLoopError::TransportError(e.to_string())
+    }
+}
+
+/// Which credential the viewer is currently offering.
+#[derive(Debug, Clone)]
+pub(crate) enum HelloAttempt {
+    /// First try: offer TOFU (no credential).
+    FirstTry,
+    /// Retrying with a PIN.
+    WithPin(String),
+    /// Retrying with an ephemeral token.
+    WithEphemeral(String),
+}
+
+/// Parameters fixed for the session that `build_hello` uses to fill Hello.
+pub(crate) struct HelloTemplate {
+    pub protocol_version: u8,
+    pub req_width: u32,
+    pub req_height: u32,
+    pub req_fps: u32,
+    pub codec: prdt_protocol::frame::Codec,
+}
+
+impl HelloTemplate {
+    fn build(&self, attempt: &HelloAttempt) -> ControlMessage {
+        use prdt_protocol::control::AuthMethod;
+        let (auth_method, auth_payload) = match attempt {
+            HelloAttempt::FirstTry => (AuthMethod::Tofu, vec![]),
+            HelloAttempt::WithPin(pin) => (AuthMethod::Pin, pin.as_bytes().to_vec()),
+            HelloAttempt::WithEphemeral(eph) => (AuthMethod::Ephemeral, eph.as_bytes().to_vec()),
+        };
+        ControlMessage::Hello {
+            protocol_version: self.protocol_version,
+            req_width: self.req_width,
+            req_height: self.req_height,
+            req_fps: self.req_fps,
+            codec: self.codec,
+            auth_method,
+            auth_payload,
+        }
+    }
+}
+
+/// Trait over the send/recv primitives needed by the auth loop.
+/// Implemented on `Arc<CustomUdpTransport>` in production and on
+/// mock structs in tests.
+#[async_trait::async_trait]
+pub trait HelloTransport: Send {
+    async fn send_hello(
+        &mut self,
+        msg: ControlMessage,
+    ) -> Result<(), prdt_transport::TransportError>;
+    async fn recv_response(&mut self) -> Result<ControlMessage, prdt_transport::TransportError>;
+}
+
+/// Trait for obtaining auth credentials during the retry loop.
+#[async_trait::async_trait]
+pub trait AuthPromptProvider: Send + Sync {
+    /// Return the PIN to use. Returns `Err(AuthLoopError::PromptDisabled)` when
+    /// the provider has no credential and re-prompting is disabled.
+    async fn get_pin(&self) -> Result<String, AuthLoopError>;
+    /// Return the ephemeral token to use.
+    async fn get_ephemeral(&self) -> Result<String, AuthLoopError>;
+    /// Called after `AuthFailed` so the provider can log or notify the user.
+    async fn notify_wrong(&self);
+}
+
+/// Drive the viewer-side auth handshake loop.
+///
+/// Sends Hello (TOFU first, then PIN/Ephemeral on re-prompt), handles every
+/// HelloReject code, and returns `SessionAck` on HelloAck.
+pub(crate) async fn run_viewer_auth_loop<T, P>(
+    transport: &mut T,
+    template: &HelloTemplate,
+    prompt: &P,
+) -> Result<prdt_transport::SessionAck, AuthLoopError>
+where
+    T: HelloTransport,
+    P: AuthPromptProvider,
+{
+    use prdt_protocol::control::HelloRejectCode;
+    use prdt_transport::SessionAck;
+
+    let mut attempt = HelloAttempt::FirstTry;
+    loop {
+        let hello = template.build(&attempt);
+        transport.send_hello(hello).await?;
+        match transport.recv_response().await? {
+            ControlMessage::HelloAck {
+                session_id,
+                host_monotonic_base_us,
+                neg_width,
+                neg_height,
+                neg_fps,
+                neg_bitrate_bps,
+                host_monitor_rect,
+                host_virtual_desktop_rect,
+                negotiated_codec,
+                host_supported_codecs,
+                granted_permissions,
+            } => {
+                return Ok(SessionAck {
+                    session_id,
+                    host_monotonic_base_us,
+                    neg_width,
+                    neg_height,
+                    neg_fps,
+                    neg_bitrate_bps,
+                    host_monitor_rect,
+                    host_virtual_desktop_rect,
+                    negotiated_codec,
+                    host_supported_codecs,
+                    granted_permissions,
+                });
+            }
+            ControlMessage::HelloReject { code, reason } => match code {
+                HelloRejectCode::PinRequired | HelloRejectCode::AuthFailed
+                    if matches!(attempt, HelloAttempt::FirstTry | HelloAttempt::WithPin(_)) =>
+                {
+                    if matches!(code, HelloRejectCode::AuthFailed) {
+                        prompt.notify_wrong().await;
+                    }
+                    let pin = prompt.get_pin().await?;
+                    attempt = HelloAttempt::WithPin(pin);
+                }
+                HelloRejectCode::EphemeralRequired | HelloRejectCode::AuthFailed => {
+                    if matches!(code, HelloRejectCode::AuthFailed) {
+                        prompt.notify_wrong().await;
+                    }
+                    let eph = prompt.get_ephemeral().await?;
+                    attempt = HelloAttempt::WithEphemeral(eph);
+                }
+                HelloRejectCode::AuthLockout => return Err(AuthLoopError::Locked(reason)),
+                HelloRejectCode::ProtocolVersionMismatch => {
+                    return Err(AuthLoopError::HostRequiresUpgrade)
+                }
+                _ => return Err(AuthLoopError::Other(reason)),
+            },
+            _ => return Err(AuthLoopError::UnexpectedPreAck),
+        }
+    }
+}
+
+/// [`HelloTransport`] adapter wrapping `Arc<CustomUdpTransport>`.
+///
+/// The auth loop needs exclusive send/recv access conceptually, but the
+/// underlying `CustomUdpTransport` is `Arc`-shared; we hold the `Arc` here
+/// and forward calls. Non-Hello control messages received before HelloAck are
+/// silently skipped (same as `viewer_handshake` does).
+struct TransportAdapter(std::sync::Arc<prdt_transport::CustomUdpTransport>);
+
+#[async_trait::async_trait]
+impl HelloTransport for TransportAdapter {
+    async fn send_hello(
+        &mut self,
+        msg: ControlMessage,
+    ) -> Result<(), prdt_transport::TransportError> {
+        self.0.send_control(msg).await
+    }
+
+    async fn recv_response(&mut self) -> Result<ControlMessage, prdt_transport::TransportError> {
+        use prdt_transport::ReceivedMessage;
+        loop {
+            match self.0.recv().await? {
+                ReceivedMessage::Control(msg @ ControlMessage::HelloAck { .. })
+                | ReceivedMessage::Control(msg @ ControlMessage::HelloReject { .. }) => {
+                    return Ok(msg);
+                }
+                // Ignore other messages during handshake (same as viewer_handshake).
+                _ => continue,
+            }
+        }
+    }
+}
+
+/// CLI-side prompt provider. Uses the pre-supplied `--pin` / `--ephemeral`
+/// values on the first call; subsequent calls (after `AuthFailed`) return
+/// `PromptDisabled` — the CLI has no interactive stdin prompt in headless mode,
+/// and `--no-auth-prompt` explicitly blocks re-prompting.
+struct CliPromptProvider {
+    pin: Option<String>,
+    ephemeral: Option<String>,
+    /// Tracks whether we've already consumed the pre-supplied pin.
+    pin_used: std::sync::atomic::AtomicBool,
+    /// Tracks whether we've already consumed the pre-supplied ephemeral.
+    eph_used: std::sync::atomic::AtomicBool,
+}
+
+impl CliPromptProvider {
+    fn new(pin: Option<String>, ephemeral: Option<String>, _no_prompt: bool) -> Self {
+        Self {
+            pin,
+            ephemeral,
+            pin_used: std::sync::atomic::AtomicBool::new(false),
+            eph_used: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl AuthPromptProvider for CliPromptProvider {
+    async fn get_pin(&self) -> Result<String, AuthLoopError> {
+        use std::sync::atomic::Ordering;
+        if !self.pin_used.swap(true, Ordering::Relaxed) {
+            if let Some(ref p) = self.pin {
+                return Ok(p.clone());
+            }
+        }
+        Err(AuthLoopError::PromptDisabled)
+    }
+
+    async fn get_ephemeral(&self) -> Result<String, AuthLoopError> {
+        use std::sync::atomic::Ordering;
+        if !self.eph_used.swap(true, Ordering::Relaxed) {
+            if let Some(ref e) = self.ephemeral {
+                return Ok(e.clone());
+            }
+        }
+        Err(AuthLoopError::PromptDisabled)
+    }
+
+    async fn notify_wrong(&self) {
+        tracing::warn!("auth credential rejected by host");
+    }
+}
+
+// ── end auth retry loop ──────────────────────────────────────────────────────
 
 pub fn run_main() -> Result<()> {
     run_with_args(Args::parse())
@@ -1009,6 +1280,8 @@ pub fn run_with_args(
         file_drop_tx,
         latency: Arc::new(LatencyProbe::new()),
         status_title: Mutex::new(None),
+        #[cfg(windows)]
+        granted_permissions: Mutex::new(None),
     });
 
     // Build the tokio runtime on a dedicated worker thread.
@@ -1046,6 +1319,9 @@ pub fn run_with_args(
         args.bitrate_mbps.saturating_mul(1_000_000),
         Arc::new(std::sync::atomic::AtomicU64::new(0)),
         Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        args.pin.clone(),
+        args.ephemeral.clone(),
+        args.no_auth_prompt,
     );
 
     // Build the event loop + app.
@@ -1102,6 +1378,9 @@ fn spawn_worker_tasks(
     max_bitrate_bps: u32,
     purged_since_tick: Arc<std::sync::atomic::AtomicU64>,
     frames_recv_since_tick: Arc<std::sync::atomic::AtomicU64>,
+    auth_pin: Option<String>,
+    auth_ephemeral: Option<String>,
+    no_auth_prompt: bool,
 ) {
     handle.clone().spawn(async move {
         // CLI --bind supplies the local UDP bind (default 0.0.0.0:0). We only
@@ -1281,37 +1560,51 @@ fn spawn_worker_tasks(
             }
         };
 
-        // Handshake.
-        let req = HelloRequest {
+        // Auth handshake: send Hello → handle PinRequired/EphemeralRequired
+        // retries via CliPromptProvider → return SessionAck on HelloAck.
+        let template = HelloTemplate {
+            protocol_version: prdt_transport::handshake::HELLO_PROTOCOL_VERSION,
             req_width: req_w,
             req_height: req_h,
             req_fps,
             codec: codec_arg.hello_codec(),
         };
-        let ack = match viewer_handshake(
-            &*transport,
-            &req,
-            DEFAULT_HELLO_TIMEOUT,
-            DEFAULT_HELLO_RETRIES,
-        )
-        .await
-        {
+        let prompt = CliPromptProvider::new(auth_pin, auth_ephemeral, no_auth_prompt);
+        let mut adapter = TransportAdapter(Arc::clone(&transport));
+        let ack = match run_viewer_auth_loop(&mut adapter, &template, &prompt).await {
             Ok(a) => a,
-            Err(prdt_transport::TransportError::HelloRejected(reason)) => {
-                // Plan §Phase 3 acceptance: surface reason verbatim and
-                // exit non-zero within 100ms of Hello send. The transport
-                // layer's `viewer_handshake` already returns immediately
-                // on HelloReject without retrying, so the deadline is
-                // bounded by `process::exit` overhead.
+            Err(AuthLoopError::HostRequiresUpgrade) => {
+                let msg = "host requires a newer viewer (protocol version mismatch)";
+                tracing::error!(msg);
+                eprintln!("HelloReject: {msg}");
+                std::process::exit(3);
+            }
+            Err(AuthLoopError::Locked(reason)) => {
+                tracing::error!(reason = %reason, "auth lockout");
+                eprintln!("HelloReject (lockout): {reason}");
+                std::process::exit(3);
+            }
+            Err(AuthLoopError::PromptDisabled) => {
+                let msg = "host requires auth credential; pass --pin or --ephemeral";
+                tracing::error!(msg);
+                eprintln!("HelloReject: {msg}");
+                std::process::exit(3);
+            }
+            Err(AuthLoopError::Other(reason)) => {
                 tracing::error!(reason = %reason, "host rejected Hello");
                 eprintln!("HelloReject: {reason}");
                 std::process::exit(3);
             }
             Err(e) => {
-                warn!(?e, "handshake failed");
+                warn!(?e, "auth handshake failed");
                 return;
             }
         };
+        // Store granted_permissions for the overlay stats payload.
+        #[cfg(windows)]
+        {
+            *shared.granted_permissions.lock().unwrap() = Some(ack.granted_permissions);
+        }
         info!(
             session_id = format!("{:#x}", ack.session_id),
             neg = format!("{}x{}@{}", ack.neg_width, ack.neg_height, ack.neg_fps),
@@ -2084,5 +2377,188 @@ mod tests {
             std::time::Instant::now(),
             std::time::Duration::from_millis(250)
         ));
+    }
+
+    // ── auth retry loop tests ─────────────────────────────────────────────────
+
+    use prdt_protocol::{
+        control::{HelloRejectCode, PermissionSet},
+        frame::Codec,
+        MonitorRect,
+    };
+
+    /// A mock `HelloTransport` that plays back a scripted sequence of responses.
+    struct MockTransport {
+        /// Responses to return in order. Each `recv_response` call pops the front.
+        responses: std::collections::VecDeque<ControlMessage>,
+        /// Messages received by `send_hello` in order.
+        sent: Vec<ControlMessage>,
+    }
+
+    impl MockTransport {
+        fn new(responses: Vec<ControlMessage>) -> Self {
+            Self {
+                responses: responses.into(),
+                sent: vec![],
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HelloTransport for MockTransport {
+        async fn send_hello(
+            &mut self,
+            msg: ControlMessage,
+        ) -> Result<(), prdt_transport::TransportError> {
+            self.sent.push(msg);
+            Ok(())
+        }
+
+        async fn recv_response(
+            &mut self,
+        ) -> Result<ControlMessage, prdt_transport::TransportError> {
+            self.responses
+                .pop_front()
+                .ok_or(prdt_transport::TransportError::PeerClosed)
+        }
+    }
+
+    fn make_hello_ack() -> ControlMessage {
+        ControlMessage::HelloAck {
+            session_id: 0xABCD,
+            host_monotonic_base_us: 0,
+            neg_width: 1920,
+            neg_height: 1080,
+            neg_fps: 60,
+            neg_bitrate_bps: 10_000_000,
+            host_monitor_rect: MonitorRect::new(0, 0, 1920, 1080),
+            host_virtual_desktop_rect: MonitorRect::new(0, 0, 1920, 1080),
+            negotiated_codec: Codec::H265,
+            host_supported_codecs: vec![Codec::H265],
+            granted_permissions: PermissionSet::all(),
+        }
+    }
+
+    fn make_reject(code: HelloRejectCode, reason: &str) -> ControlMessage {
+        ControlMessage::HelloReject {
+            code,
+            reason: reason.to_string(),
+        }
+    }
+
+    fn default_template() -> HelloTemplate {
+        HelloTemplate {
+            protocol_version: prdt_transport::handshake::HELLO_PROTOCOL_VERSION,
+            req_width: 1920,
+            req_height: 1080,
+            req_fps: 60,
+            codec: Codec::H265,
+        }
+    }
+
+    /// Mock prompt that returns a fixed PIN once, then PromptDisabled.
+    struct OnePinPrompt(String);
+
+    #[async_trait::async_trait]
+    impl AuthPromptProvider for OnePinPrompt {
+        async fn get_pin(&self) -> Result<String, AuthLoopError> {
+            Ok(self.0.clone())
+        }
+        async fn get_ephemeral(&self) -> Result<String, AuthLoopError> {
+            Err(AuthLoopError::PromptDisabled)
+        }
+        async fn notify_wrong(&self) {}
+    }
+
+    /// Mock prompt that always returns PromptDisabled.
+    struct NoPrompt;
+
+    #[async_trait::async_trait]
+    impl AuthPromptProvider for NoPrompt {
+        async fn get_pin(&self) -> Result<String, AuthLoopError> {
+            Err(AuthLoopError::PromptDisabled)
+        }
+        async fn get_ephemeral(&self) -> Result<String, AuthLoopError> {
+            Err(AuthLoopError::PromptDisabled)
+        }
+        async fn notify_wrong(&self) {}
+    }
+
+    #[tokio::test]
+    async fn viewer_retries_on_pin_required() {
+        // Host: first Hello (Tofu) → PinRequired; second Hello (Pin) → HelloAck.
+        let mut transport = MockTransport::new(vec![
+            make_reject(HelloRejectCode::PinRequired, "pin required"),
+            make_hello_ack(),
+        ]);
+        let template = default_template();
+        let prompt = OnePinPrompt("hunter2".into());
+
+        let ack = run_viewer_auth_loop(&mut transport, &template, &prompt)
+            .await
+            .expect("should succeed on second attempt");
+
+        assert_eq!(ack.session_id, 0xABCD);
+        assert_eq!(ack.granted_permissions, PermissionSet::all());
+
+        // Verify the two Hello messages sent: first Tofu, then Pin.
+        assert_eq!(transport.sent.len(), 2);
+        match &transport.sent[0] {
+            ControlMessage::Hello { auth_method, .. } => {
+                assert_eq!(*auth_method, prdt_protocol::control::AuthMethod::Tofu);
+            }
+            other => panic!("expected Hello, got {other:?}"),
+        }
+        match &transport.sent[1] {
+            ControlMessage::Hello {
+                auth_method,
+                auth_payload,
+                ..
+            } => {
+                assert_eq!(*auth_method, prdt_protocol::control::AuthMethod::Pin);
+                assert_eq!(auth_payload, b"hunter2");
+            }
+            other => panic!("expected Hello with Pin, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn viewer_fails_fast_with_no_auth_prompt() {
+        // Host requires PIN but the viewer has no credential and prompting is disabled.
+        let mut transport = MockTransport::new(vec![make_reject(
+            HelloRejectCode::PinRequired,
+            "pin required",
+        )]);
+        let template = default_template();
+        let prompt = NoPrompt;
+
+        let err = run_viewer_auth_loop(&mut transport, &template, &prompt)
+            .await
+            .expect_err("should fail with PromptDisabled");
+
+        assert!(
+            matches!(err, AuthLoopError::PromptDisabled),
+            "expected PromptDisabled, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn viewer_shows_error_on_protocol_version_mismatch() {
+        // Host rejects with ProtocolVersionMismatch → fatal, no retry.
+        let mut transport = MockTransport::new(vec![make_reject(
+            HelloRejectCode::ProtocolVersionMismatch,
+            "version mismatch",
+        )]);
+        let template = default_template();
+        let prompt = NoPrompt;
+
+        let err = run_viewer_auth_loop(&mut transport, &template, &prompt)
+            .await
+            .expect_err("should fail with HostRequiresUpgrade");
+
+        assert!(
+            matches!(err, AuthLoopError::HostRequiresUpgrade),
+            "expected HostRequiresUpgrade, got {err:?}"
+        );
     }
 }
