@@ -379,3 +379,66 @@ impl AuthValidator {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prdt_crypto::known_peers::{KnownPeer, KnownPeers};
+    use prdt_protocol::{AuthMethod, ControlMessage, PermissionSet};
+
+    fn make_hello() -> ControlMessage {
+        ControlMessage::Hello {
+            protocol_version: 3,
+            auth_method: AuthMethod::Tofu,
+            auth_payload: vec![],
+            req_width: 1920,
+            req_height: 1080,
+            req_fps: 60,
+            codec: prdt_protocol::Codec::H264,
+        }
+    }
+
+    /// Inserting a peer into the shared Arc<RwLock<KnownPeers>> must cause
+    /// the AuthValidator's validate_tofu path to return Granted (not
+    /// NeedsConsent) on the next call. This pins the Arc-sync invariant
+    /// introduced by Task 5.
+    #[tokio::test]
+    async fn arc_sync_tofu_grants_after_peer_added() {
+        let known = Arc::new(RwLock::new(KnownPeers::default()));
+        let cfg = crate::auth_config::HostAuthConfig {
+            mode: crate::auth_config::AuthMode::Tofu,
+            ..Default::default()
+        };
+        let validator = AuthValidator::new(cfg, known.clone());
+
+        let peer_b64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        let hello = make_hello();
+
+        // Before adding: should need consent.
+        let verdict = validator.validate(&hello, peer_b64).await;
+        assert!(
+            matches!(verdict, AuthVerdict::NeedsConsent { .. }),
+            "expected NeedsConsent before peer added, got {verdict:?}"
+        );
+
+        // Simulate consent-accept: write the peer into the shared Arc.
+        {
+            let mut g = known.write().await;
+            g.peers.push(KnownPeer {
+                pubkey_b64: peer_b64.to_string(),
+                label: "test".into(),
+                permissions: PermissionSet::all(),
+                first_seen_at: std::time::SystemTime::now(),
+                last_seen_at: std::time::SystemTime::now(),
+            });
+        }
+
+        // After adding: same validator instance must now return Granted
+        // because the shared Arc was mutated.
+        let verdict2 = validator.validate(&hello, peer_b64).await;
+        assert!(
+            matches!(verdict2, AuthVerdict::Granted { .. }),
+            "expected Granted after peer added to Arc, got {verdict2:?}"
+        );
+    }
+}
