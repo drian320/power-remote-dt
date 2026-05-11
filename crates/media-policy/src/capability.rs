@@ -5,6 +5,7 @@
 //! the platform-agnostic types they emit.
 
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BackendKind {
@@ -15,12 +16,27 @@ pub enum BackendKind {
 }
 
 impl BackendKind {
-    /// Stable lowercase identifier for logs / config files.
-    pub fn as_str(&self) -> &'static str {
+    /// Stable lowercase identifier for logs / config files. The CLI
+    /// short-form for `MfHevc` is `"mf"`; both round-trip via `FromStr`.
+    pub fn as_str(self) -> &'static str {
         match self {
-            BackendKind::Nvenc => "nvenc",
-            BackendKind::MfHevc => "mf-hevc",
-            BackendKind::Openh264 => "openh264",
+            Self::Nvenc => "nvenc",
+            Self::MfHevc => "mf-hevc",
+            Self::Openh264 => "openh264",
+        }
+    }
+}
+
+/// Parses both the canonical log identifier (e.g. `"mf-hevc"`) and the
+/// CLI short form (e.g. `"mf"`). Used by host CLI flags in T7.
+impl FromStr for BackendKind {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "nvenc" => Ok(Self::Nvenc),
+            "mf" | "mf-hevc" => Ok(Self::MfHevc),
+            "openh264" => Ok(Self::Openh264),
+            other => Err(format!("unknown BackendKind: {other:?}")),
         }
     }
 }
@@ -32,7 +48,7 @@ pub enum Codec {
     // future: AV1
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EncoderCapability {
     pub backend: BackendKind,
     pub codec: Codec,
@@ -51,7 +67,7 @@ pub trait CapabilityProbe: Send + Sync {
 mod tests {
     use super::*;
 
-    /// Deterministic in-memory probe used in unit + integration tests.
+    /// Deterministic in-memory probe used in this file's unit tests. Integration tests in `tests/` define their own probe types inline (the cfg(test) module is not reachable across crate boundaries).
     pub struct MockProbe(pub Vec<EncoderCapability>);
 
     impl CapabilityProbe for MockProbe {
@@ -65,6 +81,19 @@ mod tests {
         assert_eq!(BackendKind::Nvenc.as_str(), "nvenc");
         assert_eq!(BackendKind::MfHevc.as_str(), "mf-hevc");
         assert_eq!(BackendKind::Openh264.as_str(), "openh264");
+    }
+
+    #[test]
+    fn backend_kind_round_trips_via_from_str() {
+        // canonical (log) form round-trips
+        for k in [BackendKind::Nvenc, BackendKind::MfHevc, BackendKind::Openh264] {
+            let s = k.as_str();
+            assert_eq!(s.parse::<BackendKind>().unwrap(), k, "round-trip failed for {k:?}");
+        }
+        // CLI short form for MfHevc also parses
+        assert_eq!("mf".parse::<BackendKind>().unwrap(), BackendKind::MfHevc);
+        // unknown identifier rejected
+        assert!("xyz".parse::<BackendKind>().is_err());
     }
 
     #[test]
