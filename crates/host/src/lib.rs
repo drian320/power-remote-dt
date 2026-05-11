@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod auth_config;
 mod platform;
 mod status;
