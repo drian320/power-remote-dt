@@ -497,6 +497,9 @@ pub async fn run_host(
         let video = tokio::spawn(async move {
             let mut frames_sent = 0u64;
             let mut send_errors = 0u64;
+            // L4: 1-second window byte counter so smoke can verify
+            // "encoder actually shrunk frames" alongside L3's target_bps log.
+            let mut bytes_sent_window: u64 = 0;
             let mut last_log = std::time::Instant::now();
             let mut first_frame_logged = false;
             loop {
@@ -525,14 +528,17 @@ pub async fn run_host(
                                 }
                                 let nal_len = frame.nal_units.len();
                                 let is_kf = frame.is_keyframe;
+                                let bytes_in_frame = frame.nal_units.len() as u64;
                                 if let Err(e) = tx_video.send_video(frame).await {
                                     send_errors += 1;
                                     warn!(?e, nal_len, is_kf, "send_video error; continuing");
                                 } else {
                                     frames_sent += 1;
+                                    bytes_sent_window += bytes_in_frame;
                                 }
                                 if last_log.elapsed() >= std::time::Duration::from_secs(1) {
-                                    info!(frames_sent, send_errors, "host tx stats");
+                                    info!(frames_sent, send_errors, bytes_sent_window, "host tx stats");
+                                    bytes_sent_window = 0;
                                     last_log = std::time::Instant::now();
                                 }
                             }
