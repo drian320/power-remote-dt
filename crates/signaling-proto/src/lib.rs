@@ -70,6 +70,9 @@ pub enum ClientMessage {
         session_id: String,
         outcome: DoneOutcome,
     },
+    ProbeHosts {
+        host_ids: Vec<String>,
+    },
 }
 
 /// Messages sent by the signaling server to host or viewer.
@@ -92,4 +95,32 @@ pub enum ServerMessage {
         code: ErrorCode,
         message: String,
     },
+    ProbeResult {
+        online: Vec<String>,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probe_hosts_round_trip() {
+        let msg = ClientMessage::ProbeHosts {
+            host_ids: vec!["111-111-111".into(), "222-222-222".into()],
+        };
+        let s = serde_json::to_string(&msg).unwrap();
+        let back: ClientMessage = serde_json::from_str(&s).unwrap();
+        assert_eq!(msg, back);
+    }
+
+    #[test]
+    fn probe_result_round_trip() {
+        let msg = ServerMessage::ProbeResult {
+            online: vec!["111-111-111".into()],
+        };
+        let s = serde_json::to_string(&msg).unwrap();
+        let back: ServerMessage = serde_json::from_str(&s).unwrap();
+        assert_eq!(msg, back);
+    }
 }

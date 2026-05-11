@@ -169,6 +169,13 @@ async fn handle_socket(mut socket: WebSocket, app: AppState) {
 
             viewer_loop(socket, state, session_id, viewer_rx).await;
         }
+        ClientMessage::ProbeHosts { host_ids } => {
+            let online: Vec<String> = host_ids
+                .into_iter()
+                .filter(|id| state.hosts.contains_key(id))
+                .collect();
+            let _ = send_message(&mut socket, &ServerMessage::ProbeResult { online }).await;
+        }
         _ => {
             send_error(
                 &mut socket,

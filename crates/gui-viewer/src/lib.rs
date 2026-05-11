@@ -3,6 +3,7 @@
 mod app;
 mod connect_form;
 mod hosts_list;
+pub mod online_probe;
 mod settings;
 
 use std::path::PathBuf;

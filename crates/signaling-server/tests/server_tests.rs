@@ -548,3 +548,84 @@ async fn register_rejects_pubkey_mismatch() {
         other => panic!("unexpected: {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn probe_hosts_returns_intersection() {
+    let (addr, _state) = start_test_server().await;
+
+    // Register host A (keep WS open so it stays in hosts map)
+    let (mut host_a_ws, _) = tokio_tungstenite::connect_async(ws_url(addr))
+        .await
+        .unwrap();
+    ws_send(
+        &mut host_a_ws,
+        ClientMessage::Register {
+            host_id: "111-111-111".into(),
+            pubkey_b64: "PKA".into(),
+        },
+    )
+    .await;
+    let _ = ws_recv(&mut host_a_ws).await;
+
+    // Register host B (keep WS open)
+    let (mut host_b_ws, _) = tokio_tungstenite::connect_async(ws_url(addr))
+        .await
+        .unwrap();
+    ws_send(
+        &mut host_b_ws,
+        ClientMessage::Register {
+            host_id: "222-222-222".into(),
+            pubkey_b64: "PKB".into(),
+        },
+    )
+    .await;
+    let _ = ws_recv(&mut host_b_ws).await;
+
+    // Viewer sends ProbeHosts — 111 and 222 are online, 333 is not
+    let (mut viewer_ws, _) = tokio_tungstenite::connect_async(ws_url(addr))
+        .await
+        .unwrap();
+    ws_send(
+        &mut viewer_ws,
+        ClientMessage::ProbeHosts {
+            host_ids: vec![
+                "111-111-111".into(),
+                "222-222-222".into(),
+                "333-333-333".into(),
+            ],
+        },
+    )
+    .await;
+
+    let msg = ws_recv(&mut viewer_ws).await;
+    match msg {
+        ServerMessage::ProbeResult { online } => {
+            assert_eq!(online.len(), 2);
+            assert!(online.contains(&"111-111-111".to_string()));
+            assert!(online.contains(&"222-222-222".to_string()));
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn probe_hosts_empty_list_ok() {
+    let (addr, _state) = start_test_server().await;
+
+    let (mut viewer_ws, _) = tokio_tungstenite::connect_async(ws_url(addr))
+        .await
+        .unwrap();
+    ws_send(
+        &mut viewer_ws,
+        ClientMessage::ProbeHosts { host_ids: vec![] },
+    )
+    .await;
+
+    let msg = ws_recv(&mut viewer_ws).await;
+    match msg {
+        ServerMessage::ProbeResult { online } => {
+            assert!(online.is_empty());
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
