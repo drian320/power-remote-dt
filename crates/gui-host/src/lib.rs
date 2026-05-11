@@ -4,6 +4,7 @@ mod app;
 pub mod auth_settings;
 #[allow(dead_code)] // is_enabled() consumed in Phase 4 G4+ for query UI
 mod autostart;
+pub mod consent_channel;
 pub mod consent_prompt;
 mod keygen;
 mod notif;
@@ -15,6 +16,7 @@ pub mod update;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use consent_channel::ConsentSender;
 use prdt_gui_common::{install_jp_font, Config, TailLayer};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::layer::SubscriberExt;
@@ -24,8 +26,11 @@ use tracing_subscriber::Layer;
 /// Closure injected by the host binary so the GUI can spawn the real
 /// `run_host` without depending on `prdt-host` (which depends on
 /// `prdt-gui-host` already — depending the other way would cycle).
-pub type RunHostFn =
-    Arc<dyn Fn(CancellationToken) -> tokio::task::JoinHandle<anyhow::Result<()>> + Send + Sync>;
+pub type RunHostFn = Arc<
+    dyn Fn(CancellationToken, ConsentSender) -> tokio::task::JoinHandle<anyhow::Result<()>>
+        + Send
+        + Sync,
+>;
 
 /// Run the host GUI as the main blocking call. Returns when the user
 /// closes the window.

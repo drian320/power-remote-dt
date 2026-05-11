@@ -1,28 +1,12 @@
 //! Permission-prompt modal shown when an unknown peer requests to connect
 //! (TOFU mode: NeedsConsent). The host GUI renders this modal and sends
-//! a `ConsentOutcome` back to the host task.
-//!
-//! Full channel wire-up into gui-host's app loop is deferred; see
-//! TODO(P6 T7 follow-up) inside `ConsentPromptState::show`.
+//! a `ConsentDecision` back to the host task.
 
 use std::time::{Duration, Instant};
 
 use prdt_protocol::PermissionSet;
 
-// ---------------------------------------------------------------------------
-// Decision type (gui-host local; the app loop converts to prdt_host types)
-// ---------------------------------------------------------------------------
-
-/// What the operator decided after seeing the prompt.
-#[derive(Debug, Clone)]
-pub enum ConsentOutcome {
-    Allowed {
-        permissions: PermissionSet,
-        remember: bool,
-        label: String,
-    },
-    Denied,
-}
+use crate::consent_channel::ConsentDecision;
 
 // ---------------------------------------------------------------------------
 // State
@@ -43,7 +27,7 @@ pub struct ConsentPromptState {
     /// Whether to persist this peer to known-peers after accepting.
     pub remember: bool,
     /// When the prompt was first shown; elapsed is computed from this.
-    created_at: Instant,
+    pub(crate) created_at: Instant,
     /// Auto-deny timeout; countdown shown in UI.
     pub timeout: Duration,
 }
@@ -64,34 +48,22 @@ impl ConsentPromptState {
         }
     }
 
-    /// Render the consent prompt modal.
+    /// Returns `Some(decision)` when the user clicks or the timeout fires.
     ///
-    /// Returns `Some(ConsentOutcome)` when the user clicks Allow or Deny,
-    /// or when the timeout expires (auto-Deny).  Returns `None` while the
-    /// prompt is still waiting.
-    ///
-    /// Requests a repaint after 1 s so the countdown label refreshes without
-    /// requiring the operator to move the mouse.
-    ///
-    /// TODO(P6 T7 follow-up): wire this into `HostApp::update`:
-    ///   1. Add `consent_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ConsentRequest>>`
-    ///      and `pending_consent: Option<(ConsentPromptState, oneshot::Sender<ConsentDecision>)>`
-    ///      to `HostApp`.
-    ///   2. Populate `consent_rx` when `run_host` is launched (pass a sender).
-    ///   3. In `update()`, poll `consent_rx`; on receipt create `ConsentPromptState::new(...)`.
-    ///   4. Call `state.show(ctx)` each frame; on `Some(outcome)` convert to
-    ///      `prdt_host::ConsentDecision` and send via `responder.send(decision)`.
-    pub fn show(&mut self, ctx: &egui::Context) -> Option<ConsentOutcome> {
+    /// Returns `None` while the prompt is still waiting. Requests a repaint
+    /// after 1 s so the countdown label refreshes without requiring the
+    /// operator to move the mouse.
+    pub fn show(&mut self, ctx: &egui::Context) -> Option<ConsentDecision> {
         let elapsed = self.created_at.elapsed();
 
         // Auto-deny on timeout — no UI render needed.
         if elapsed >= self.timeout {
-            return Some(ConsentOutcome::Denied);
+            return Some(ConsentDecision::Rejected);
         }
 
         let remaining = self.timeout - elapsed;
         let short_key = self.peer_pubkey_b64.chars().take(16).collect::<String>();
-        let mut result: Option<ConsentOutcome> = None;
+        let mut result: Option<ConsentDecision> = None;
 
         egui::Window::new("Incoming viewer")
             .collapsible(false)
@@ -125,10 +97,10 @@ impl ConsentPromptState {
 
                 ui.horizontal(|ui| {
                     if ui.button("Deny").clicked() {
-                        result = Some(ConsentOutcome::Denied);
+                        result = Some(ConsentDecision::Rejected);
                     }
                     if ui.button("Allow").clicked() {
-                        result = Some(ConsentOutcome::Allowed {
+                        result = Some(ConsentDecision::Accepted {
                             permissions: self.permissions,
                             remember: self.remember,
                             label: self.label_input.clone(),

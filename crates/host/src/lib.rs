@@ -190,17 +190,24 @@ pub struct Args {
     pub host_peers_file: std::path::PathBuf,
 }
 
+// On Windows the GUI crate owns the canonical consent-channel types; re-export
+// them here so the rest of this crate and any integration tests can use
+// `prdt_host::ConsentDecision` etc. regardless of platform.
+#[cfg(windows)]
+pub use prdt_gui_host::consent_channel::{ConsentDecision, ConsentRequest, ConsentSender};
+
+// On non-Windows platforms (Linux headless host, CI) define the types locally
+// since prdt-gui-host is a Windows-only dependency.
+#[cfg(not(windows))]
 #[derive(Debug)]
 pub struct ConsentRequest {
     pub peer_pubkey: prdt_crypto::PubKey,
     pub responder: tokio::sync::oneshot::Sender<ConsentDecision>,
 }
 
+#[cfg(not(windows))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConsentDecision {
-    /// Viewer is accepted. `permissions` caps the session, `remember` causes
-    /// the peer to be persisted to known-peers so future connections are
-    /// silent, and `label` is the human-readable name to store.
     Accepted {
         permissions: prdt_protocol::control::PermissionSet,
         remember: bool,
@@ -209,6 +216,7 @@ pub enum ConsentDecision {
     Rejected,
 }
 
+#[cfg(not(windows))]
 pub type ConsentSender = tokio::sync::mpsc::UnboundedSender<ConsentRequest>;
 
 // ---------------------------------------------------------------------------
@@ -559,9 +567,10 @@ pub async fn run_host(
         );
 
         let known = Arc::new(RwLock::new(known_peers));
-        let validator = Arc::new(auth::AuthValidator::new(cfg, known));
-        HostAuthHook::new(validator)
+        let validator = Arc::new(auth::AuthValidator::new(cfg, known.clone()));
+        (HostAuthHook::new(validator), known)
     };
+    let (auth_hook, known_peers_arc) = auth_hook;
 
     loop {
         transport.reset_session().await;
@@ -591,13 +600,12 @@ pub async fn run_host(
                 "silent-allow enabled; skipping consent gate"
             );
         } else {
-            use prdt_crypto::known_peers::{KnownPeer, KnownPeers};
+            use prdt_crypto::known_peers::KnownPeer;
             let peer_b64 = peer_pubkey.to_base64();
-            let known = KnownPeers::load_or_default(&args.host_peers_file).unwrap_or_else(|e| {
-                warn!(?e, path=?args.host_peers_file, "failed to load host-peers.toml; treating as empty");
-                KnownPeers::default()
-            });
-            let already_known = known.peers.iter().any(|p| p.pubkey_b64 == peer_b64);
+            let already_known = {
+                let g = known_peers_arc.read().await;
+                g.peers.iter().any(|p| p.pubkey_b64 == peer_b64)
+            };
             if !already_known {
                 let decision = match &consent_tx {
                     Some(tx) => {
@@ -636,37 +644,41 @@ pub async fn run_host(
                         remember,
                         label,
                     } => {
-                        // Persist to TOML host-peers.toml so future connections
-                        // from this peer are silently accepted (when remember==true).
-                        let _ = permissions; // used by AuthValidator via the shared Arc
-                        if remember {
-                            let peer_label = if label.is_empty() {
-                                peer_b64.clone()
+                        let peer_label = if label.is_empty() {
+                            peer_b64.clone()
+                        } else {
+                            label
+                        };
+                        {
+                            let mut g = known_peers_arc.write().await;
+                            if let Some(existing) =
+                                g.peers.iter_mut().find(|p| p.pubkey_b64 == peer_b64)
+                            {
+                                existing.permissions = permissions;
+                                existing.last_seen_at = std::time::SystemTime::now();
+                                if !peer_label.is_empty() {
+                                    existing.label = peer_label.clone();
+                                }
                             } else {
-                                label
-                            };
-                            let mut updated = known;
-                            updated.peers.push(KnownPeer {
-                                pubkey_b64: peer_b64.clone(),
-                                label: peer_label,
-                                permissions: prdt_protocol::PermissionSet::all(),
-                                first_seen_at: std::time::SystemTime::now(),
-                                last_seen_at: std::time::SystemTime::now(),
-                            });
-                            if let Err(e) = updated.save(&args.host_peers_file) {
-                                warn!(
-                                    ?e,
-                                    path=?args.host_peers_file,
-                                    "failed to persist host-peers.toml; session continues but peer won't be remembered"
-                                );
-                            } else {
-                                info!(
-                                    peer=%peer_b64,
-                                    path=?args.host_peers_file,
-                                    "added peer to host-peers.toml"
-                                );
+                                g.peers.push(KnownPeer {
+                                    pubkey_b64: peer_b64.clone(),
+                                    label: peer_label.clone(),
+                                    permissions,
+                                    first_seen_at: std::time::SystemTime::now(),
+                                    last_seen_at: std::time::SystemTime::now(),
+                                });
+                            }
+                            if remember {
+                                if let Err(e) = g.save(&args.host_peers_file) {
+                                    warn!(
+                                        ?e,
+                                        path = %args.host_peers_file.display(),
+                                        "failed to persist host-peers.toml after consent accept"
+                                    );
+                                }
                             }
                         }
+                        info!(peer = %peer_b64, %remember, "consent accepted; peer recorded");
                     }
                 }
             } else {
@@ -1306,9 +1318,9 @@ pub fn run_with_args(args: Args) -> Result<()> {
 
     // GUI mode: gui-host installs its own tracing subscriber + tokio runtime.
     let args_arc = std::sync::Arc::new(args.clone());
-    let run_host_fn: prdt_gui_host::RunHostFn = std::sync::Arc::new(move |cancel| {
+    let run_host_fn: prdt_gui_host::RunHostFn = std::sync::Arc::new(move |cancel, consent_tx| {
         let args = args_arc.clone();
-        tokio::spawn(async move { run_host((*args).clone(), None, None, cancel).await })
+        tokio::spawn(async move { run_host((*args).clone(), None, Some(consent_tx), cancel).await })
     });
     prdt_gui_host::run_host_gui(env!("CARGO_PKG_NAME"), args.config.clone(), run_host_fn)
 }
