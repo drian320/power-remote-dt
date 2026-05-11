@@ -125,8 +125,8 @@ pub struct Args {
     #[arg(long)]
     encoder_hint: Option<String>,
 
-    /// Shorthand for --encoder openh264. Convenient for support cases where
-    /// a software-only path is needed without remembering the exact backend name.
+    /// Shorthand for --encoder openh264. Convenient for support cases.
+    /// If combined with --encoder <hw>, --force-sw wins and a warn! is emitted.
     #[arg(long, default_value_t = false)]
     force_sw: bool,
 
@@ -492,6 +492,16 @@ pub async fn run_host(
         });
         // --force-sw overrides user_override to Openh264 if set.
         let (user_override, force_sw) = if args.force_sw {
+            // If user also explicitly requested a non-SW backend, warn so they know
+            // --force-sw wins.
+            if let Some(req) = user_override {
+                if !matches!(req, prdt_media_policy::BackendKind::Openh264) {
+                    tracing::warn!(
+                        requested = ?req,
+                        "--force-sw overrides --encoder; using OpenH264"
+                    );
+                }
+            }
             (Some(prdt_media_policy::BackendKind::Openh264), true)
         } else {
             (user_override, false)
@@ -503,7 +513,12 @@ pub async fn run_host(
         // Linux factory is wired but PolicyDriven::bootstrap is attempted first).
         let policy_codec = to_policy_codec(req.codec);
         let policy_ctx = prdt_media_policy::PolicyContext {
-            target_resolution: (1920, 1080), // advisory; host derives real dims from output
+            // HARD filter: SelectionPolicy::rank rejects backends whose max_resolution is
+            // below this. (1920, 1080) is a conservative lower bound — every current
+            // probe entry advertises 3840×2160 so this filter is inert. If a backend
+            // is ever added with a tighter max_resolution, thread the live output
+            // dimensions through here.
+            target_resolution: (1920, 1080),
             target_fps: 60,
             target_bitrate_bps: bitrate_bps,
             codec: policy_codec,
@@ -531,8 +546,11 @@ pub async fn run_host(
         // can actually create a producer; on Windows the factory stubs out and
         // bootstrap will return Err, falling through to the legacy path below).
         let policy_cfg = prdt_media_policy::ProducerConfig {
-            width: 1920,   // advisory — Linux factory reads real dims from X11
-            height: 1080,  // advisory
+            // (1920, 1080) is a conservative lower bound matching the PolicyContext
+            // target_resolution above. Thread live output dimensions through here
+            // if a backend with a tighter max_resolution is ever added.
+            width: 1920,
+            height: 1080,
             fps: 60,
             initial_bitrate_bps: bitrate_bps,
             codec: policy_codec,

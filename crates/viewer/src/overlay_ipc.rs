@@ -118,4 +118,22 @@ mod tests {
         assert_eq!(action, Some("disconnect".to_string()));
         assert!(!control_path(dir.path()).exists());
     }
+
+    #[test]
+    fn missing_encoder_backend_field_defaults_to_none() {
+        // Backward compat: old viewer versions don't emit encoder_backend.
+        // #[serde(default)] should leave it as None without failing.
+        let raw = r#"{
+            "version": 1,
+            "viewer_pid": 1,
+            "updated_at_unix_ms": 0,
+            "connection_state": "connected",
+            "host_label": "h",
+            "decoder": "mf",
+            "latency_us": null,
+            "fps_observed": 0.0
+        }"#;
+        let parsed: StatsPayload = serde_json::from_str(raw).unwrap();
+        assert!(parsed.encoder_backend.is_none());
+    }
 }

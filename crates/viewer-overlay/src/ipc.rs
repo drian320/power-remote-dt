@@ -144,4 +144,24 @@ mod tests {
         assert!(parsed.latency_us.is_none());
         assert_eq!(parsed.connection_state, "connecting");
     }
+
+    #[test]
+    fn missing_encoder_backend_field_defaults_to_none() {
+        // Backward compat: old viewer versions don't emit encoder_backend.
+        // #[serde(default)] should leave it as None without failing.
+        let dir = tempfile::tempdir().unwrap();
+        let raw = r#"{
+            "version": 1,
+            "viewer_pid": 1,
+            "updated_at_unix_ms": 0,
+            "connection_state": "connected",
+            "host_label": "h",
+            "decoder": "mf",
+            "latency_us": null,
+            "fps_observed": 0.0
+        }"#;
+        std::fs::write(stats_path(dir.path()), raw).unwrap();
+        let parsed = read_stats(dir.path()).unwrap();
+        assert!(parsed.encoder_backend.is_none());
+    }
 }
