@@ -107,13 +107,17 @@ impl PolicyDriven {
         let next = ranked
             .into_iter()
             .find(|k| *k != self.inner_kind)
-            .ok_or_else(|| ProducerError::Other(format!(
-                "no failover candidate available (current = {:?})", self.inner_kind
-            )))?;
+            .ok_or_else(|| {
+                ProducerError::Other(format!(
+                    "no failover candidate available (current = {:?})",
+                    self.inner_kind
+                ))
+            })?;
 
-        let mut new_producer = self.factory.create(next, &self.cfg).map_err(|e| {
-            ProducerError::Other(format!("factory failed for {next:?}: {e}"))
-        })?;
+        let mut new_producer = self
+            .factory
+            .create(next, &self.cfg)
+            .map_err(|e| ProducerError::Other(format!("factory failed for {next:?}: {e}")))?;
         new_producer.set_target_bitrate(self.current_bitrate_bps);
         new_producer.request_idr();
 
@@ -168,12 +172,16 @@ impl VideoProducer for PolicyDriven {
         unreachable!("next_frame loop should always return")
     }
 
-    fn request_idr(&mut self) { self.inner.request_idr(); }
+    fn request_idr(&mut self) {
+        self.inner.request_idr();
+    }
 
     fn set_target_bitrate(&mut self, bps: u32) {
         self.current_bitrate_bps = bps;
         self.inner.set_target_bitrate(bps);
     }
 
-    fn backend_name(&self) -> &'static str { self.inner.backend_name() }
+    fn backend_name(&self) -> &'static str {
+        self.inner.backend_name()
+    }
 }

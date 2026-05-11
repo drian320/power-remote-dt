@@ -830,11 +830,7 @@ fn build_stats_payload(app: &ViewerApp) -> overlay_ipc::StatsPayload {
         p99: p.p99_us,
         samples: p.samples,
     });
-    let encoder_backend = Some(format!(
-        "{} {}",
-        backend_badge(decoder.as_str()),
-        decoder
-    ));
+    let encoder_backend = Some(format!("{} {}", backend_badge(decoder.as_str()), decoder));
     overlay_ipc::StatsPayload {
         version: 1,
         viewer_pid: std::process::id(),

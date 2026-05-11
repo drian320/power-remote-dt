@@ -11,10 +11,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::Parser;
 use platform::{
-    build_video_producer, clipboard_sequence_number, dispatch_input, output_display_name,
-    pick_default_output, probe as platform_probe, factory as platform_factory,
-    read_clipboard_text, virtual_desktop_rect, write_clipboard_text,
-    MAX_CLIPBOARD_BYTES,
+    build_video_producer, clipboard_sequence_number, dispatch_input, factory as platform_factory,
+    output_display_name, pick_default_output, probe as platform_probe, read_clipboard_text,
+    virtual_desktop_rect, write_clipboard_text, MAX_CLIPBOARD_BYTES,
 };
 use prdt_audio::{LoopbackCapture, OpusEncoder};
 use prdt_crypto::KeyPair;
@@ -532,7 +531,8 @@ pub async fn run_host(
             std::sync::Arc::new(prdt_media_policy::ScoringPolicy::load_default_or_fallback());
         {
             let caps = probe_arc.list_encoders();
-            let ranked = scoring_policy.rank(&caps, &policy_ctx, &prdt_media_policy::HistoryTable::new());
+            let ranked =
+                scoring_policy.rank(&caps, &policy_ctx, &prdt_media_policy::HistoryTable::new());
             info!(
                 ranked = ?ranked,
                 user_override = ?user_override,

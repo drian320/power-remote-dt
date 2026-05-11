@@ -142,9 +142,18 @@ mod tests {
     fn windows_probe_nvenc_is_highest_priority() {
         let probe = WindowsProbe;
         let caps = probe.list_encoders();
-        let nvenc = caps.iter().find(|c| c.backend == BackendKind::Nvenc).unwrap();
-        let mf = caps.iter().find(|c| c.backend == BackendKind::MfHevc).unwrap();
-        let sw = caps.iter().find(|c| c.backend == BackendKind::Openh264).unwrap();
+        let nvenc = caps
+            .iter()
+            .find(|c| c.backend == BackendKind::Nvenc)
+            .unwrap();
+        let mf = caps
+            .iter()
+            .find(|c| c.backend == BackendKind::MfHevc)
+            .unwrap();
+        let sw = caps
+            .iter()
+            .find(|c| c.backend == BackendKind::Openh264)
+            .unwrap();
         assert!(nvenc.priority > mf.priority);
         assert!(mf.priority > sw.priority);
     }
@@ -177,7 +186,11 @@ mod tests {
             initial_bitrate_bps: 8_000_000,
             codec: Codec::H265,
         };
-        for kind in [BackendKind::Nvenc, BackendKind::MfHevc, BackendKind::Openh264] {
+        for kind in [
+            BackendKind::Nvenc,
+            BackendKind::MfHevc,
+            BackendKind::Openh264,
+        ] {
             let result = factory.create(kind, &cfg);
             assert!(
                 matches!(result, Err(FactoryError::Unavailable(_, _))),

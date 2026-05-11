@@ -22,10 +22,20 @@ pub enum HealthState {
 
 #[derive(Debug, Clone)]
 pub enum FailoverReason {
-    LatencyDegradation { encode_p95_us: u64, frame_budget_us: u64 },
-    ConsecutiveFailures { count: u32 },
-    NoSuccessTimeout { idle_ms: u64 },
-    DeviceLost { backend: String, reason: String },
+    LatencyDegradation {
+        encode_p95_us: u64,
+        frame_budget_us: u64,
+    },
+    ConsecutiveFailures {
+        count: u32,
+    },
+    NoSuccessTimeout {
+        idle_ms: u64,
+    },
+    DeviceLost {
+        backend: String,
+        reason: String,
+    },
 }
 
 #[derive(Debug)]
@@ -41,18 +51,18 @@ pub enum HealthAction {
 #[derive(Debug)]
 pub struct HealthMonitor {
     state: HealthState,
-    encode_p95_ema: f64,                  // microseconds
+    encode_p95_ema: f64, // microseconds
     consecutive_failures: u32,
     last_success_at: Instant,
     frame_budget_us: u64,
-    deg_threshold_factor: f64,            // default 1.5
-    rec_threshold_factor: f64,            // default 1.2
-    deg_window_count_required: u32,       // default 3
-    rec_window_count_required: u32,       // default 5
+    deg_threshold_factor: f64,      // default 1.5
+    rec_threshold_factor: f64,      // default 1.2
+    deg_window_count_required: u32, // default 3
+    rec_window_count_required: u32, // default 5
     consecutive_deg_windows: u32,
     consecutive_rec_windows: u32,
-    failure_threshold: u32,               // default 3
-    no_success_timeout: Duration,         // default 500ms
+    failure_threshold: u32,       // default 3
+    no_success_timeout: Duration, // default 500ms
     /// Number of frames since last "window" boundary; window = 30 frames.
     frames_in_current_window: u32,
     window_size_frames: u32,
@@ -84,9 +94,15 @@ impl HealthMonitor {
         }
     }
 
-    pub fn current_state(&self) -> HealthState { self.state }
-    pub fn encode_p95_ema(&self) -> u64 { self.encode_p95_ema as u64 }
-    pub fn frame_budget_us(&self) -> u64 { self.frame_budget_us }
+    pub fn current_state(&self) -> HealthState {
+        self.state
+    }
+    pub fn encode_p95_ema(&self) -> u64 {
+        self.encode_p95_ema as u64
+    }
+    pub fn frame_budget_us(&self) -> u64 {
+        self.frame_budget_us
+    }
 
     /// Reset state when a new backend takes over. Called by PolicyDriven
     /// after a successful failover swap.
@@ -110,8 +126,7 @@ impl HealthMonitor {
         if self.encode_p95_ema == 0.0 {
             self.encode_p95_ema = x;
         } else {
-            self.encode_p95_ema =
-                self.ema_alpha * x + (1.0 - self.ema_alpha) * self.encode_p95_ema;
+            self.encode_p95_ema = self.ema_alpha * x + (1.0 - self.ema_alpha) * self.encode_p95_ema;
         }
 
         self.frames_in_current_window += 1;
@@ -165,7 +180,8 @@ impl HealthMonitor {
             self.state = HealthState::Lost;
             return Some(HealthAction::Failover {
                 reason: FailoverReason::DeviceLost {
-                    backend: backend.clone(), reason: reason.clone(),
+                    backend: backend.clone(),
+                    reason: reason.clone(),
                 },
             });
         }
@@ -200,7 +216,9 @@ impl HealthMonitor {
 mod tests {
     use super::*;
 
-    fn budget_60fps() -> u64 { 1_000_000 / 60 } // 16,666 us
+    fn budget_60fps() -> u64 {
+        1_000_000 / 60
+    } // 16,666 us
 
     #[test]
     fn fresh_monitor_is_healthy() {
@@ -230,10 +248,14 @@ mod tests {
     fn five_consecutive_underbudget_windows_return_to_healthy() {
         let mut m = HealthMonitor::new(60);
         // First push to Degraded.
-        for _ in 0..(30 * 3) { m.record_encode(30_000); }
+        for _ in 0..(30 * 3) {
+            m.record_encode(30_000);
+        }
         assert_eq!(m.current_state(), HealthState::Degraded);
         // Then 5 under-rec_threshold (1.2× budget = 20_000us; 10_000 is well under) windows.
-        for _ in 0..(30 * 5) { m.record_encode(10_000); }
+        for _ in 0..(30 * 5) {
+            m.record_encode(10_000);
+        }
         assert_eq!(m.current_state(), HealthState::Healthy);
     }
 
@@ -247,7 +269,9 @@ mod tests {
         assert!(r1.is_none());
         assert!(r2.is_none());
         match r3 {
-            Some(HealthAction::Failover { reason: FailoverReason::ConsecutiveFailures { count } }) => {
+            Some(HealthAction::Failover {
+                reason: FailoverReason::ConsecutiveFailures { count },
+            }) => {
                 assert_eq!(count, 3);
             }
             other => panic!("expected Failover ConsecutiveFailures, got {:?}", other),

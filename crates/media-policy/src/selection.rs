@@ -3,7 +3,7 @@
 //! The policy is deterministic given (candidates, context, history). All
 //! mutable state lives in `HistoryTable`; the policy itself is `&self`.
 
-use crate::capability::{BackendKind, EncoderCapability, Codec};
+use crate::capability::{BackendKind, Codec, EncoderCapability};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -55,7 +55,9 @@ impl HistoryTable {
         self.counts.get(&backend).map(|s| s.failures).unwrap_or(0)
     }
     pub fn recent_encode_p95_us(&self, backend: BackendKind) -> Option<u64> {
-        self.counts.get(&backend).and_then(|s| s.recent_encode_p95_us)
+        self.counts
+            .get(&backend)
+            .and_then(|s| s.recent_encode_p95_us)
     }
     pub fn cooldown_remaining(&self, backend: BackendKind, now: Instant) -> Duration {
         self.counts
@@ -130,7 +132,9 @@ impl ScoringPolicy {
     /// defaults on any read/parse error. No CLI flag override in P5A.
     pub fn load_default_or_fallback() -> Self {
         let Some(path) = dirs::config_dir().map(|d| d.join("prdt").join("policy.toml")) else {
-            return Self { weights: ScoringWeights::default() };
+            return Self {
+                weights: ScoringWeights::default(),
+            };
         };
         let weights = match std::fs::read_to_string(&path) {
             Ok(s) => match toml::from_str::<ScoringWeights>(&s) {
@@ -211,8 +215,7 @@ impl SelectionPolicy for ScoringPolicy {
                 let runtime_p95_us = history
                     .recent_encode_p95_us(cap.backend)
                     .unwrap_or(frame_budget_us / 2) as f64;
-                let latency_fit =
-                    (frame_budget_us as f64 / runtime_p95_us.max(1.0)).min(1.0);
+                let latency_fit = (frame_budget_us as f64 / runtime_p95_us.max(1.0)).min(1.0);
                 let reliability = beta_posterior(
                     history.successes(cap.backend),
                     history.failures(cap.backend),
@@ -362,21 +365,33 @@ mod tests {
         h.record_failure(BackendKind::Nvenc, t0);
         let cd1 = h.stats(BackendKind::Nvenc).cooldown_until.unwrap();
         let dur1 = cd1.duration_since(t0);
-        assert_eq!(dur1, Duration::from_secs(10), "first cooldown should be 10s");
+        assert_eq!(
+            dur1,
+            Duration::from_secs(10),
+            "first cooldown should be 10s"
+        );
 
         // Second failure AT cooldown end (so prev = 10s exactly): next = 20s.
         let t1 = cd1; // exactly when first cooldown expires
         h.record_failure(BackendKind::Nvenc, t1);
         let cd2 = h.stats(BackendKind::Nvenc).cooldown_until.unwrap();
         let dur2 = cd2.duration_since(t1);
-        assert_eq!(dur2, Duration::from_secs(20), "second cooldown should double to 20s");
+        assert_eq!(
+            dur2,
+            Duration::from_secs(20),
+            "second cooldown should double to 20s"
+        );
 
         // Third failure: next = 40s.
         let t2 = cd2;
         h.record_failure(BackendKind::Nvenc, t2);
         let cd3 = h.stats(BackendKind::Nvenc).cooldown_until.unwrap();
         let dur3 = cd3.duration_since(t2);
-        assert_eq!(dur3, Duration::from_secs(40), "third cooldown should double to 40s");
+        assert_eq!(
+            dur3,
+            Duration::from_secs(40),
+            "third cooldown should double to 40s"
+        );
     }
 
     #[test]

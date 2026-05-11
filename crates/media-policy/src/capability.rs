@@ -86,9 +86,17 @@ mod tests {
     #[test]
     fn backend_kind_round_trips_via_from_str() {
         // canonical (log) form round-trips
-        for k in [BackendKind::Nvenc, BackendKind::MfHevc, BackendKind::Openh264] {
+        for k in [
+            BackendKind::Nvenc,
+            BackendKind::MfHevc,
+            BackendKind::Openh264,
+        ] {
             let s = k.as_str();
-            assert_eq!(s.parse::<BackendKind>().unwrap(), k, "round-trip failed for {k:?}");
+            assert_eq!(
+                s.parse::<BackendKind>().unwrap(),
+                k,
+                "round-trip failed for {k:?}"
+            );
         }
         // CLI short form for MfHevc also parses
         assert_eq!("mf".parse::<BackendKind>().unwrap(), BackendKind::MfHevc);

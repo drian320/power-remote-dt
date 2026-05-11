@@ -11,16 +11,16 @@
 
 // Module shells; populated in T2-T6.
 pub mod capability;
-pub mod factory;
-pub mod selection;
-pub mod health;
 pub mod driver;
+pub mod factory;
+pub mod health;
+pub mod selection;
 
 // Re-exports for ergonomic consumer use:
-pub use capability::{BackendKind, Codec, EncoderCapability, CapabilityProbe};
+pub use capability::{BackendKind, CapabilityProbe, Codec, EncoderCapability};
+pub use driver::PolicyDriven;
 pub use factory::{FactoryError, ProducerConfig, ProducerFactory};
+pub use health::{FailoverReason, HealthAction, HealthMonitor, HealthState};
 pub use selection::{
     BackendStats, HistoryTable, PolicyContext, ScoringPolicy, ScoringWeights, SelectionPolicy,
 };
-pub use health::{FailoverReason, HealthAction, HealthMonitor, HealthState};
-pub use driver::PolicyDriven;

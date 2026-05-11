@@ -50,11 +50,15 @@ mod tests {
     #[async_trait]
     impl VideoProducer for ScriptedProducer {
         async fn next_frame(&mut self) -> Result<EncodedFrame, ProducerError> {
-            Err(ProducerError::Other("scripted: not used in factory test".into()))
+            Err(ProducerError::Other(
+                "scripted: not used in factory test".into(),
+            ))
         }
         fn request_idr(&mut self) {}
         fn set_target_bitrate(&mut self, _bps: u32) {}
-        fn backend_name(&self) -> &'static str { self.name }
+        fn backend_name(&self) -> &'static str {
+            self.name
+        }
     }
 
     /// Factory that returns one ScriptedProducer per call, recording every
@@ -71,7 +75,11 @@ mod tests {
             cfg: &ProducerConfig,
         ) -> Result<Box<dyn VideoProducer>, FactoryError> {
             self.calls.lock().unwrap().push((
-                kind, cfg.width, cfg.height, cfg.fps, cfg.initial_bitrate_bps,
+                kind,
+                cfg.width,
+                cfg.height,
+                cfg.fps,
+                cfg.initial_bitrate_bps,
             ));
             let name = match kind {
                 BackendKind::Nvenc => "nvenc-mock",
@@ -84,10 +92,15 @@ mod tests {
 
     #[test]
     fn mock_factory_records_call() {
-        let f = MockFactory { calls: Mutex::new(vec![]) };
+        let f = MockFactory {
+            calls: Mutex::new(vec![]),
+        };
         let cfg = ProducerConfig {
-            width: 1920, height: 1080, fps: 60,
-            initial_bitrate_bps: 8_000_000, codec: Codec::H265,
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            initial_bitrate_bps: 8_000_000,
+            codec: Codec::H265,
         };
         let prod = f.create(BackendKind::Nvenc, &cfg).unwrap();
         assert_eq!(prod.backend_name(), "nvenc-mock");
