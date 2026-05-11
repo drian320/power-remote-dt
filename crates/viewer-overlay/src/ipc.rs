@@ -23,6 +23,10 @@ pub struct StatsPayload {
     /// None when no samples yet (still connecting / handshaking).
     pub latency_us: Option<LatencyUs>,
     pub fps_observed: f32,
+    /// Badge + label for the encoder backend, e.g. `"🚀 HW nvenc-h265"`.
+    /// `None` on old payloads that pre-date this field.
+    #[serde(default)]
+    pub encoder_backend: Option<String>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -89,6 +93,7 @@ mod tests {
                 samples: 512,
             }),
             fps_observed: 59.8,
+            encoder_backend: Some("🚀 HW nvdec".into()),
         }
     }
 

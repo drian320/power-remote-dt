@@ -793,6 +793,11 @@ fn build_stats_payload(app: &ViewerApp) -> overlay_ipc::StatsPayload {
         p99: p.p99_us,
         samples: p.samples,
     });
+    let encoder_backend = Some(format!(
+        "{} {}",
+        backend_badge(decoder.as_str()),
+        decoder
+    ));
     overlay_ipc::StatsPayload {
         version: 1,
         viewer_pid: std::process::id(),
@@ -802,6 +807,7 @@ fn build_stats_payload(app: &ViewerApp) -> overlay_ipc::StatsPayload {
         decoder,
         latency_us,
         fps_observed: 0.0, // approximated; refined in G3+
+        encoder_backend,
     }
 }
 

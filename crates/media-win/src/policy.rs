@@ -3,26 +3,36 @@
 //! **Probe**: enumerates three backends — NVENC (priority 100), MF HEVC
 //! (priority 80), and OpenH264 SW (priority 10).
 //!
-//! **Factory**: returns `FactoryError::Unavailable` for all three backends
-//! with a clear message explaining why P5A cannot wire them here.
+//! **Factory**: returns `FactoryError::Unavailable` for all three backends.
+//! Each arm emits a distinct log level:
 //!
-//! # Why the factory stubs out
+//! * NVENC / MF HEVC — `warn!` (HW paths, expected on most machines)
+//! * OpenH264 — `info!` (SW fallback, clearer deferral note)
 //!
-//! The Windows producers (`DxgiNvencProducer`, `DxgiSwProducer`) require a
-//! live `D3d11Device` and an `OutputInfo` (DXGI output descriptor) in addition
-//! to the standard width/height/fps/bps fields.  These are runtime artefacts
-//! that live inside `crates/host/src/platform/win.rs`; they are not part of
-//! `ProducerConfig` and cannot be threaded through without significant pipeline
-//! refactoring (out of P5A scope).
+//! # Why all three backends are still stubbed
+//!
+//! **All three** Windows producers require a live `D3d11Device` and an
+//! `OutputInfo` (DXGI output descriptor) — including `DxgiSwProducer`
+//! (OpenH264), which uses DXGI Desktop Duplication for screen capture even
+//! though it encodes in software.  These are runtime artefacts that live
+//! inside `crates/host/src/platform/win.rs`; they are not part of
+//! `ProducerConfig` and cannot be threaded through without significant
+//! pipeline refactoring (P5C scope).
 //!
 //! `PolicyDriven::bootstrap` calls `WindowsFactory::create` and, when it
 //! returns `Unavailable`, falls back through its ranked candidate list.
 //! The host's `build_video_producer` (unchanged legacy path) is what actually
 //! constructs producers in P5A. The policy layer is wired in for **probe +
 //! ranking + CLI flag plumbing only**; factory construction is deferred to
-//! P5C when `ProducerConfig` will be extended with platform handles.
+//! P5C when `ProducerConfig` will be extended with
+//! `Option<D3D11SetupContext>` (device + output).
 //!
-//! See the T7 report for the full deferral rationale.
+//! # P5C TODO
+//!
+//! Extend `ProducerConfig` with `Option<D3D11SetupContext>` and wire
+//! `DxgiSwProducer::with_encoder` (OpenH264) here first, then NVENC/MfHevc.
+//!
+//! See the T7 / T8 status docs for the full deferral rationale.
 
 #![cfg(windows)]
 
@@ -81,16 +91,33 @@ impl ProducerFactory for WindowsFactory {
         kind: BackendKind,
         _cfg: &ProducerConfig,
     ) -> Result<Box<dyn VideoProducer>, FactoryError> {
-        // P5A: Windows producers require D3d11Device + OutputInfo which are
-        // not part of ProducerConfig. Full factory wiring is deferred to P5C.
-        // The host falls back to its legacy build_video_producer path.
-        tracing::warn!(
-            backend = ?kind,
-            "WindowsFactory: producer wiring deferred to P5C; host falls back to legacy construction"
-        );
+        // P5A: ALL three Windows producers (NVENC, MF HEVC, and OpenH264) require
+        // a live D3d11Device + OutputInfo (DXGI Desktop Duplication) which are not
+        // part of ProducerConfig. Even DxgiSwProducer (OpenH264) uses DXGI capture
+        // and therefore cannot be wired without platform handles.
+        //
+        // P5C TODO: extend ProducerConfig with Option<D3D11SetupContext> and wire
+        // DxgiSwProducer::with_encoder (OpenH264) here first, then NVENC/MfHevc.
+        match kind {
+            BackendKind::Nvenc | BackendKind::MfHevc => {
+                tracing::warn!(
+                    backend = ?kind,
+                    "WindowsFactory: HW backend requires D3d11Device + OutputInfo \
+                     not in ProducerConfig; deferred to P5C"
+                );
+            }
+            BackendKind::Openh264 => {
+                tracing::info!(
+                    backend = ?kind,
+                    "WindowsFactory: Openh264 (DxgiSwProducer) also requires \
+                     D3d11Device + OutputInfo for DXGI capture; deferred to P5C \
+                     when ProducerConfig gains Option<D3D11SetupContext>"
+                );
+            }
+        }
         Err(FactoryError::Unavailable(
             kind,
-            "P5A Windows factory wiring deferred to P5C (D3d11Device + OutputInfo \
+            "Windows factory wiring deferred to P5C (D3d11Device + OutputInfo \
              not yet threaded through ProducerConfig); host uses legacy construction path"
                 .into(),
         ))

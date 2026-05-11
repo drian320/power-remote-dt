@@ -23,6 +23,10 @@ pub struct StatsPayload {
     pub decoder: String,
     pub latency_us: Option<LatencyUs>,
     pub fps_observed: f32,
+    /// Badge + label for the encoder backend, e.g. `"🚀 HW nvenc-h265"`.
+    /// `None` on old payloads that pre-date this field.
+    #[serde(default)]
+    pub encoder_backend: Option<String>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -82,6 +86,7 @@ mod tests {
             decoder: "mf".into(),
             latency_us: None,
             fps_observed: 0.0,
+            encoder_backend: Some("💻 SW mf".into()),
         }
     }
 
