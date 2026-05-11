@@ -120,6 +120,18 @@ pub fn virtual_desktop_rect() -> MonitorRect {
     rect
 }
 
+// ---------------------------------------------------------------------------
+// P5A policy shims
+// ---------------------------------------------------------------------------
+
+pub fn probe() -> std::sync::Arc<dyn prdt_media_policy::CapabilityProbe> {
+    std::sync::Arc::new(prdt_media_linux::policy::LinuxSwProbe)
+}
+
+pub fn factory() -> std::sync::Arc<dyn prdt_media_policy::ProducerFactory> {
+    std::sync::Arc::new(prdt_media_linux::policy::LinuxSwFactory)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

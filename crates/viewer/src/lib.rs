@@ -730,6 +730,26 @@ fn clamp_u32(v: u64) -> u32 {
     v.try_into().unwrap_or(u32::MAX)
 }
 
+/// Return a short HW/SW badge string for the given backend name.
+///
+/// Used by the overlay to prefix the encoder label, e.g.
+/// `"🚀 HW nvenc-h265"` or `"💻 SW openh264-sw"`.
+///
+/// Hardware backends are identified by well-known prefixes; anything else
+/// is treated as software. The full overlay UI integration is deferred to
+/// the T8 smoke-verification phase — this helper is wired into
+/// [`overlay_decoder_label`] log-side only in P5A.
+pub fn backend_badge(backend_name: &str) -> &'static str {
+    if backend_name.starts_with("nvenc")
+        || backend_name.starts_with("mf")
+        || backend_name.starts_with("vaapi")
+    {
+        "🚀 HW"
+    } else {
+        "💻 SW"
+    }
+}
+
 /// Format the viewer window title from the latency probe snapshot. Shows
 /// "connecting…" until we have samples, then p50 / p95 in milliseconds
 /// plus the present-samples count so users can see the window is live.

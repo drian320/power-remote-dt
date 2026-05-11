@@ -11,6 +11,7 @@ pub mod error;
 pub mod frame;
 pub mod i420_to_bgra;
 pub mod linux_sw_producer;
+pub mod policy;
 pub mod sw_pipeline;
 pub mod x11_capture;
 

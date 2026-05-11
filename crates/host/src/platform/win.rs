@@ -513,3 +513,15 @@ pub fn clipboard_sequence_number() -> u32 {
 pub fn virtual_desktop_rect() -> MonitorRect {
     _input_win_virtual_desktop_rect()
 }
+
+// ---------------------------------------------------------------------------
+// P5A policy shims
+// ---------------------------------------------------------------------------
+
+pub fn probe() -> std::sync::Arc<dyn prdt_media_policy::CapabilityProbe> {
+    std::sync::Arc::new(prdt_media_win::policy::WindowsProbe)
+}
+
+pub fn factory() -> std::sync::Arc<dyn prdt_media_policy::ProducerFactory> {
+    std::sync::Arc::new(prdt_media_win::policy::WindowsFactory)
+}
