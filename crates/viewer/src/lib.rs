@@ -11,7 +11,9 @@ use prdt_filetransfer::{send_file, TransferReceiver, DEFAULT_MAX_TRANSFER_BYTES}
 use prdt_protocol::VideoConsumer;
 use prdt_protocol::{frame::Codec, ControlMessage, InputEvent, MonitorRect};
 
-#[cfg(windows)]
+// overlay_ipc: pure-Rust serde structs — compile on all platforms so the
+// back-compat tests run on Linux CI. Only the IPC write path (build_stats_payload
+// + the overlay tick) is gated behind #[cfg(windows)].
 #[allow(dead_code)] // wired into ViewerApp in Task 3
 mod overlay_ipc;
 #[cfg(windows)]
@@ -938,6 +940,8 @@ pub enum AuthLoopError {
     Locked(String),
     #[error("host requires a newer viewer (protocol version mismatch)")]
     HostRequiresUpgrade,
+    #[error("handshake timed out waiting for HelloAck")]
+    Timeout,
     #[error("host rejected auth: {0}")]
     Other(String),
     #[error("unexpected message before HelloAck")]
@@ -1018,10 +1022,19 @@ pub trait AuthPromptProvider: Send + Sync {
 ///
 /// Sends Hello (TOFU first, then PIN/Ephemeral on re-prompt), handles every
 /// HelloReject code, and returns `SessionAck` on HelloAck.
+///
+/// `attempt_timeout` bounds how long a single `recv_response` call may wait
+/// for the host to reply. `max_retries` governs how many times a *timed-out*
+/// send is retried before returning `AuthLoopError::Timeout`. Note that
+/// `max_retries` covers only timeout-induced resends; auth re-prompts
+/// (PinRequired / EphemeralRequired / AuthFailed) are not bounded by this
+/// counter — they are bounded by what the `AuthPromptProvider` will supply.
 pub(crate) async fn run_viewer_auth_loop<T, P>(
     transport: &mut T,
     template: &HelloTemplate,
     prompt: &P,
+    attempt_timeout: std::time::Duration,
+    max_retries: u8,
 ) -> Result<prdt_transport::SessionAck, AuthLoopError>
 where
     T: HelloTransport,
@@ -1032,9 +1045,22 @@ where
 
     let mut attempt = HelloAttempt::FirstTry;
     loop {
-        let hello = template.build(&attempt);
-        transport.send_hello(hello).await?;
-        match transport.recv_response().await? {
+        // Timeout+retry loop mirrors the behaviour of the (now-deprecated)
+        // `viewer_handshake`: resend Hello on each per-attempt timeout, up to
+        // `max_retries` total attempts per auth credential.
+        let response = 'retry: {
+            for _ in 0..max_retries {
+                let hello = template.build(&attempt);
+                transport.send_hello(hello).await?;
+                match tokio::time::timeout(attempt_timeout, transport.recv_response()).await {
+                    Ok(r) => break 'retry r?,
+                    Err(_timeout) => continue, // resend Hello
+                }
+            }
+            return Err(AuthLoopError::Timeout);
+        };
+
+        match response {
             ControlMessage::HelloAck {
                 session_id,
                 host_monotonic_base_us,
@@ -1063,6 +1089,18 @@ where
                 });
             }
             ControlMessage::HelloReject { code, reason } => match code {
+                // AuthFailed state-machine:
+                //
+                // - PinRequired always triggers a PIN re-prompt regardless of
+                //   which credential is currently in flight.
+                // - AuthFailed while in FirstTry or WithPin also re-prompts for
+                //   PIN: PIN is the "default" credential type, so an ambiguous
+                //   failure stays on the PIN path.
+                // - EphemeralRequired, or AuthFailed while already in
+                //   WithEphemeral, re-prompt for the ephemeral token. Once the
+                //   viewer has committed to the ephemeral path the host's
+                //   subsequent reject codes continue driving that path (until
+                //   the host issues a PinRequired or a fatal code).
                 HelloRejectCode::PinRequired | HelloRejectCode::AuthFailed
                     if matches!(attempt, HelloAttempt::FirstTry | HelloAttempt::WithPin(_)) =>
                 {
@@ -1256,6 +1294,30 @@ pub fn run_with_args(
         }
         if direct_pubkey.is_none() {
             anyhow::bail!("one of --host-pubkey, --known-hosts, or --signaling-url is required");
+        }
+    }
+
+    // Validate --pin / --ephemeral byte length before connecting.
+    // MAX_AUTH_PAYLOAD_BYTES (64) is the wire limit; exceeding it means the
+    // Hello would be rejected by the host's AuthValidator in a way
+    // indistinguishable from a bad credential, confusing the user.
+    let max_cred = prdt_protocol::MAX_AUTH_PAYLOAD_BYTES;
+    if let Some(ref p) = args.pin {
+        if p.len() > max_cred {
+            anyhow::bail!(
+                "--pin is {} bytes; maximum is {} bytes (MAX_AUTH_PAYLOAD_BYTES)",
+                p.len(),
+                max_cred
+            );
+        }
+    }
+    if let Some(ref e) = args.ephemeral {
+        if e.len() > max_cred {
+            anyhow::bail!(
+                "--ephemeral is {} bytes; maximum is {} bytes (MAX_AUTH_PAYLOAD_BYTES)",
+                e.len(),
+                max_cred
+            );
         }
     }
 
@@ -1582,7 +1644,15 @@ fn spawn_worker_tasks(
         };
         let prompt = CliPromptProvider::new(auth_pin, auth_ephemeral, no_auth_prompt);
         let mut adapter = TransportAdapter(Arc::clone(&transport));
-        let ack = match run_viewer_auth_loop(&mut adapter, &template, &prompt).await {
+        let ack = match run_viewer_auth_loop(
+            &mut adapter,
+            &template,
+            &prompt,
+            prdt_transport::DEFAULT_HELLO_TIMEOUT,
+            prdt_transport::DEFAULT_HELLO_RETRIES,
+        )
+        .await
+        {
             Ok(a) => a,
             Err(AuthLoopError::HostRequiresUpgrade) => {
                 let msg = "host requires a newer viewer (protocol version mismatch)";
@@ -1599,6 +1669,11 @@ fn spawn_worker_tasks(
                 let msg = "host requires auth credential; pass --pin or --ephemeral";
                 tracing::error!(msg);
                 eprintln!("HelloReject: {msg}");
+                std::process::exit(3);
+            }
+            Err(AuthLoopError::Timeout) => {
+                tracing::error!("Hello handshake timed out; host did not reply");
+                eprintln!("handshake timeout: host did not send HelloAck");
                 std::process::exit(3);
             }
             Err(AuthLoopError::Other(reason)) => {
@@ -2493,6 +2568,10 @@ mod tests {
         async fn notify_wrong(&self) {}
     }
 
+    /// Short timeout used in tests so they run fast.
+    const TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
+    const TEST_RETRIES: u8 = 2;
+
     #[tokio::test]
     async fn viewer_retries_on_pin_required() {
         // Host: first Hello (Tofu) → PinRequired; second Hello (Pin) → HelloAck.
@@ -2503,9 +2582,15 @@ mod tests {
         let template = default_template();
         let prompt = OnePinPrompt("hunter2".into());
 
-        let ack = run_viewer_auth_loop(&mut transport, &template, &prompt)
-            .await
-            .expect("should succeed on second attempt");
+        let ack = run_viewer_auth_loop(
+            &mut transport,
+            &template,
+            &prompt,
+            TEST_TIMEOUT,
+            TEST_RETRIES,
+        )
+        .await
+        .expect("should succeed on second attempt");
 
         assert_eq!(ack.session_id, 0xABCD);
         assert_eq!(ack.granted_permissions, PermissionSet::all());
@@ -2541,9 +2626,15 @@ mod tests {
         let template = default_template();
         let prompt = NoPrompt;
 
-        let err = run_viewer_auth_loop(&mut transport, &template, &prompt)
-            .await
-            .expect_err("should fail with PromptDisabled");
+        let err = run_viewer_auth_loop(
+            &mut transport,
+            &template,
+            &prompt,
+            TEST_TIMEOUT,
+            TEST_RETRIES,
+        )
+        .await
+        .expect_err("should fail with PromptDisabled");
 
         assert!(
             matches!(err, AuthLoopError::PromptDisabled),
@@ -2561,13 +2652,82 @@ mod tests {
         let template = default_template();
         let prompt = NoPrompt;
 
-        let err = run_viewer_auth_loop(&mut transport, &template, &prompt)
-            .await
-            .expect_err("should fail with HostRequiresUpgrade");
+        let err = run_viewer_auth_loop(
+            &mut transport,
+            &template,
+            &prompt,
+            TEST_TIMEOUT,
+            TEST_RETRIES,
+        )
+        .await
+        .expect_err("should fail with HostRequiresUpgrade");
 
         assert!(
             matches!(err, AuthLoopError::HostRequiresUpgrade),
             "expected HostRequiresUpgrade, got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn viewer_auth_loop_times_out_when_host_never_replies() {
+        // MockTransport with no responses → recv_response returns PeerClosed immediately.
+        // We need a transport that *hangs* forever to test the timeout path.
+        // Use a tokio channel: the receiver is never sent to, so recv() blocks.
+        struct HangingTransport {
+            sent: Vec<ControlMessage>,
+            rx: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<ControlMessage>>,
+        }
+
+        #[async_trait::async_trait]
+        impl HelloTransport for HangingTransport {
+            async fn send_hello(
+                &mut self,
+                msg: ControlMessage,
+            ) -> Result<(), prdt_transport::TransportError> {
+                self.sent.push(msg);
+                Ok(())
+            }
+
+            async fn recv_response(
+                &mut self,
+            ) -> Result<ControlMessage, prdt_transport::TransportError> {
+                // Block forever — channel is never sent to.
+                self.rx.lock().await.recv().await;
+                Err(prdt_transport::TransportError::PeerClosed)
+            }
+        }
+
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        let mut transport = HangingTransport {
+            sent: vec![],
+            rx: tokio::sync::Mutex::new(rx),
+        };
+        let template = default_template();
+        let prompt = NoPrompt;
+
+        // With 2 retries at 50ms each, the loop should exhaust within ~150ms.
+        let start = std::time::Instant::now();
+        let err = run_viewer_auth_loop(
+            &mut transport,
+            &template,
+            &prompt,
+            TEST_TIMEOUT,
+            TEST_RETRIES,
+        )
+        .await
+        .expect_err("should time out");
+
+        assert!(
+            matches!(err, AuthLoopError::Timeout),
+            "expected Timeout, got {err:?}"
+        );
+        // Must complete within 2× the expected wall time (generous CI headroom).
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < TEST_TIMEOUT * TEST_RETRIES as u32 * 2,
+            "timeout took too long: {elapsed:?}"
+        );
+        // Must have attempted max_retries sends.
+        assert_eq!(transport.sent.len(), TEST_RETRIES as usize);
     }
 }
