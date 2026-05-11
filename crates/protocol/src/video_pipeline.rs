@@ -14,6 +14,11 @@ pub enum ProducerError {
     Capture(String),
     #[error("encode: {0}")]
     Encode(String),
+    /// Backend permanently lost its device (driver crash, GPU hot-unplug,
+    /// adapter removed). Carries a stable `backend` identifier and a free-form
+    /// `reason`. PolicyDriven matches on this to trigger failover.
+    #[error("device lost on {backend}: {reason}")]
+    DeviceLost { backend: String, reason: String },
     #[error("other: {0}")]
     Other(String),
 }
@@ -75,6 +80,18 @@ mod tests {
         assert_eq!(
             ConsumerError::Decode("MF_E_INVALIDMEDIATYPE".into()).to_string(),
             "decode: MF_E_INVALIDMEDIATYPE"
+        );
+    }
+
+    #[test]
+    fn device_lost_display() {
+        let e = ProducerError::DeviceLost {
+            backend: "nvenc-h265".into(),
+            reason: "DXGI_ERROR_DEVICE_REMOVED".into(),
+        };
+        assert_eq!(
+            e.to_string(),
+            "device lost on nvenc-h265: DXGI_ERROR_DEVICE_REMOVED",
         );
     }
 

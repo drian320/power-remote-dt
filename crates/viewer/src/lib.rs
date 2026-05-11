@@ -730,6 +730,63 @@ fn clamp_u32(v: u64) -> u32 {
     v.try_into().unwrap_or(u32::MAX)
 }
 
+/// Return a short HW/SW badge string for the given backend name.
+///
+/// Used by the overlay to prefix the encoder label, e.g.
+/// `"🚀 HW nvenc-h265"` or `"💻 SW openh264"`.
+///
+/// Classify a backend name (encoder or decoder) as HW or SW for the
+/// overlay badge. Covers both the viewer-side decoder strings
+/// (`nvdec`/`mf`/`openh264`) and host encoder strings (`nvenc`/`mf-hevc`/
+/// `openh264`/`vaapi`).
+pub fn backend_badge(backend_name: &str) -> &'static str {
+    match backend_name {
+        // HW decoders
+        "nvdec" => "🚀 HW",
+        // HW encoders
+        "nvenc" | "nvenc-h265" | "mf" | "mf-hevc" | "vaapi" => "🚀 HW",
+        // Everything else (openh264, auto, unknown) — software
+        _ => "💻 SW",
+    }
+}
+
+#[cfg(test)]
+mod backend_badge_tests {
+    use super::backend_badge;
+
+    #[test]
+    fn nvdec_is_classified_as_hw() {
+        // Regression: viewer passes the decoder name (`nvdec`), not the
+        // encoder name (`nvenc`). The badge must classify NVIDIA HW
+        // decode as HW.
+        assert_eq!(backend_badge("nvdec"), "🚀 HW");
+    }
+
+    #[test]
+    fn mf_decoder_is_classified_as_hw() {
+        assert_eq!(backend_badge("mf"), "🚀 HW");
+    }
+
+    #[test]
+    fn openh264_is_classified_as_sw() {
+        assert_eq!(backend_badge("openh264"), "💻 SW");
+    }
+
+    #[test]
+    fn auto_falls_through_to_sw_label() {
+        // Pre-handshake "auto" string has no HW/SW signal yet; defaulting
+        // to SW is safe (will get updated once handshake completes).
+        assert_eq!(backend_badge("auto"), "💻 SW");
+    }
+
+    #[test]
+    fn encoder_side_names_also_classified() {
+        assert_eq!(backend_badge("nvenc"), "🚀 HW");
+        assert_eq!(backend_badge("mf-hevc"), "🚀 HW");
+        assert_eq!(backend_badge("vaapi"), "🚀 HW");
+    }
+}
+
 /// Format the viewer window title from the latency probe snapshot. Shows
 /// "connecting…" until we have samples, then p50 / p95 in milliseconds
 /// plus the present-samples count so users can see the window is live.
@@ -773,6 +830,7 @@ fn build_stats_payload(app: &ViewerApp) -> overlay_ipc::StatsPayload {
         p99: p.p99_us,
         samples: p.samples,
     });
+    let encoder_backend = Some(format!("{} {}", backend_badge(decoder.as_str()), decoder));
     overlay_ipc::StatsPayload {
         version: 1,
         viewer_pid: std::process::id(),
@@ -782,6 +840,7 @@ fn build_stats_payload(app: &ViewerApp) -> overlay_ipc::StatsPayload {
         decoder,
         latency_us,
         fps_observed: 0.0, // approximated; refined in G3+
+        encoder_backend,
     }
 }
 

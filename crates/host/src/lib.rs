@@ -11,9 +11,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::Parser;
 use platform::{
-    build_video_producer, clipboard_sequence_number, dispatch_input, output_display_name,
-    pick_default_output, read_clipboard_text, virtual_desktop_rect, write_clipboard_text,
-    MAX_CLIPBOARD_BYTES,
+    build_video_producer, clipboard_sequence_number, dispatch_input, factory as platform_factory,
+    output_display_name, pick_default_output, probe as platform_probe, read_clipboard_text,
+    virtual_desktop_rect, write_clipboard_text, MAX_CLIPBOARD_BYTES,
 };
 use prdt_audio::{LoopbackCapture, OpusEncoder};
 use prdt_crypto::KeyPair;
@@ -114,8 +114,20 @@ pub struct Args {
     /// boxes nvenc wins; on Intel/AMD it falls back to the MF H.265 MFT;
     /// if neither is available the cross-platform OpenH264 software path
     /// kicks in (advertises H.264 in HelloAck instead of H.265).
+    /// Specifying a non-"auto" value enables Strict mode (no failover).
     #[arg(long, default_value = "auto")]
     encoder: String,
+
+    /// Soft hint: prefer this backend if available, but failover is still
+    /// allowed. Mutually informative with --encoder; ignored when --encoder
+    /// is not "auto". Valid values: nvenc | mf | openh264.
+    #[arg(long)]
+    encoder_hint: Option<String>,
+
+    /// Shorthand for --encoder openh264. Convenient for support cases.
+    /// If combined with --encoder <hw>, --force-sw wins and a warn! is emitted.
+    #[arg(long, default_value_t = false)]
+    force_sw: bool,
 
     /// Run in CLI-only mode without launching the GUI. Required for headless servers / CI.
     #[arg(long)]
@@ -457,18 +469,123 @@ pub async fn run_host(
         };
         info!(?req, "handshake complete");
 
-        // Build producer after handshake so the viewer's negotiated codec
-        // selects between the HW (H.265) and SW (H.264) paths. The factory
-        // internally creates the GPU device (Windows) or pipewire stream
-        // (Linux) and derives width/height from `output`.
-        let mut producer = build_video_producer(
-            &args.encoder,
-            &output,
-            bitrate_bps,
-            60, // TODO(L2): thread fps from Args::fps when --fps flag is added
-            req.codec,
-        )
-        .context("build_video_producer")?;
+        // P5A: Parse --encoder-hint and --force-sw into policy types.
+        let (user_override, _encoder_strict) = match args.encoder.as_str() {
+            "auto" => (None, false),
+            "nvenc" => (Some(prdt_media_policy::BackendKind::Nvenc), true),
+            "mf" => (Some(prdt_media_policy::BackendKind::MfHevc), true),
+            "openh264" => (Some(prdt_media_policy::BackendKind::Openh264), true),
+            other => {
+                warn!(encoder = %other, "unknown --encoder value; treating as auto");
+                (None, false)
+            }
+        };
+        let user_hint = args.encoder_hint.as_deref().and_then(|s| match s {
+            "nvenc" => Some(prdt_media_policy::BackendKind::Nvenc),
+            "mf" | "mf-hevc" => Some(prdt_media_policy::BackendKind::MfHevc),
+            "openh264" => Some(prdt_media_policy::BackendKind::Openh264),
+            other => {
+                warn!(encoder_hint = %other, "unknown --encoder-hint value; ignoring");
+                None
+            }
+        });
+        // --force-sw overrides user_override to Openh264 if set.
+        let (user_override, force_sw) = if args.force_sw {
+            // If user also explicitly requested a non-SW backend, warn so they know
+            // --force-sw wins.
+            if let Some(req) = user_override {
+                if !matches!(req, prdt_media_policy::BackendKind::Openh264) {
+                    tracing::warn!(
+                        requested = ?req,
+                        "--force-sw overrides --encoder; using OpenH264"
+                    );
+                }
+            }
+            (Some(prdt_media_policy::BackendKind::Openh264), true)
+        } else {
+            (user_override, false)
+        };
+
+        // P5A policy: probe available backends and log the ranked order for
+        // observability. Actual producer construction still uses the legacy
+        // build_video_producer path (Windows factory wiring deferred to P5C;
+        // Linux factory is wired but PolicyDriven::bootstrap is attempted first).
+        let policy_codec = to_policy_codec(req.codec);
+        let policy_ctx = prdt_media_policy::PolicyContext {
+            // HARD filter: SelectionPolicy::rank rejects backends whose max_resolution is
+            // below this. (1920, 1080) is a conservative lower bound — every current
+            // probe entry advertises 3840×2160 so this filter is inert. If a backend
+            // is ever added with a tighter max_resolution, thread the live output
+            // dimensions through here.
+            target_resolution: (1920, 1080),
+            target_fps: 60,
+            target_bitrate_bps: bitrate_bps,
+            codec: policy_codec,
+            user_override,
+            user_hint,
+            force_sw,
+        };
+        let probe_arc = platform_probe();
+        let factory_arc = platform_factory();
+        let scoring_policy: std::sync::Arc<dyn prdt_media_policy::SelectionPolicy> =
+            std::sync::Arc::new(prdt_media_policy::ScoringPolicy::load_default_or_fallback());
+        {
+            let caps = probe_arc.list_encoders();
+            let ranked =
+                scoring_policy.rank(&caps, &policy_ctx, &prdt_media_policy::HistoryTable::new());
+            info!(
+                ranked = ?ranked,
+                user_override = ?user_override,
+                user_hint = ?user_hint,
+                force_sw,
+                "P5A policy ranked backends"
+            );
+        }
+
+        // Attempt PolicyDriven::bootstrap (works on Linux where LinuxSwFactory
+        // can actually create a producer; on Windows the factory stubs out and
+        // bootstrap will return Err, falling through to the legacy path below).
+        let policy_cfg = prdt_media_policy::ProducerConfig {
+            // (1920, 1080) is a conservative lower bound matching the PolicyContext
+            // target_resolution above. Thread live output dimensions through here
+            // if a backend with a tighter max_resolution is ever added.
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            initial_bitrate_bps: bitrate_bps,
+            codec: policy_codec,
+        };
+        let policy_producer = prdt_media_policy::PolicyDriven::bootstrap(
+            std::sync::Arc::clone(&probe_arc),
+            std::sync::Arc::clone(&factory_arc),
+            std::sync::Arc::clone(&scoring_policy),
+            policy_cfg,
+            policy_ctx,
+        );
+
+        let mut producer: Box<dyn prdt_protocol::VideoProducer> = match policy_producer {
+            Ok(pd) => {
+                let boxed: Box<dyn prdt_protocol::VideoProducer> = Box::new(pd);
+                info!(
+                    backend = boxed.backend_name(),
+                    codec = req.codec.name(),
+                    "PolicyDriven bootstrap succeeded; using policy-driven producer"
+                );
+                boxed
+            }
+            Err(bootstrap_err) => {
+                // Windows factory stubs out → expected Err; fall back to legacy path.
+                debug!(error = %bootstrap_err, "PolicyDriven bootstrap deferred; using legacy build_video_producer");
+                build_video_producer(
+                    &args.encoder,
+                    &output,
+                    bitrate_bps,
+                    60, // TODO(L2): thread fps from Args::fps when --fps flag is added
+                    req.codec,
+                )
+                .context("build_video_producer")?
+            }
+        };
         info!(
             backend = producer.backend_name(),
             codec = req.codec.name(),
@@ -543,7 +660,16 @@ pub async fn run_host(
                                 }
                             }
                             Err(e) => {
-                                warn!(?e, "producer error; continuing");
+                                match &e {
+                                    prdt_protocol::ProducerError::DeviceLost { backend, reason } => {
+                                        warn!(
+                                            backend = %backend,
+                                            reason = %reason,
+                                            "backend reported device lost; PolicyDriven handles failover internally"
+                                        );
+                                    }
+                                    other => warn!(?other, "producer error; continuing"),
+                                }
                                 tokio::time::sleep(Duration::from_millis(10)).await;
                             }
                         }
@@ -906,6 +1032,25 @@ fn init_tracing() {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
+}
+
+/// Map `prdt_protocol::Codec` → `prdt_media_policy::Codec`.
+///
+/// `prdt_protocol::Codec` includes `Av1` which `prdt_media_policy::Codec`
+/// does not support in P5A. `Av1` falls back to `H264` (SW path) with a
+/// warn-log; a proper codec hot-swap is Phase 5C scope.
+fn to_policy_codec(c: prdt_protocol::Codec) -> prdt_media_policy::Codec {
+    match c {
+        Codec::H264 => prdt_media_policy::Codec::H264,
+        Codec::H265 => prdt_media_policy::Codec::H265,
+        Codec::Av1 => {
+            tracing::warn!(
+                "prdt_protocol::Codec::Av1 not supported by prdt_media_policy in P5A; \
+                 falling back to H264 for policy ranking (codec hot-swap deferred to P5C)"
+            );
+            prdt_media_policy::Codec::H264
+        }
+    }
 }
 
 // Tests below exercise Windows-specific encoder/adapter surfaces

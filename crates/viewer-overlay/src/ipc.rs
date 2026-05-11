@@ -23,6 +23,10 @@ pub struct StatsPayload {
     /// None when no samples yet (still connecting / handshaking).
     pub latency_us: Option<LatencyUs>,
     pub fps_observed: f32,
+    /// Badge + label for the encoder backend, e.g. `"🚀 HW nvenc-h265"`.
+    /// `None` on old payloads that pre-date this field.
+    #[serde(default)]
+    pub encoder_backend: Option<String>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -89,6 +93,7 @@ mod tests {
                 samples: 512,
             }),
             fps_observed: 59.8,
+            encoder_backend: Some("🚀 HW nvdec".into()),
         }
     }
 
@@ -138,5 +143,25 @@ mod tests {
         let parsed = read_stats(dir.path()).unwrap();
         assert!(parsed.latency_us.is_none());
         assert_eq!(parsed.connection_state, "connecting");
+    }
+
+    #[test]
+    fn missing_encoder_backend_field_defaults_to_none() {
+        // Backward compat: old viewer versions don't emit encoder_backend.
+        // #[serde(default)] should leave it as None without failing.
+        let dir = tempfile::tempdir().unwrap();
+        let raw = r#"{
+            "version": 1,
+            "viewer_pid": 1,
+            "updated_at_unix_ms": 0,
+            "connection_state": "connected",
+            "host_label": "h",
+            "decoder": "mf",
+            "latency_us": null,
+            "fps_observed": 0.0
+        }"#;
+        std::fs::write(stats_path(dir.path()), raw).unwrap();
+        let parsed = read_stats(dir.path()).unwrap();
+        assert!(parsed.encoder_backend.is_none());
     }
 }

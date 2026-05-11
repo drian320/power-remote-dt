@@ -34,6 +34,9 @@ pub use win::OutputDescriptor;
 // Internal Windows-only types still used by lib.rs (e.g. tests). Removed in T7.
 #[cfg(windows)]
 pub use win::{DxgiSwProducer, VideoEncoderBackend};
+// P5A policy shims.
+#[cfg(windows)]
+pub use win::{factory, probe};
 
 #[cfg(target_os = "linux")]
 pub mod linux;
@@ -43,6 +46,9 @@ pub use linux::{
     pick_default_output, read_clipboard_text, virtual_desktop_rect, write_clipboard_text,
     MAX_CLIPBOARD_BYTES,
 };
+// P5A policy shims.
+#[cfg(target_os = "linux")]
+pub use linux::{factory, probe};
 
 #[cfg(test)]
 mod tests {

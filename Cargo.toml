@@ -26,6 +26,7 @@ members = [
     "crates/media-sw",
     "crates/client",
     "crates/gui-client",
+    "crates/media-policy",
 ]
 
 [workspace.package]

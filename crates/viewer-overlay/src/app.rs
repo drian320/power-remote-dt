@@ -58,6 +58,7 @@ impl eframe::App for OverlayApp {
             match &self.stats {
                 Some(s) if s.connection_state == "connected" && s.latency_us.is_some() => {
                     let l = s.latency_us.as_ref().unwrap();
+                    let backend_label = s.encoder_backend.as_deref().unwrap_or(s.decoder.as_str());
                     ui.label(t!("overlay-host-label", host => s.host_label.as_str()));
                     ui.add_space(8.0);
                     ui.heading(t!("overlay-stats-latency"));
@@ -66,14 +67,15 @@ impl eframe::App for OverlayApp {
                     ui.label(format!("p99: {:.1} ms", l.p99 as f64 / 1000.0));
                     ui.label(t!("overlay-stats-samples", n => l.samples as i64));
                     ui.add_space(8.0);
-                    ui.label(t!("overlay-stats-decoder", name => s.decoder.as_str()));
+                    ui.label(t!("overlay-stats-decoder", name => backend_label));
                     ui.label(format!("FPS: {:.1}", s.fps_observed));
                 }
                 Some(s) => {
+                    let backend_label = s.encoder_backend.as_deref().unwrap_or(s.decoder.as_str());
                     ui.heading(t!("overlay-stats-connecting"));
                     ui.add_space(4.0);
                     ui.label(t!("overlay-host-label", host => s.host_label.as_str()));
-                    ui.label(t!("overlay-stats-decoder", name => s.decoder.as_str()));
+                    ui.label(t!("overlay-stats-decoder", name => backend_label));
                 }
                 None => {
                     ui.heading(t!("overlay-stats-connecting"));

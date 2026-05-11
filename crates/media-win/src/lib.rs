@@ -16,6 +16,7 @@ pub mod nvdec;
 pub mod nvenc;
 pub mod pipeline;
 pub mod platform;
+pub mod policy;
 pub mod synthetic;
 
 #[cfg(feature = "i420-upload")]
