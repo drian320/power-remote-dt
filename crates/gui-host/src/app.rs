@@ -3,12 +3,14 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use prdt_gui_common::auth_config::HostAuthConfig;
 use prdt_gui_common::t;
 use prdt_gui_common::{generate_qr, Config, TailHandle};
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 
 use crate::keygen;
+use crate::onboarding::{apply_wizard, WizardState};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Stage {
@@ -42,6 +44,12 @@ pub struct HostApp {
     /// yet acknowledged. Populated once at startup; mutated when the user
     /// clicks "Acknowledge all".
     pending_crashes: Vec<prdt_gui_common::CrashReport>,
+    /// P6 T7: first-run onboarding wizard (shown when config.gui.onboarded == false).
+    wizard: WizardState,
+    /// P6 T7: host auth config (PIN hash, mode, default permissions).
+    host_auth: HostAuthConfig,
+    /// Path to host-auth.toml for persistence.
+    host_auth_path: PathBuf,
 }
 
 impl HostApp {
@@ -55,6 +63,15 @@ impl HostApp {
         pending_crashes: Vec<prdt_gui_common::CrashReport>,
     ) -> Self {
         let key_path = config.lock().unwrap().host.key_file.clone();
+
+        // Derive host-auth.toml path from the config directory.
+        let host_auth_path = config_path
+            .parent()
+            .map(|p| p.join("host-auth.toml"))
+            .unwrap_or_else(|| PathBuf::from("host-auth.toml"));
+
+        let host_auth = HostAuthConfig::load_or_default(&host_auth_path).unwrap_or_default();
+
         let mut app = Self {
             config,
             config_path,
@@ -78,6 +95,9 @@ impl HostApp {
             quit_requested: false,
             update_ui: Arc::new(Mutex::new(crate::settings::UpdateUi::default())),
             pending_crashes,
+            wizard: WizardState::new(),
+            host_auth,
+            host_auth_path,
         };
         if app.stage == Stage::Idle {
             app.try_load_key(&key_path);
@@ -231,6 +251,40 @@ impl eframe::App for HostApp {
         // True quit (from tray): close the viewport for real.
         if self.quit_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+
+        // P6 T7: first-run onboarding wizard blocks all other UI.
+        let onboarded = self.config.lock().unwrap().gui.onboarded;
+        if !onboarded {
+            // Read host_id from the host_id_file for display in the wizard.
+            let host_id = {
+                let cfg = self.config.lock().unwrap();
+                std::fs::read_to_string(&cfg.host.host_id_file)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            };
+            let host_id = if host_id.is_empty() {
+                self.pubkey_b64.chars().take(16).collect::<String>()
+            } else {
+                host_id
+            };
+            if let Some(submission) = self.wizard.show(ctx, &host_id) {
+                let mut config = self.config.lock().unwrap();
+                match apply_wizard(submission, &mut config, &mut self.host_auth) {
+                    Ok(()) => {
+                        if let Err(e) = config.save(&self.config_path) {
+                            self.wizard.error = Some(format!("Failed to save config: {e}"));
+                        } else if let Err(e) = self.host_auth.save(&self.host_auth_path) {
+                            self.wizard.error = Some(format!("Failed to save auth config: {e}"));
+                        }
+                    }
+                    Err(e) => {
+                        self.wizard.error = Some(e.to_string());
+                    }
+                }
+            }
+            return; // block normal UI while wizard is active
         }
 
         if self.settings_open {

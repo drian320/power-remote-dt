@@ -11,6 +11,7 @@ license.workspace = true
 
 [dependencies]
 prdt-audio = { path = "../audio" }
+prdt-gui-common = { path = "../gui-common" }
 prdt-media-policy = { path = "../media-policy" }
 prdt-crypto = { path = "../crypto" }
 prdt-filetransfer = { path = "../filetransfer" }

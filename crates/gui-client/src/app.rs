@@ -408,10 +408,14 @@ impl ClientApp {
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     if ui.button("Reject").clicked() {
-                        decision = Some(prdt_host::ConsentDecision::Reject);
+                        decision = Some(prdt_host::ConsentDecision::Rejected);
                     }
                     if ui.button("Accept and remember").clicked() {
-                        decision = Some(prdt_host::ConsentDecision::Accept);
+                        decision = Some(prdt_host::ConsentDecision::Accepted {
+                            permissions: prdt_protocol::PermissionSet::all(),
+                            remember: true,
+                            label: String::new(),
+                        });
                     }
                 });
             });

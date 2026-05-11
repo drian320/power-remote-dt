@@ -10,6 +10,7 @@ build = "build.rs"
 prdt-gui-common = { path = "../gui-common" }
 prdt-protocol = { path = "../protocol" }
 prdt-crypto = { path = "../crypto" }
+bcrypt = "0.15"
 eframe = { workspace = true }
 egui = { workspace = true }
 tokio = { workspace = true }

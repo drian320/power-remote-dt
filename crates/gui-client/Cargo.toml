@@ -19,6 +19,7 @@ prdt-host = { path = "../host" }
 prdt-viewer = { path = "../viewer" }
 prdt-gui-host = { path = "../gui-host" }
 prdt-crypto = { path = "../crypto" }
+prdt-protocol = { path = "../protocol" }
 clap = { workspace = true }
 
 [dev-dependencies]

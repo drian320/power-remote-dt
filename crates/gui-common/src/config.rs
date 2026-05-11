@@ -12,6 +12,10 @@ pub struct GuiConfig {
     /// Locale: "" = auto-detect from OS, "en" / "ja" = forced.
     #[serde(default)]
     pub locale: String,
+    /// Set to `true` after the first-run onboarding wizard completes.
+    /// `false` (the serde default) causes the wizard to appear on next launch.
+    #[serde(default)]
+    pub onboarded: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -227,6 +231,13 @@ known_host_ids = "known-host-ids"
         std::fs::write(&path, legacy).unwrap();
         let cfg = Config::load(&path).unwrap();
         assert_eq!(cfg.gui.locale, "");
+    }
+
+    #[test]
+    fn legacy_config_loads_onboarded_false() {
+        let toml = "[gui]\n";
+        let c: Config = toml::from_str(toml).unwrap();
+        assert!(!c.gui.onboarded);
     }
 
     #[test]

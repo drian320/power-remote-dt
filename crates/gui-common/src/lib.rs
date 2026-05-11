@@ -1,5 +1,6 @@
 //! Shared GUI infrastructure used by `prdt-gui-host` and `prdt-gui-viewer`.
 
+pub mod auth_config;
 pub mod config;
 pub mod crashlog;
 pub mod i18n;
@@ -8,6 +9,7 @@ pub mod paths;
 pub mod qr;
 pub mod style;
 
+pub use auth_config::{AuthMode, HostAuthConfig, HostAuthConfigError};
 pub use config::{Config, ConfigError, GuiConfig, HostConfig, HostEntry, ViewerConfig};
 pub use crashlog::{
     install_panic_hook, list_pending_crashes, mark_acknowledged, register_tail,

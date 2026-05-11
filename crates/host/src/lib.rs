@@ -163,10 +163,17 @@ pub struct ConsentRequest {
     pub responder: tokio::sync::oneshot::Sender<ConsentDecision>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConsentDecision {
-    Accept,
-    Reject,
+    /// Viewer is accepted. `permissions` caps the session, `remember` causes
+    /// the peer to be persisted to known-peers so future connections are
+    /// silent, and `label` is the human-readable name to store.
+    Accepted {
+        permissions: prdt_protocol::control::PermissionSet,
+        remember: bool,
+        label: String,
+    },
+    Rejected,
 }
 
 pub type ConsentSender = tokio::sync::mpsc::UnboundedSender<ConsentRequest>;
@@ -522,26 +529,36 @@ pub async fn run_host(
                     }
                 };
                 match decision {
-                    ConsentDecision::Reject => {
+                    ConsentDecision::Rejected => {
                         info!(peer=%peer_pubkey.to_base64(), "consent rejected; resetting session");
                         continue;
                     }
-                    ConsentDecision::Accept => {
-                        // Persist so future connections from this peer are silent.
-                        let mut updated = known;
-                        updated.insert(peer_pubkey, peer_pubkey.to_base64());
-                        if let Err(e) = updated.save(&args.known_peers_file) {
-                            warn!(
-                                ?e,
-                                path=?args.known_peers_file,
-                                "failed to persist known-peer-ids; session continues but won't be remembered"
-                            );
-                        } else {
-                            info!(
-                                peer=%peer_pubkey.to_base64(),
-                                path=?args.known_peers_file,
-                                "added peer to known-peer-ids"
-                            );
+                    ConsentDecision::Accepted {
+                        remember, label, ..
+                    } => {
+                        // Persist so future connections from this peer are silent
+                        // (when remember == true).
+                        if remember {
+                            let peer_label = if label.is_empty() {
+                                peer_pubkey.to_base64()
+                            } else {
+                                label.clone()
+                            };
+                            let mut updated = known;
+                            updated.insert(peer_pubkey, peer_label);
+                            if let Err(e) = updated.save(&args.known_peers_file) {
+                                warn!(
+                                    ?e,
+                                    path=?args.known_peers_file,
+                                    "failed to persist known-peer-ids; session continues but won't be remembered"
+                                );
+                            } else {
+                                info!(
+                                    peer=%peer_pubkey.to_base64(),
+                                    path=?args.known_peers_file,
+                                    "added peer to known-peer-ids"
+                                );
+                            }
                         }
                     }
                 }

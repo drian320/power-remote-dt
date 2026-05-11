@@ -1,10 +1,13 @@
 //! Phase 4 G1 host GUI.
 
 mod app;
+pub mod auth_settings;
 #[allow(dead_code)] // is_enabled() consumed in Phase 4 G4+ for query UI
 mod autostart;
+pub mod consent_prompt;
 mod keygen;
 mod notif;
+pub mod onboarding;
 mod settings;
 mod tray;
 pub mod update;
