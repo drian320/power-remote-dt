@@ -365,7 +365,7 @@ impl Hevc265Encoder for NvencEncoder {
         let status = unsafe { reconfigure_fn(self.session, &mut reconf as *mut _) };
         if status != ffi::NVENCSTATUS::NV_ENC_SUCCESS {
             tracing::warn!(
-                ?status,
+                status = status as i32,
                 requested_bps = bps,
                 "NVENC nvEncReconfigureEncoder failed"
             );
