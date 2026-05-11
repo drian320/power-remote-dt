@@ -12,7 +12,7 @@
 use prdt_crypto::known_peers::{KnownPeer, KnownPeers};
 use prdt_host::auth::{AuthValidator, AuthVerdict};
 use prdt_host::auth_config::{AuthMode, HostAuthConfig};
-use prdt_host::channel_allowed;
+use prdt_host::{apply_audio_permission_gate, channel_allowed, handle_input_event};
 use prdt_protocol::{AuthMethod, Codec, ControlMessage, HelloRejectCode, PermissionSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -503,154 +503,99 @@ fn permission_deny_file_transfer() {
     assert!(channel_allowed(&perms_allow, &end_msg));
 }
 
-/// When `permissions.input == false`, the host's receive loop must drop
-/// `ReceivedMessage::Input` events without dispatching them.
+/// When `permissions.input == false`, `handle_input_event` must not call the
+/// dispatch closure, silently dropping the `InputEvent`.
 ///
-/// This test replicates the exact control-flow of the input-task receive arm
-/// (lib.rs `Ok(ReceivedMessage::Input(ev)) => { if !input_perms.input { continue; } ... }`)
-/// using real `tokio::sync::mpsc` channels and a dispatch-call counter.
-/// The counter replaces `dispatch_input` — it is only incremented when the
-/// gate would have passed, so a wrong gate lets the counter reach 1 and the
-/// assertion fails.
-#[tokio::test]
-async fn permission_deny_input_drops_inputpacket() {
+/// This test calls `prdt_host::handle_input_event` directly — the same
+/// function the production input task uses — so deleting or inverting the
+/// gate inside `handle_input_event` breaks both this test and production.
+#[test]
+fn permission_deny_input_drops_inputpacket() {
     use prdt_protocol::input::InputEvent;
-    use prdt_transport::ReceivedMessage;
-    use tokio::sync::mpsc;
 
-    // Feed three Input events into a channel just like the host's transport.recv().
-    let (tx, mut rx) = mpsc::unbounded_channel::<ReceivedMessage>();
-    for scancode in [0x1E_u32, 0x1F, 0x20] {
-        tx.send(ReceivedMessage::Input(InputEvent::Key {
-            scancode,
-            pressed: true,
-        }))
-        .unwrap();
-    }
-    // Close the sender so the receive loop can drain and exit.
-    drop(tx);
-
-    let input_perms = PermissionSet {
+    let perms_deny = PermissionSet {
         input: false,
         clipboard: true,
         file_transfer: true,
         audio: true,
     };
 
-    // Replicate the exact match arm from host/src/lib.rs:
-    //   Ok(ReceivedMessage::Input(ev)) => {
-    //       if !input_perms.input { continue; }
-    //       dispatch_input(ev)   // ← counted here instead
-    //   }
     let mut dispatched = 0u32;
-    while let Some(msg) = rx.recv().await {
-        if let ReceivedMessage::Input(_ev) = msg {
-            if !input_perms.input {
-                // Production code: `continue` — event silently dropped.
-                continue;
-            }
-            dispatched += 1; // would call dispatch_input(_ev)
-        }
-    }
-
-    assert_eq!(
-        dispatched, 0,
-        "no InputEvent must reach dispatch_input when input=false; \
-         gate at lib.rs:882-885 must be in effect"
-    );
-
-    // Sanity: with input=true, all three events are dispatched.
-    let (tx2, mut rx2) = mpsc::unbounded_channel::<ReceivedMessage>();
     for scancode in [0x1E_u32, 0x1F, 0x20] {
-        tx2.send(ReceivedMessage::Input(InputEvent::Key {
+        let ev = InputEvent::Key {
             scancode,
             pressed: true,
-        }))
-        .unwrap();
+        };
+        handle_input_event(&perms_deny, ev, |_| dispatched += 1);
     }
-    drop(tx2);
+    assert_eq!(
+        dispatched, 0,
+        "handle_input_event must not call dispatch when input=false"
+    );
 
-    let input_perms_allow = PermissionSet {
+    // Sanity: with input=true all three events reach the closure.
+    let perms_allow = PermissionSet {
         input: true,
-        ..input_perms
+        ..perms_deny
     };
     let mut dispatched2 = 0u32;
-    while let Some(msg) = rx2.recv().await {
-        if let ReceivedMessage::Input(_ev) = msg {
-            if !input_perms_allow.input {
-                continue;
-            }
-            dispatched2 += 1;
-        }
+    for scancode in [0x1E_u32, 0x1F, 0x20] {
+        let ev = InputEvent::Key {
+            scancode,
+            pressed: true,
+        };
+        handle_input_event(&perms_allow, ev, |_| dispatched2 += 1);
     }
     assert_eq!(
         dispatched2, 3,
-        "all 3 InputEvents must reach dispatch_input when input=true"
+        "handle_input_event must call dispatch for all 3 events when input=true"
     );
 }
 
-/// When `permissions.audio == false`, the host drops the PCM channel sender
-/// instead of starting the audio capture thread. This causes the async encode
-/// task's receiver to immediately see `None` (channel closed) and exit.
+/// When `permissions.audio == false`, `apply_audio_permission_gate` must drop
+/// the sender, causing `pcm_async_rx.recv()` to return `None` immediately.
 ///
-/// This test replicates the exact production code path from lib.rs:781-806:
-///   ```
-///   let (pcm_async_tx, mut pcm_async_rx) = unbounded_channel::<Vec<f32>>();
-///   if session_permissions.audio {
-///       // spawn capture thread that sends into pcm_async_tx
-///   } else {
-///       drop(pcm_async_tx); // ← signals encode task to exit
-///   }
-///   // encode task: pcm_async_rx.recv() → None → break
-///   ```
-/// The test verifies that the receiver sees `None` (channel closed) immediately
-/// when the permission gate fires, confirming the audio capture path was skipped.
+/// This test calls `prdt_host::apply_audio_permission_gate` directly — the
+/// same function `run_host` uses — so deleting or inverting the gate inside
+/// that function breaks both this test and the production audio path.
 #[tokio::test]
 async fn permission_deny_audio_channel_closed_when_denied() {
     use tokio::sync::mpsc;
 
-    let session_permissions = PermissionSet {
+    let perms_deny = PermissionSet {
         input: true,
         clipboard: true,
         file_transfer: true,
         audio: false,
     };
 
-    // Exact replica of the production code in lib.rs:
     let (pcm_async_tx, mut pcm_async_rx) = mpsc::unbounded_channel::<Vec<f32>>();
-    if session_permissions.audio {
-        // Production: spawn thread that sends PCM into pcm_async_tx.
-        // Not reached when audio=false.
-        let _ = pcm_async_tx; // keep alive
-    } else {
-        // Production: info!("audio channel denied ..."); drop(pcm_async_tx);
-        drop(pcm_async_tx);
-    }
+    // Gate drops the sender when audio=false.
+    let _tx_opt = apply_audio_permission_gate(&perms_deny, pcm_async_tx);
 
-    // The encode task's first recv() must return None (channel closed),
-    // causing it to exit the loop immediately without encoding any audio.
+    // Encode task's first recv() must return None (channel closed).
     let result = pcm_async_rx.recv().await;
     assert!(
         result.is_none(),
-        "pcm_async_rx must return None immediately when audio=false (sender was dropped); \
-         audio capture gate at lib.rs:803-806 must be in effect"
+        "apply_audio_permission_gate must close the channel when audio=false; \
+         pcm_async_rx.recv() should return None immediately"
     );
 
-    // Sanity: with audio=true the sender is kept alive and the receiver blocks.
-    let session_permissions_allow = PermissionSet {
+    // Sanity: with audio=true the sender is returned and the channel stays open.
+    let perms_allow = PermissionSet {
         audio: true,
-        ..session_permissions
+        ..perms_deny
     };
     let (pcm_async_tx2, mut pcm_async_rx2) = mpsc::unbounded_channel::<Vec<f32>>();
-    if session_permissions_allow.audio {
-        // Sender kept alive — simulates capture thread holding it.
-        pcm_async_tx2.send(vec![0.0f32; 960]).unwrap();
-    } else {
-        drop(pcm_async_tx2);
-    }
+    let tx_kept = apply_audio_permission_gate(&perms_allow, pcm_async_tx2);
+    assert!(
+        tx_kept.is_some(),
+        "gate must return Some(tx) when audio=true"
+    );
+    tx_kept.unwrap().send(vec![0.0f32; 960]).unwrap();
     let frame = pcm_async_rx2.recv().await;
     assert!(
         frame.is_some(),
-        "pcm_async_rx must yield a frame when audio=true"
+        "pcm_async_rx must yield a frame when audio=true and sender is alive"
     );
 }

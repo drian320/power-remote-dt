@@ -33,6 +33,7 @@ bcrypt = "0.15"
 subtle = "2"
 serde.workspace = true
 toml.workspace = true
+async-trait = "0.1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
@@ -46,7 +47,6 @@ prdt-input-win = { path = "../input-win" }
 tokio-util = { version = "0.7", features = ["rt"] }
 prdt-gui-host = { path = "../gui-host" }
 prdt-gui-common = { path = "../gui-common" }
-async-trait = "0.1"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(prdt_nvdec_bindings)', 'cfg(prdt_nvenc_bindings)'] }
@@ -56,4 +56,3 @@ prdt-media-linux = { path = "../media-linux" }
 prdt-input-linux = { path = "../input-linux" }
 prdt-media-sw = { path = "../media-sw" }
 tokio-util = { version = "0.7", features = ["rt"] }
-async-trait = "0.1"

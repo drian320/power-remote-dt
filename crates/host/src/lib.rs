@@ -201,7 +201,17 @@ impl AuthHook for HostAuthHook {
         use prdt_protocol::control::HelloRejectCode;
 
         match self.validator.validate(hello, peer_pubkey_b64).await {
-            AuthVerdict::Granted { permissions, .. } => AuthDecision::Grant(permissions),
+            AuthVerdict::Granted {
+                permissions,
+                remember,
+            } => {
+                if remember {
+                    // TODO(P6 T7): known_peers.upsert(peer_pubkey_b64, permissions, now())
+                    // so the peer is silently accepted on next connection without a
+                    // consent prompt. For now the read-only TOFU fast-path is sufficient.
+                }
+                AuthDecision::Grant(permissions)
+            }
             AuthVerdict::Rejected { code, reason } => AuthDecision::Reject { code, reason },
             AuthVerdict::NeedsConsent { .. } => {
                 // T4: headless stub — auto-reject. T7 will wire the GUI prompt.
@@ -235,6 +245,61 @@ pub fn channel_allowed(perms: &PermissionSet, msg: &ControlMessage) -> bool {
         | ControlMessage::FileChunk { .. }
         | ControlMessage::FileTransferEnd { .. } => perms.file_transfer,
         _ => true,
+    }
+}
+
+/// Gate for physical input dispatch.
+///
+/// Called from the input task's receive arm when `ReceivedMessage::Input`
+/// arrives. Returns `true` if `dispatch` was called, `false` if the event
+/// was silently dropped due to `perms.input == false`.
+///
+/// Extracting this from `run_host` makes the gate unit-testable without
+/// spinning up the full host stack: tests call `handle_input_event` directly
+/// and verify the return value, binding to the same code production uses.
+pub fn handle_input_event(
+    perms: &PermissionSet,
+    ev: prdt_protocol::input::InputEvent,
+    dispatch: impl FnOnce(prdt_protocol::input::InputEvent),
+) -> bool {
+    if !perms.input {
+        tracing::debug!("input channel denied; dropping InputEvent");
+        return false;
+    }
+    dispatch(ev);
+    true
+}
+
+/// Gate for the audio PCM sender.
+///
+/// Production usage in `run_host`:
+/// ```text
+/// let (pcm_async_tx, mut pcm_async_rx) = unbounded_channel();
+/// let tx_opt = apply_audio_permission_gate(&session_permissions, pcm_async_tx);
+/// if let Some(tx) = tx_opt {
+///     // spawn capture thread, hand `tx` to it
+/// }
+/// // encode task reads from pcm_async_rx; gets None immediately if gate denied
+/// ```
+///
+/// When `perms.audio == false`, `tx` is dropped inside this function, which
+/// causes the encode task's `pcm_rx.recv()` to return `None` and exit cleanly.
+/// When `perms.audio == true`, `tx` is returned so the caller can hand it to
+/// the audio capture thread.
+///
+/// Extracting this from `run_host` makes the gate unit-testable without
+/// spinning up the full host stack.
+pub fn apply_audio_permission_gate(
+    perms: &PermissionSet,
+    tx: tokio::sync::mpsc::UnboundedSender<Vec<f32>>,
+) -> Option<tokio::sync::mpsc::UnboundedSender<Vec<f32>>> {
+    if perms.audio {
+        Some(tx)
+    } else {
+        info!("audio channel denied for this session; skipping audio capture");
+        // Dropping `tx` closes the channel; pcm_async_rx.recv() → None.
+        drop(tx);
+        None
     }
 }
 
@@ -381,6 +446,22 @@ pub async fn run_host(
         info!("no --signaling-url; using LAN fixed-address mode");
     }
 
+    // Build the AuthValidator once, outside the reconnect loop, so that
+    // per-peer state (PIN attempt counter, active ephemeral) survives across
+    // reconnections. A brute-forcer who hits AuthLockout cannot reset the
+    // counter by dropping and re-establishing the Noise channel.
+    //
+    // T7 will replace HostAuthConfig::default() with a config loaded from disk
+    // and wire up the GUI consent channel for unknown-peer prompts.
+    let auth_hook = {
+        use prdt_crypto::known_peers::KnownPeers;
+        use tokio::sync::RwLock;
+        let cfg = auth_config::HostAuthConfig::default();
+        let known = Arc::new(RwLock::new(KnownPeers { peers: vec![] }));
+        let validator = Arc::new(auth::AuthValidator::new(cfg, known));
+        HostAuthHook::new(validator)
+    };
+
     loop {
         transport.reset_session().await;
 
@@ -519,22 +600,6 @@ pub async fn run_host(
         };
         #[cfg(target_os = "linux")]
         let host_supported: Vec<Codec> = vec![Codec::H264];
-        // Build the auth hook for this connection. AuthValidator is created
-        // fresh per connection (stateless for TOFU/PIN; ephemeral state is
-        // per-process so a new validator resets the ephemeral — acceptable
-        // for T4; T7 will promote validator to a long-lived Arc on the host).
-        // For now we use HostAuthConfig::default() (TOFU mode, all perms).
-        // T7 will load config from disk and wire up the GUI prompt channel.
-        let auth_validator = {
-            use prdt_crypto::known_peers::KnownPeers;
-            use std::sync::Arc;
-            use tokio::sync::RwLock;
-            let cfg = auth_config::HostAuthConfig::default();
-            let known = Arc::new(RwLock::new(KnownPeers { peers: vec![] }));
-            Arc::new(auth::AuthValidator::new(cfg, known))
-        };
-        let auth_hook = HostAuthHook::new(auth_validator);
-
         let hs_result = match host_handshake(
             &*transport,
             &auth_hook,
@@ -778,10 +843,12 @@ pub async fn run_host(
         // on a dedicated OS thread. The thread hands PCM frames over to the
         // async encode/send task via a tokio mpsc.
         //
-        // P6 T4: audio channel is gated by session_permissions.audio.
-        // If denied we skip the capture thread and spawn a no-op task instead.
+        // P6 T4: audio channel is gated by session_permissions.audio via
+        // `apply_audio_permission_gate`. When denied the gate drops the sender,
+        // causing pcm_async_rx.recv() to return None immediately so the encode
+        // task exits without processing any audio.
         let (pcm_async_tx, mut pcm_async_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
-        if session_permissions.audio {
+        if let Some(capture_tx) = apply_audio_permission_gate(&session_permissions, pcm_async_tx) {
             std::thread::Builder::new()
                 .name("prdt-host-audio-capture".into())
                 .spawn(move || match LoopbackCapture::start() {
@@ -793,7 +860,7 @@ pub async fn run_host(
                         // via `unbounded_send`, which doesn't require a runtime, so we
                         // can block_recv and forward.
                         while let Some(frame) = pcm_rx.blocking_recv() {
-                            if pcm_async_tx.send(frame).is_err() {
+                            if capture_tx.send(frame).is_err() {
                                 break; // async side gone
                             }
                         }
@@ -803,10 +870,6 @@ pub async fn run_host(
                     }
                 })
                 .expect("spawn audio capture thread");
-        } else {
-            info!("audio channel denied for this session; skipping audio capture");
-            // Drop pcm_async_tx so the audio task exits immediately on next recv.
-            drop(pcm_async_tx);
         }
 
         let audio_transport = Arc::clone(&transport);
@@ -881,14 +944,13 @@ pub async fn run_host(
                     msg = rx_input.recv() => {
                         match msg {
                             Ok(ReceivedMessage::Input(ev)) => {
-                                // P6 T4: gate physical input injection.
-                                if !input_perms.input {
-                                    tracing::debug!("input channel denied; dropping InputEvent");
-                                    continue;
-                                }
-                                if let Err(e) = dispatch_input(ev) {
-                                    warn!(error = %e, "inject error");
-                                }
+                                // P6 T4: gate via handle_input_event so the gate
+                                // logic is testable independently of the full host stack.
+                                handle_input_event(&input_perms, ev, |e| {
+                                    if let Err(err) = dispatch_input(e) {
+                                        warn!(error = %err, "inject error");
+                                    }
+                                });
                             }
                             Ok(ReceivedMessage::Control(ControlMessage::KeepAlive)) => {
                                 last_ka_input.store(now_monotonic_us(), Ordering::Relaxed);
