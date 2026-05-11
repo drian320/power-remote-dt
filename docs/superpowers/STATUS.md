@@ -1,7 +1,7 @@
 # power-remote-dt — Project Status & Roadmap
 
-**Last updated:** 2026-05-10
-**Latest tag:** `phase-l2-transport-robustness-complete`
+**Last updated:** 2026-05-11
+**Latest tag:** `phase-l3-adaptive-bitrate-complete`
 **Branch state:** `phase0-sw-codec-wire` (post-tag) — **Phase 4 + Plan 4 B1 + B4 + B6 + B7 + B8 完了 + MF エンコーダ fallback 完了 + host session liveness 完了 + NVDEC arc-swap 化 完了 + ソフトウェアコーデック OpenH264 完了 (B3 のみ HW ブロック保留)**
 **Test count:** 348+ automated Rust tests + 11 Python tests; new crate `prdt-media-sw` 6 tests (Phase 1) + Phase 0 protocol/transport new tests + Phase 5 latency-bench new test (≥10 new tests per plan §8 acceptance)
 
@@ -161,6 +161,16 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
     - Viewer: 新 IDR 復号成功、画面更新開始
     - Latency 改善 (前回 30Mbps smoke vs 今回 5Mbps): `arrival_p50` 412ms → 99ms (4.2×)、`decode_p50` 564ms → 205ms (2.7×)、`present_p50` 586ms → 223ms (2.6×)
   - **L2 smoke 残課題** (L3 territory): 17 秒以降 host→viewer の packet delivery が事実上停止 (host 262 frames send → viewer 15 frames recv = **5.7% delivery**)。host watchdog が 5 秒 silence で session kill。原因: WiFi/LAN の物理層 packet loss + IDR fragment loss が連鎖して回復不能 stretch に入った。**L3 で解決予定**: (a) Reed-Solomon FEC across IDR fragments、(b) observed-loss-driven adaptive bitrate
+  - **L3 (`phase-l3-adaptive-bitrate-complete`, 2026-05-11)**: viewer-side AIMD bitrate controller を追加して L2 smoke の 5.7% delivery → session timeout を解消。Cross-platform、~360 LoC across 6 modify + 1 new + 3 new test files。
+    - **Viewer side** (`crates/transport/src/bitrate_control.rs` 新): `BitrateController` (stateless: `observe(lost, total)` → `aimd_step(now)` → `should_send()` → `mark_sent()`, with `reset_window()`)。AIMD パラメータ: MD ×0.7 on loss>2%, AI +200kbps/s on loss<0.5%, 2s post-MD cooldown, 5% hysteresis、min 1 Mbps, max `--bitrate-mbps × 1e6`
+    - **Viewer wiring** (`crates/viewer/src/lib.rs` `latency_task`): 1Hz tick で recv_task の `purge_assembler()` 結果を `Arc<AtomicU64>` 経由で受け取り (T4 review HIGH fix で recv_task を唯一の purger に統一)、caller が `last_total_samples` 差分で rolling window を構築 → controller 駆動 → `SetBitrate` 送信。Warmup guard: `has_baseline = snap.present.is_some() || last_total_samples > 0` で tick-1 spurious MD 抑制。`--no-adaptive-bitrate` flag で disable (回帰比較用)、`--bitrate-mbps` は clap range 1..=4000 で validate
+    - **Host side** (`crates/host/src/lib.rs`): `tokio::sync::mpsc::unbounded_channel::<u32>()` を control loop と video loop で共有。control loop arm: `Ok(ControlMessage::SetBitrate { target_bps }) => bitrate_tx.send(target_bps)`。video loop は per-frame `bitrate_rx.try_recv()` で drain to latest → `producer.set_target_bitrate(bps)`
+    - **Producer fix** (`crates/media-win/src/pipeline/producer.rs:190`): `DxgiNvencProducer::set_target_bitrate` の Phase 0 no-op stub を `self.encoder.set_target_bitrate(bps)` に書き換え (1-line forward to `HwHevcEncoder` which already dispatches to NVENC/MF)
+    - **Tests**: 13 new tests cross-platform: 8 unit (`bitrate_control::tests::*`) + 2 transport integration (`adaptive_bitrate_test::*`) + 2 host smoke (`setbitrate_handler_smoke::*`) + 1 from T1 hysteresis test = **13 new** (Linux `cargo test --workspace` 307 passed, excluding pre-existing flaky `transport::probe_test::two_transports_find_each_other`)
+    - **Wire**: `ControlMessage::SetBitrate { target_bps: u32 }` (kind_u8=6, 既存 dead path) を再利用、protocol_version bump 不要、backward compatible
+    - **Linux regression bar**: `cargo build/clippy --workspace -- -D warnings` 両 target green
+    - **Windows regression bar**: GitHub Actions release workflow PR #3 で green (run 25643045643)
+  - **L3 smoke walkthrough (2026-05-11)**: WSLg host (`--bitrate-mbps 30 --encoder openh264`) + 実機 Wayland viewer (`--codec h264 --decoder openh264`、GitHub Actions release artifact run 25645084886 から DL) で end-to-end 検証。**spec §1 DoD #2 達成 ✅** — 30 Mbps フル帯域で 1m32s 健全配信、frames_sent=1252 / frames_received=1218 = **97.3% delivery** (L2 smoke の 5.7% から劇的改善、~21 fps、recv_errors=0、timeouts=0)。L3 SetBitrate 未送信 = controller AI ceiling 維持 = 期待動作 (loss < 0.5% 領域)。**DoD #1** (`target_bps ≤ 5 Mbps` within 60s) は環境ロス不在のため直接実証不可、MD ロジックは T5 integration test `loss_burst_drives_md_monotonically` で実証済み (30M → ~5M in 5 ticks @ 5% loss)。session 終端は viewer Ctrl+C → 5.6s 後に host watchdog が正常 kill。**L4 残候補**: 実機 WiFi 物理層 loss を意図的に誘発する smoke 手順 (faulty cable, distance test, tc qdisc netem 等)、Reed-Solomon FEC across IDR fragments
 - **L2 残候補** (transport robustness 完了後): Wayland portal capture / libei / wl-clipboard、VAAPI HW encode/decode、NVENC/NVDEC on Linux、cross-OS scancode normalization、multi-monitor non-zero-origin、cursor capture/合成、複数 distro 検証、`Cmd::Gui` Linux 対応、Linux viewer overlay child process、audio default-on on Linux、`prdt_input_win::RawInputCapturer::map_winit_mouse_button` cleanup、viewer cooperative shutdown (CancellationToken plumbing)、IDR fragment FEC + adaptive bitrate (L3)
 - **元の見積もり**: 大(3-4 週)。**実績 (L0 + L1 + L1.5a + L1.5b + smoke fixes + L2 transport)**: ~85%。残 15% (HW codec + Wayland portal + packaging) は L2 残/L3 へ
 
