@@ -1,16 +1,26 @@
 //! Parser for a known-peer-ids file.
 //!
-//! Format: one entry per line, `<label> <base64-pubkey>`.
-//! Lines starting with `#` are comments. Blank lines ignored.
+//! Two representations are provided:
 //!
-//! `<label>` is a free-form string with no whitespace. By default the host
-//! uses the pubkey itself as the label when remembering a newly-accepted
-//! peer; users can rename labels later by editing the file.
+//! - [`KnownPeersFile`]: legacy text-file format (`<label> <base64-pubkey>` per
+//!   line). Used by the host accept gate (pre-P6 TOFU path).
+//!
+//! - [`KnownPeers`] / [`KnownPeer`]: P6 TOML-based store. Persisted to
+//!   `host-peers.toml`. Each peer carries a [`prdt_protocol::PermissionSet`]
+//!   and timestamps.
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use prdt_protocol::PermissionSet;
+use serde::{Deserialize, Serialize};
 
 use crate::keypair::PubKey;
+
+// ---------------------------------------------------------------------------
+// Legacy text-file KnownPeers (pre-P6)
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, thiserror::Error)]
 pub enum KnownPeersError {
@@ -20,13 +30,16 @@ pub enum KnownPeersError {
     Parse { line: usize, reason: String },
 }
 
+/// Text-file known-peers store: `<label> <base64-pubkey>` per line.
+///
+/// Kept for the pre-P6 TOFU accept gate. P6 code uses [`KnownPeers`] instead.
 #[derive(Debug, Default, Clone)]
-pub struct KnownPeers {
+pub struct KnownPeersFile {
     /// pubkey → label
     entries: HashMap<PubKey, String>,
 }
 
-impl KnownPeers {
+impl KnownPeersFile {
     pub fn new() -> Self {
         Self::default()
     }
@@ -37,9 +50,9 @@ impl KnownPeers {
         Self::parse(&content)
     }
 
-    /// Load from file, but a missing file yields an empty `KnownPeers` rather
-    /// than an error. Used by the host's accept gate so first-run behavior
-    /// (no file yet) is "no peers known" instead of a hard fail.
+    /// Load from file, but a missing file yields an empty `KnownPeersFile`
+    /// rather than an error. Used by the host's accept gate so first-run
+    /// behavior (no file yet) is "no peers known" instead of a hard fail.
     pub fn load_or_default<P: AsRef<Path>>(path: P) -> Result<Self, KnownPeersError> {
         let path = path.as_ref();
         if !path.exists() {
@@ -118,15 +131,68 @@ impl KnownPeers {
     }
 }
 
+// ---------------------------------------------------------------------------
+// P6 TOML-based KnownPeer / KnownPeers
+// ---------------------------------------------------------------------------
+
+/// A single remembered peer entry (P6 schema).
+///
+/// `permissions` and the timestamp fields use `#[serde(default)]` so that
+/// legacy TOML rows that pre-date P6 deserialize safely:
+/// - `permissions` → `PermissionSet::deny_all()` (secure default)
+/// - `first_seen_at` / `last_seen_at` → `UNIX_EPOCH`
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KnownPeer {
+    pub pubkey_b64: String,
+    pub label: String,
+    #[serde(default)]
+    pub permissions: PermissionSet,
+    #[serde(default = "epoch")]
+    pub first_seen_at: SystemTime,
+    #[serde(default = "epoch")]
+    pub last_seen_at: SystemTime,
+}
+
+fn epoch() -> SystemTime {
+    UNIX_EPOCH
+}
+
+/// TOML-based store of remembered peers (P6).
+///
+/// Serializes to `[[peers]]` array-of-tables format, e.g.:
+/// ```toml
+/// [[peers]]
+/// pubkey_b64 = "..."
+/// label = "laptop"
+/// ```
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct KnownPeers {
+    #[serde(default)]
+    pub peers: Vec<KnownPeer>,
+}
+
+// Keep the old name as a type alias so existing `prdt_crypto::KnownPeers`
+// call-sites in host/src/lib.rs continue to compile without modification.
+// The alias points to `KnownPeersFile` which has the text-file API.
+/// Alias for backward-compat with pre-P6 call sites in prdt-host.
+///
+/// New code should use [`KnownPeers`] (TOML-based) or [`KnownPeersFile`]
+/// explicitly.
+pub type KnownPeersLegacy = KnownPeersFile;
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // -----------------------------------------------------------------------
+    // Legacy KnownPeersFile tests (unchanged)
+    // -----------------------------------------------------------------------
+
     #[test]
     fn parse_empty_and_comments() {
-        let kp = KnownPeers::parse("").unwrap();
+        let kp = KnownPeersFile::parse("").unwrap();
         assert!(kp.is_empty());
-        let kp = KnownPeers::parse("# header\n\n# blah\n\t # indented\n").unwrap();
+        let kp = KnownPeersFile::parse("# header\n\n# blah\n\t # indented\n").unwrap();
         assert!(kp.is_empty());
     }
 
@@ -134,14 +200,14 @@ mod tests {
     fn insert_save_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("peers");
-        let mut kp = KnownPeers::new();
+        let mut kp = KnownPeersFile::new();
         let pk1 = PubKey::from_base64("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").unwrap();
         let pk2 = PubKey([1u8; 32]);
         kp.insert(pk1, "alice".into());
         kp.insert(pk2, "bob".into());
         kp.save(&path).unwrap();
 
-        let reloaded = KnownPeers::load(&path).unwrap();
+        let reloaded = KnownPeersFile::load(&path).unwrap();
         assert_eq!(reloaded.len(), 2);
         assert!(reloaded.contains(&pk1));
         assert!(reloaded.contains(&pk2));
@@ -159,7 +225,7 @@ mod tests {
     #[test]
     fn parse_rejects_bad_pubkey() {
         let content = "alice not_base64!!!\n";
-        let err = KnownPeers::parse(content).unwrap_err();
+        let err = KnownPeersFile::parse(content).unwrap_err();
         match err {
             KnownPeersError::Parse { line: 1, .. } => {}
             other => panic!("unexpected: {other:?}"),
@@ -170,13 +236,13 @@ mod tests {
     fn load_or_default_missing_returns_empty() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("does-not-exist");
-        let kp = KnownPeers::load_or_default(&path).unwrap();
+        let kp = KnownPeersFile::load_or_default(&path).unwrap();
         assert!(kp.is_empty());
     }
 
     #[test]
     fn contains_after_insert() {
-        let mut kp = KnownPeers::new();
+        let mut kp = KnownPeersFile::new();
         let pk = PubKey([7u8; 32]);
         assert!(!kp.contains(&pk));
         kp.insert(pk, pk.to_base64());
@@ -187,10 +253,50 @@ mod tests {
     #[test]
     fn parse_missing_pubkey_fails() {
         let content = "alice\n";
-        let err = KnownPeers::parse(content).unwrap_err();
+        let err = KnownPeersFile::parse(content).unwrap_err();
         match err {
             KnownPeersError::Parse { line: 1, .. } => {}
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // P6 KnownPeer / KnownPeers TOML tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn legacy_known_peer_loads_with_default_permissions() {
+        // Pre-P6 format: only pubkey_b64 + label, no permissions/timestamps.
+        let toml_str = r#"
+[[peers]]
+pubkey_b64 = "abc"
+label = "old-laptop"
+"#;
+        let store: KnownPeers = toml::from_str(toml_str).expect("legacy format should parse");
+        assert_eq!(store.peers.len(), 1);
+        let p = &store.peers[0];
+        assert_eq!(p.label, "old-laptop");
+        // Defaulted serde-default fields.
+        assert_eq!(p.permissions, prdt_protocol::PermissionSet::default()); // = deny_all
+    }
+
+    #[test]
+    fn known_peer_round_trip_with_permissions() {
+        use std::time::UNIX_EPOCH;
+        let now = SystemTime::now();
+        let p = KnownPeer {
+            pubkey_b64: "xyz".into(),
+            label: "work".into(),
+            permissions: prdt_protocol::PermissionSet::all(),
+            first_seen_at: UNIX_EPOCH,
+            last_seen_at: now,
+        };
+        let s = toml::to_string(&KnownPeers {
+            peers: vec![p.clone()],
+        })
+        .unwrap();
+        let back: KnownPeers = toml::from_str(&s).unwrap();
+        assert_eq!(back.peers[0].pubkey_b64, p.pubkey_b64);
+        assert_eq!(back.peers[0].permissions, p.permissions);
     }
 }

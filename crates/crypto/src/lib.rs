@@ -16,7 +16,7 @@ pub mod session;
 
 pub use keypair::{KeyPair, PrivKey, PubKey};
 pub use known_hosts::{KnownHosts, KnownHostsError, TofuVerdict};
-pub use known_peers::{KnownPeers, KnownPeersError};
+pub use known_peers::{KnownPeer, KnownPeers, KnownPeersError, KnownPeersFile};
 pub use session::{ClientHandshake, CryptoError, ServerHandshake, Session};
 
 pub const NOISE_PATTERN: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";

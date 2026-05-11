@@ -1,3 +1,4 @@
+pub mod auth_config;
 mod platform;
 mod status;
 mod watchdog;
@@ -335,7 +336,7 @@ pub async fn run_host(
                 "silent-allow enabled; skipping consent gate"
             );
         } else {
-            let known = match prdt_crypto::KnownPeers::load_or_default(&args.known_peers_file) {
+            let known = match prdt_crypto::KnownPeersFile::load_or_default(&args.known_peers_file) {
                 Ok(k) => k,
                 Err(e) => {
                     warn!(?e, path=?args.known_peers_file, "failed to load known-peer-ids; rejecting session");

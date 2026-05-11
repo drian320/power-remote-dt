@@ -28,6 +28,11 @@ anyhow = "1"
 thiserror = { workspace = true }
 dirs = { workspace = true }
 rand_core = { version = "0.6", features = ["getrandom"] }
+rand = "0.8"
+bcrypt = "0.15"
+subtle = "2"
+serde.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
