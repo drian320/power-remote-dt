@@ -6,6 +6,7 @@
 
 use bytecodec::{DecodeExt, EncodeExt};
 use prdt_crypto::KeyPair;
+use prdt_protocol::control::PermissionSet;
 use prdt_protocol::{frame::Codec, MonitorRect};
 use prdt_signaling_client::{
     rendezvous_as_host, rendezvous_as_viewer, HostIdentity, RendezvousConfig,
@@ -13,9 +14,17 @@ use prdt_signaling_client::{
 use prdt_signaling_proto::CandidateType;
 use prdt_signaling_server::{router, ServerConfig, ServerState};
 use prdt_transport::{
-    host_handshake, viewer_handshake, CustomUdpTransport, HelloRequest, UdpTransportConfig,
-    DEFAULT_HANDSHAKE_TIMEOUT,
+    host_handshake, viewer_handshake, AuthDecision, AuthHook, CustomUdpTransport, HelloRequest,
+    UdpTransportConfig, DEFAULT_HANDSHAKE_TIMEOUT,
 };
+
+struct GrantAllHook;
+#[async_trait::async_trait]
+impl AuthHook for GrantAllHook {
+    async fn evaluate(&self, _hello: &prdt_protocol::ControlMessage, _peer: &str) -> AuthDecision {
+        AuthDecision::Grant(PermissionSet::all())
+    }
+}
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -143,6 +152,8 @@ async fn w2_smoke_stun_plus_signaling_plus_noise() {
             .expect("host Noise");
         let _req = host_handshake(
             &*transport,
+            &GrantAllHook,
+            "smoke-peer",
             0xDEAD_BEEF,
             0,
             10_000_000,

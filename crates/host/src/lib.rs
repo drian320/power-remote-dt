@@ -22,9 +22,10 @@ use prdt_crypto::KeyPair;
 use prdt_filetransfer::{send_file, TransferReceiver, DEFAULT_MAX_TRANSFER_BYTES};
 use prdt_protocol::{wire::AudioPacket, Codec, ControlMessage, MonitorRect};
 
+use prdt_protocol::control::PermissionSet;
 use prdt_transport::{
-    host_handshake, now_monotonic_us, CustomUdpTransport, ReceivedMessage, Transport,
-    UdpTransportConfig,
+    host_handshake, now_monotonic_us, AuthDecision, AuthHook, CustomUdpTransport, ReceivedMessage,
+    Transport, UdpTransportConfig,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -169,6 +170,70 @@ pub enum ConsentDecision {
 }
 
 pub type ConsentSender = tokio::sync::mpsc::UnboundedSender<ConsentRequest>;
+
+// ---------------------------------------------------------------------------
+// AuthHook implementation for the host
+// ---------------------------------------------------------------------------
+
+/// Host-side [`AuthHook`] implementation.
+///
+/// Wraps an [`AuthValidator`] and maps every possible [`AuthVerdict`] to an
+/// [`AuthDecision`] that the transport's `host_handshake` can act on:
+///
+/// - `Granted` → `AuthDecision::Grant(permissions)`
+/// - `Rejected` → `AuthDecision::Reject { .. }`
+/// - `NeedsConsent` → auto-reject with `ConsentDenied` in headless mode
+///   (T7 will plug in the real GUI prompt via a consent channel)
+pub struct HostAuthHook {
+    validator: std::sync::Arc<auth::AuthValidator>,
+}
+
+impl HostAuthHook {
+    pub fn new(validator: std::sync::Arc<auth::AuthValidator>) -> Self {
+        Self { validator }
+    }
+}
+
+#[async_trait::async_trait]
+impl AuthHook for HostAuthHook {
+    async fn evaluate(&self, hello: &ControlMessage, peer_pubkey_b64: &str) -> AuthDecision {
+        use auth::AuthVerdict;
+        use prdt_protocol::control::HelloRejectCode;
+
+        match self.validator.validate(hello, peer_pubkey_b64).await {
+            AuthVerdict::Granted { permissions, .. } => AuthDecision::Grant(permissions),
+            AuthVerdict::Rejected { code, reason } => AuthDecision::Reject { code, reason },
+            AuthVerdict::NeedsConsent { .. } => {
+                // T4: headless stub — auto-reject. T7 will wire the GUI prompt.
+                tracing::warn!(
+                    peer = %peer_pubkey_b64,
+                    "unknown peer needs consent but no GUI prompt available (headless); rejecting"
+                );
+                AuthDecision::Reject {
+                    code: HelloRejectCode::ConsentDenied,
+                    reason: "headless host: no consent prompt available".into(),
+                }
+            }
+        }
+    }
+}
+
+/// Returns `true` if `msg` is permitted under `perms`.
+///
+/// Input and audio are gated at task-spawn time (not here) because they arrive
+/// on a separate channel (`ReceivedMessage::Input`) rather than as
+/// `ControlMessage` variants. All other `ControlMessage` variants that are
+/// not listed below are always allowed (Ping, Pong, KeepAlive, RequestIdr,
+/// SetBitrate, LatencyReport, Bye, Noise*, Probe/ProbeAck).
+pub fn channel_allowed(perms: &PermissionSet, msg: &ControlMessage) -> bool {
+    match msg {
+        ControlMessage::ClipboardText { .. } => perms.clipboard,
+        ControlMessage::FileTransferBegin { .. }
+        | ControlMessage::FileChunk { .. }
+        | ControlMessage::FileTransferEnd { .. } => perms.file_transfer,
+        _ => true,
+    }
+}
 
 pub async fn run_host(
     args: Args,
@@ -451,8 +516,26 @@ pub async fn run_host(
         };
         #[cfg(target_os = "linux")]
         let host_supported: Vec<Codec> = vec![Codec::H264];
-        let req = match host_handshake(
+        // Build the auth hook for this connection. AuthValidator is created
+        // fresh per connection (stateless for TOFU/PIN; ephemeral state is
+        // per-process so a new validator resets the ephemeral — acceptable
+        // for T4; T7 will promote validator to a long-lived Arc on the host).
+        // For now we use HostAuthConfig::default() (TOFU mode, all perms).
+        // T7 will load config from disk and wire up the GUI prompt channel.
+        let auth_validator = {
+            use prdt_crypto::known_peers::KnownPeers;
+            use std::sync::Arc;
+            use tokio::sync::RwLock;
+            let cfg = auth_config::HostAuthConfig::default();
+            let known = Arc::new(RwLock::new(KnownPeers { peers: vec![] }));
+            Arc::new(auth::AuthValidator::new(cfg, known))
+        };
+        let auth_hook = HostAuthHook::new(auth_validator);
+
+        let hs_result = match host_handshake(
             &*transport,
+            &auth_hook,
+            &peer_pubkey.to_base64(),
             session_id,
             now_monotonic_us(),
             bitrate_bps,
@@ -469,7 +552,9 @@ pub async fn run_host(
                 continue;
             }
         };
-        info!(?req, "handshake complete");
+        let req = hs_result.req;
+        let session_permissions = hs_result.granted_permissions;
+        info!(?req, ?session_permissions, "handshake complete");
 
         // P5A: Parse --encoder-hint and --force-sw into policy types.
         let (user_override, _encoder_strict) = match args.encoder.as_str() {
@@ -689,28 +774,37 @@ pub async fn run_host(
         // (WASAPI streams are bound to the creating thread via COM), so it lives
         // on a dedicated OS thread. The thread hands PCM frames over to the
         // async encode/send task via a tokio mpsc.
+        //
+        // P6 T4: audio channel is gated by session_permissions.audio.
+        // If denied we skip the capture thread and spawn a no-op task instead.
         let (pcm_async_tx, mut pcm_async_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
-        std::thread::Builder::new()
-            .name("prdt-host-audio-capture".into())
-            .spawn(move || match LoopbackCapture::start() {
-                Ok((cap, mut pcm_rx)) => {
-                    // Keep the capture stream alive for the thread's lifetime.
-                    let _cap = cap;
-                    // Bridge the std-thread-owned blocking receiver to the async
-                    // side. The cpal callback sends into a tokio UnboundedReceiver
-                    // via `unbounded_send`, which doesn't require a runtime, so we
-                    // can block_recv and forward.
-                    while let Some(frame) = pcm_rx.blocking_recv() {
-                        if pcm_async_tx.send(frame).is_err() {
-                            break; // async side gone
+        if session_permissions.audio {
+            std::thread::Builder::new()
+                .name("prdt-host-audio-capture".into())
+                .spawn(move || match LoopbackCapture::start() {
+                    Ok((cap, mut pcm_rx)) => {
+                        // Keep the capture stream alive for the thread's lifetime.
+                        let _cap = cap;
+                        // Bridge the std-thread-owned blocking receiver to the async
+                        // side. The cpal callback sends into a tokio UnboundedReceiver
+                        // via `unbounded_send`, which doesn't require a runtime, so we
+                        // can block_recv and forward.
+                        while let Some(frame) = pcm_rx.blocking_recv() {
+                            if pcm_async_tx.send(frame).is_err() {
+                                break; // async side gone
+                            }
                         }
                     }
-                }
-                Err(e) => {
-                    warn!(?e, "audio capture failed; skipping audio");
-                }
-            })
-            .expect("spawn audio capture thread");
+                    Err(e) => {
+                        warn!(?e, "audio capture failed; skipping audio");
+                    }
+                })
+                .expect("spawn audio capture thread");
+        } else {
+            info!("audio channel denied for this session; skipping audio capture");
+            // Drop pcm_async_tx so the audio task exits immediately on next recv.
+            drop(pcm_async_tx);
+        }
 
         let audio_transport = Arc::clone(&transport);
         let cancel_audio = cancel.clone();
@@ -763,6 +857,11 @@ pub async fn run_host(
             Arc::new(tokio::sync::Mutex::new(None));
 
         // Spawn input injection loop.
+        // P6 T4: `session_permissions` is captured here and used to:
+        //   - Gate physical input dispatch (ReceivedMessage::Input)
+        //   - Gate ControlMessages via channel_allowed()
+        // The task itself always runs (it owns KeepAlive / Bye / RequestIdr
+        // handling which must work regardless of permissions).
         let rx_input = Arc::clone(&transport);
         let input_last_remote = Arc::clone(&last_remote_clipboard);
         let cancel_input = cancel.clone();
@@ -770,6 +869,7 @@ pub async fn run_host(
         let last_ka_input = Arc::clone(&last_keepalive);
         let input_force_idr = Arc::clone(&force_idr_flag);
         let host_max_bps = args.bitrate_mbps.saturating_mul(1_000_000);
+        let input_perms = session_permissions;
         let input = tokio::spawn(async move {
             let mut ft_rx = TransferReceiver::new(FILE_RECV_DIR, DEFAULT_MAX_TRANSFER_BYTES);
             loop {
@@ -778,12 +878,25 @@ pub async fn run_host(
                     msg = rx_input.recv() => {
                         match msg {
                             Ok(ReceivedMessage::Input(ev)) => {
+                                // P6 T4: gate physical input injection.
+                                if !input_perms.input {
+                                    tracing::debug!("input channel denied; dropping InputEvent");
+                                    continue;
+                                }
                                 if let Err(e) = dispatch_input(ev) {
                                     warn!(error = %e, "inject error");
                                 }
                             }
                             Ok(ReceivedMessage::Control(ControlMessage::KeepAlive)) => {
                                 last_ka_input.store(now_monotonic_us(), Ordering::Relaxed);
+                            }
+                            Ok(ReceivedMessage::Control(ref ctrl_msg))
+                                if !channel_allowed(&input_perms, ctrl_msg) =>
+                            {
+                                tracing::debug!(
+                                    kind = ctrl_msg.kind_u8(),
+                                    "channel denied; dropping ControlMessage"
+                                );
                             }
                             Ok(ReceivedMessage::Control(ControlMessage::ClipboardText { text })) => {
                                 // Remember this text so the watcher loop doesn't echo it back.

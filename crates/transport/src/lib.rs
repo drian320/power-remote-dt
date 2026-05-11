@@ -14,8 +14,8 @@ pub use assembler::{FeedResult, FrameAssembler, DEFAULT_ASSEMBLY_TIMEOUT, STALE_
 pub use error::TransportError;
 pub use fec::{FecCodec, DEFAULT_K, DEFAULT_M};
 pub use handshake::{
-    host_handshake, viewer_handshake, HelloRequest, SessionAck, DEFAULT_HELLO_RETRIES,
-    DEFAULT_HELLO_TIMEOUT,
+    host_handshake, viewer_handshake, AuthDecision, AuthHook, HelloRequest, HostHandshakeResult,
+    SessionAck, DEFAULT_HELLO_RETRIES, DEFAULT_HELLO_TIMEOUT,
 };
 pub use loopback::{InProcTransport, LoopbackOptions};
 pub use packetize::{packetize, MAX_SOURCE_CHUNKS};
