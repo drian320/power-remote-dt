@@ -7,8 +7,6 @@ pub enum FactoryError {
 }
 pub struct ProducerConfig {}
 pub trait ProducerFactory: Send + Sync {
-    fn create(&self, _kind: BackendKind, _cfg: &ProducerConfig)
-        -> Result<Box<dyn prdt_protocol::VideoProducer>, FactoryError> {
-        Err(FactoryError::Unimplemented)
-    }
+    fn create(&self, kind: BackendKind, cfg: &ProducerConfig)
+        -> Result<Box<dyn prdt_protocol::VideoProducer>, FactoryError>;
 }
