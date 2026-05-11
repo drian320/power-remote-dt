@@ -205,8 +205,9 @@ impl Hevc265Encoder for MfH265Encoder {
         tracing::warn!(
             target = "mf",
             requested_bps = bps,
-            "set_target_bitrate is currently a no-op for MF (rate-control \
-             reconfig requires MFT reset)"
+            "set_target_bitrate is currently a no-op for MF (L5 candidate \
+             — MFT vendor-specific behaviour, requires AMD/Intel Windows \
+             test host; see STATUS L5)"
         );
     }
 

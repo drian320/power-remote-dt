@@ -64,6 +64,9 @@ impl Openh264Encoder {
             .num_threads(0)
             .max_frame_rate(FrameRate::from_hz(cfg.max_fps))
             .bitrate(BitRate::from_bps(cfg.target_bitrate_bps))
+            // L4.5 candidate: enable skip_frames=true to let RC enforce
+            // strict bitrate (current setting prioritises screen-share
+            // quality over precise bitrate). See STATUS L5(a).
             .skip_frames(false)
             .sps_pps_strategy(SpsPpsStrategy::SpsPpsListing);
 
