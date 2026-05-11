@@ -110,11 +110,15 @@ impl HostAuthConfig {
 
     /// Atomically write to `path` (write-temp-then-rename so a power-loss
     /// mid-write does not corrupt the PIN hash).
+    ///
+    /// The temp file uses a PID suffix so concurrent host processes (e.g.
+    /// two GUI instances fighting over the same config dir) cannot clobber
+    /// each other's in-progress writes.
     pub fn save(&self, path: &Path) -> Result<(), HostAuthConfigError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let tmp = path.with_extension("toml.tmp");
+        let tmp = path.with_extension(format!("toml.tmp.{}", std::process::id()));
         let s = toml::to_string_pretty(self)?;
         std::fs::write(&tmp, s)?;
         std::fs::rename(&tmp, path)?;
@@ -234,6 +238,23 @@ mod tests {
     fn save_creates_parent_dirs() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested/dir/host-auth.toml");
+        HostAuthConfig::default().save(&path).unwrap();
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn save_atomic_uses_pid_suffix() {
+        // The tmp file's extension must contain the current PID so that
+        // concurrent processes use distinct temp file names.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("host-auth.toml");
+        HostAuthConfig::default().save(&path).unwrap();
+        // Final file exists and tmp (with pid suffix) was cleaned up by rename.
+        assert!(path.exists());
+        let pid = std::process::id();
+        let tmp = path.with_extension(format!("toml.tmp.{pid}"));
+        assert!(!tmp.exists(), "tmp file must be gone after atomic rename");
+        // Two sequential saves must both succeed (no leftover tmp collision).
         HostAuthConfig::default().save(&path).unwrap();
         assert!(path.exists());
     }

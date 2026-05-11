@@ -410,6 +410,9 @@ impl ClientApp {
                     if ui.button("Reject").clicked() {
                         decision = Some(prdt_host::ConsentDecision::Rejected);
                     }
+                    // TODO(P6 T7 follow-up): replace this hard-coded accept with
+                    // ConsentPromptState modal so the operator gets per-prompt
+                    // permission toggles + label input (same UX as gui-host).
                     if ui.button("Accept and remember").clicked() {
                         decision = Some(prdt_host::ConsentDecision::Accepted {
                             permissions: prdt_protocol::PermissionSet::all(),

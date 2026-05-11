@@ -210,15 +210,8 @@ impl AuthHook for HostAuthHook {
         match self.validator.validate(hello, peer_pubkey_b64).await {
             AuthVerdict::Granted {
                 permissions,
-                remember,
-            } => {
-                if remember {
-                    // TODO(P6 T7): known_peers.upsert(peer_pubkey_b64, permissions, now())
-                    // so the peer is silently accepted on next connection without a
-                    // consent prompt. For now the read-only TOFU fast-path is sufficient.
-                }
-                AuthDecision::Grant(permissions)
-            }
+                remember: _,
+            } => AuthDecision::Grant(permissions),
             AuthVerdict::Rejected { code, reason } => AuthDecision::Reject { code, reason },
             AuthVerdict::NeedsConsent { .. } => {
                 // T4: headless stub — auto-reject. T7 will wire the GUI prompt.

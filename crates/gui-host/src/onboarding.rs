@@ -26,13 +26,15 @@ pub struct WizardSubmission {
     pub default_permissions: PermissionSet,
 }
 
-/// Errors that can occur when applying the wizard result.
+/// Errors that can occur when applying the wizard result or a PIN change.
 #[derive(Debug, thiserror::Error)]
 pub enum WizardError {
     #[error("PIN is required when AuthMode::Pin is selected")]
     PinRequired,
     #[error("PIN must be at least 6 characters")]
     PinTooShort,
+    #[error("New PIN must differ from the current PIN")]
+    PinUnchanged,
     #[error("Wrong current PIN")]
     WrongCurrentPin,
     #[error("PIN hashing failed: {0}")]

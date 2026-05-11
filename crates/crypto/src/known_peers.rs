@@ -171,6 +171,48 @@ pub struct KnownPeers {
     pub peers: Vec<KnownPeer>,
 }
 
+impl KnownPeers {
+    /// Load from `path`. A missing file returns an empty `KnownPeers`
+    /// (first-run: no peers yet). Malformed TOML returns an error.
+    pub fn load_or_default(path: &Path) -> Result<Self, KnownPeersError> {
+        match std::fs::read_to_string(path) {
+            Ok(s) => {
+                let store: KnownPeers = toml::from_str(&s).map_err(|e| KnownPeersError::Parse {
+                    line: 0,
+                    reason: e.to_string(),
+                })?;
+                Ok(store)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(KnownPeersError::Io(e)),
+        }
+    }
+
+    /// Atomically write to `path` using a PID-suffixed temp file so concurrent
+    /// processes do not clobber each other's in-progress writes.
+    pub fn save(&self, path: &Path) -> Result<(), KnownPeersError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension(format!("toml.tmp.{}", std::process::id()));
+        let s = toml::to_string_pretty(self).map_err(|e| KnownPeersError::Parse {
+            line: 0,
+            reason: e.to_string(),
+        })?;
+        std::fs::write(&tmp, s)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    /// Remove the peer identified by `pubkey_b64`. Returns `true` if a peer
+    /// was found and removed, `false` if no match.
+    pub fn remove_by_pubkey(&mut self, pubkey_b64: &str) -> bool {
+        let before = self.peers.len();
+        self.peers.retain(|p| p.pubkey_b64 != pubkey_b64);
+        self.peers.len() < before
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,5 +331,80 @@ label = "old-laptop"
         let back: KnownPeers = toml::from_str(&s).unwrap();
         assert_eq!(back.peers[0].pubkey_b64, p.pubkey_b64);
         assert_eq!(back.peers[0].permissions, p.permissions);
+    }
+
+    // -----------------------------------------------------------------------
+    // KnownPeers load_or_default / save / remove_by_pubkey tests
+    // -----------------------------------------------------------------------
+
+    fn make_peer(pubkey: &str, label: &str) -> KnownPeer {
+        KnownPeer {
+            pubkey_b64: pubkey.into(),
+            label: label.into(),
+            permissions: prdt_protocol::PermissionSet::all(),
+            first_seen_at: std::time::UNIX_EPOCH,
+            last_seen_at: std::time::UNIX_EPOCH,
+        }
+    }
+
+    #[test]
+    fn known_peers_load_or_default_missing_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("host-peers.toml");
+        let store = KnownPeers::load_or_default(&path).unwrap();
+        assert!(store.peers.is_empty());
+    }
+
+    #[test]
+    fn known_peers_save_and_load_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("host-peers.toml");
+        let mut store = KnownPeers::default();
+        store.peers.push(make_peer("AAAA", "alice"));
+        store.peers.push(make_peer("BBBB", "bob"));
+        store.save(&path).unwrap();
+
+        let loaded = KnownPeers::load_or_default(&path).unwrap();
+        assert_eq!(loaded.peers.len(), 2);
+        assert_eq!(loaded.peers[0].pubkey_b64, "AAAA");
+        assert_eq!(loaded.peers[1].label, "bob");
+    }
+
+    #[test]
+    fn known_peers_remove_by_pubkey_removes_and_reports() {
+        let mut store = KnownPeers::default();
+        store.peers.push(make_peer("AAAA", "alice"));
+        store.peers.push(make_peer("BBBB", "bob"));
+
+        assert!(
+            store.remove_by_pubkey("AAAA"),
+            "should return true when peer found"
+        );
+        assert_eq!(store.peers.len(), 1);
+        assert_eq!(store.peers[0].pubkey_b64, "BBBB");
+
+        assert!(
+            !store.remove_by_pubkey("ZZZZ"),
+            "should return false for missing peer"
+        );
+        assert_eq!(store.peers.len(), 1);
+    }
+
+    #[test]
+    fn known_peers_delete_removes_peer_and_save_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("host-peers.toml");
+        let mut store = KnownPeers::default();
+        store.peers.push(make_peer("AAAA", "alice"));
+        store.peers.push(make_peer("BBBB", "bob"));
+        store.save(&path).unwrap();
+
+        let mut loaded = KnownPeers::load_or_default(&path).unwrap();
+        loaded.remove_by_pubkey("AAAA");
+        loaded.save(&path).unwrap();
+
+        let final_store = KnownPeers::load_or_default(&path).unwrap();
+        assert_eq!(final_store.peers.len(), 1);
+        assert_eq!(final_store.peers[0].pubkey_b64, "BBBB");
     }
 }

@@ -1,8 +1,12 @@
 //! Auth settings panel for the host GUI (P6 T7).
 //!
-//! Mounted inside the Settings window.  Allows changing AuthMode, PIN,
-//! default permissions, and managing saved peers.
+//! Mounted inside the Settings window. Allows changing AuthMode, PIN,
+//! default permissions, and managing saved peers (read + delete + persist).
 
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use prdt_crypto::known_peers::KnownPeers;
 use prdt_gui_common::{auth_config::HostAuthConfig, AuthMode};
 use prdt_protocol::PermissionSet;
 
@@ -19,14 +23,15 @@ pub enum PinEditMode {
 }
 
 // ---------------------------------------------------------------------------
-// Testable submit handler
+// Testable submit handlers
 // ---------------------------------------------------------------------------
 
 /// Change the PIN on an existing `HostAuthConfig`.
 ///
-/// Requires the correct current PIN before accepting the new one. Returns
-/// `WizardError::WrongCurrentPin` if `current_pin` does not match the stored
-/// hash, or `WizardError::PinTooShort` if `new_pin` is < 6 chars.
+/// Requires the correct current PIN before accepting the new one.
+/// - Returns `WizardError::WrongCurrentPin` if `current_pin` is wrong.
+/// - Returns `WizardError::PinUnchanged` if `new_pin == current_pin`.
+/// - Returns `WizardError::PinTooShort` if `new_pin` is < 6 chars.
 pub fn apply_pin_change(
     current_pin: &str,
     new_pin: &str,
@@ -34,6 +39,9 @@ pub fn apply_pin_change(
 ) -> Result<(), WizardError> {
     if !host_auth.verify_pin(current_pin) {
         return Err(WizardError::WrongCurrentPin);
+    }
+    if new_pin == current_pin {
+        return Err(WizardError::PinUnchanged);
     }
     if new_pin.len() < 6 {
         return Err(WizardError::PinTooShort);
@@ -47,6 +55,13 @@ pub fn apply_pin_change(
 // ---------------------------------------------------------------------------
 
 /// State for the auth section of the Settings panel.
+///
+/// Covers:
+/// - AuthMode radio (Tofu / Pin / Ephemeral)
+/// - PIN change modal (requires current PIN before accepting new PIN)
+/// - Ephemeral code display + Rotate / Show-Hide
+/// - Default permissions toggles
+/// - Saved peers list (read + delete + persist)
 pub struct AuthSettingsState {
     /// Working copy of the auth config; caller must flush to disk on save.
     pub host_auth: HostAuthConfig,
@@ -54,18 +69,28 @@ pub struct AuthSettingsState {
     pub pin_error: Option<String>,
     /// Ephemeral code currently shown (only meaningful in Ephemeral mode).
     pub current_ephemeral: Option<String>,
-    /// Whether the ephemeral is currently visible to the user.
     ephemeral_visible: bool,
+    /// P6 T7: in-memory copy of the known-peers store. Mutations are flushed
+    /// to disk immediately when the user clicks Delete.
+    pub known_peers: KnownPeers,
+    /// Path to host-peers.toml for persistence.
+    pub known_peers_path: PathBuf,
+    /// Error from the last known-peers save attempt.
+    pub peers_save_error: Option<String>,
 }
 
 impl AuthSettingsState {
-    pub fn new(host_auth: HostAuthConfig) -> Self {
+    pub fn new(host_auth: HostAuthConfig, known_peers_path: PathBuf) -> Self {
+        let known_peers = KnownPeers::load_or_default(&known_peers_path).unwrap_or_default();
         Self {
             host_auth,
             pin_edit_mode: PinEditMode::Idle,
             pin_error: None,
             current_ephemeral: None,
             ephemeral_visible: false,
+            known_peers,
+            known_peers_path,
+            peers_save_error: None,
         }
     }
 
@@ -100,8 +125,8 @@ impl AuthSettingsState {
         // PIN section
         // ----------------------------------------------------------------
         if self.host_auth.mode == AuthMode::Pin {
-            // Render the PIN UI in a sub-scope so the mutable borrow on
-            // self.pin_edit_mode is released before we potentially reassign it.
+            // Use an action enum to avoid holding a mutable borrow on
+            // self.pin_edit_mode across the egui button calls.
             enum PinAction {
                 OpenEdit,
                 Cancel,
@@ -148,7 +173,6 @@ impl AuthSettingsState {
                     }
                 }
             };
-            // Apply the action now that the borrow on pin_edit_mode is released.
             match action {
                 PinAction::OpenEdit => {
                     self.pin_edit_mode =
@@ -180,8 +204,6 @@ impl AuthSettingsState {
         // Ephemeral section
         // ----------------------------------------------------------------
         if self.host_auth.mode == AuthMode::Ephemeral {
-            // Ensure we have an ephemeral code, then extract a clone to avoid
-            // holding a borrow on self.current_ephemeral inside the closure.
             if self.current_ephemeral.is_none() {
                 self.current_ephemeral = Some(HostAuthConfig::generate_ephemeral());
             }
@@ -227,7 +249,96 @@ impl AuthSettingsState {
             dirty = true;
         }
 
+        ui.add_space(12.0);
+        ui.separator();
+
+        // ----------------------------------------------------------------
+        // Saved peers list
+        // ----------------------------------------------------------------
+        ui.heading("Saved Peers");
+        ui.add_space(4.0);
+
+        if self.known_peers.peers.is_empty() {
+            ui.label("No saved peers yet.");
+        } else {
+            // Collect deletions outside the iteration to avoid mid-iteration mutation.
+            let mut delete_pubkey: Option<String> = None;
+
+            for peer in &self.known_peers.peers {
+                ui.horizontal(|ui| {
+                    // Label + truncated pubkey
+                    let label = if peer.label.is_empty() {
+                        "<unnamed>".to_string()
+                    } else {
+                        peer.label.clone()
+                    };
+                    let short_key = peer.pubkey_b64.chars().take(12).collect::<String>();
+                    ui.label(format!("{label}  ({short_key}…)"));
+
+                    // Permission icons (compact)
+                    let perm_str = format!(
+                        "{}{}{}{}",
+                        if peer.permissions.input { "K" } else { "-" },
+                        if peer.permissions.clipboard { "C" } else { "-" },
+                        if peer.permissions.file_transfer {
+                            "F"
+                        } else {
+                            "-"
+                        },
+                        if peer.permissions.audio { "A" } else { "-" },
+                    );
+                    ui.code(perm_str);
+
+                    // Last-seen relative time
+                    let age = relative_age(peer.last_seen_at);
+                    ui.label(age);
+
+                    if ui.button("Delete").clicked() {
+                        delete_pubkey = Some(peer.pubkey_b64.clone());
+                    }
+                });
+            }
+
+            if let Some(pk) = delete_pubkey {
+                self.known_peers.remove_by_pubkey(&pk);
+                match self.known_peers.save(&self.known_peers_path) {
+                    Ok(()) => self.peers_save_error = None,
+                    Err(e) => self.peers_save_error = Some(format!("Save failed: {e}")),
+                }
+            }
+
+            if let Some(err) = &self.peers_save_error {
+                ui.colored_label(egui::Color32::RED, err);
+            }
+        }
+
         dirty
+    }
+}
+
+/// Format a `SystemTime` as a human-readable relative age string.
+fn relative_age(t: SystemTime) -> String {
+    match SystemTime::now().duration_since(t) {
+        Ok(d) => {
+            let secs = d.as_secs();
+            if secs < 60 {
+                "just now".into()
+            } else if secs < 3600 {
+                format!("{}m ago", secs / 60)
+            } else if secs < 86400 {
+                format!("{}h ago", secs / 3600)
+            } else {
+                format!("{}d ago", secs / 86400)
+            }
+        }
+        // `t` is in the future or equals UNIX_EPOCH (default / unknown).
+        Err(_) => {
+            if t == UNIX_EPOCH {
+                "unknown".into()
+            } else {
+                "just now".into()
+            }
+        }
     }
 }
 
@@ -238,12 +349,23 @@ impl AuthSettingsState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prdt_crypto::known_peers::KnownPeer;
 
     fn host_auth_with_pin(pin: &str) -> HostAuthConfig {
         HostAuthConfig {
             mode: AuthMode::Pin,
             pin_hash: Some(HostAuthConfig::hash_pin(pin).unwrap()),
             ..Default::default()
+        }
+    }
+
+    fn make_peer(pubkey: &str, label: &str) -> KnownPeer {
+        KnownPeer {
+            pubkey_b64: pubkey.into(),
+            label: label.into(),
+            permissions: prdt_protocol::PermissionSet::all(),
+            first_seen_at: UNIX_EPOCH,
+            last_seen_at: UNIX_EPOCH,
         }
     }
 
@@ -257,21 +379,50 @@ mod tests {
             matches!(err, WizardError::WrongCurrentPin),
             "expected WrongCurrentPin, got {err}"
         );
-        // The hash must NOT have changed.
+        // Hash must NOT have changed.
         assert!(
             auth.verify_pin("correctpass"),
             "original PIN must still work after failed change"
         );
 
-        // Correct current PIN + valid new PIN must succeed.
+        // Correct current + valid new PIN must succeed.
         apply_pin_change("correctpass", "newpassword", &mut auth).unwrap();
+        assert!(auth.verify_pin("newpassword"), "new PIN must verify");
+        assert!(!auth.verify_pin("correctpass"), "old PIN must not verify");
+    }
+
+    #[test]
+    fn apply_pin_change_rejects_unchanged() {
+        let mut auth = host_auth_with_pin("samepassword");
+        let err = apply_pin_change("samepassword", "samepassword", &mut auth).unwrap_err();
         assert!(
-            auth.verify_pin("newpassword"),
-            "new PIN must verify after successful change"
+            matches!(err, WizardError::PinUnchanged),
+            "expected PinUnchanged, got {err}"
         );
-        assert!(
-            !auth.verify_pin("correctpass"),
-            "old PIN must not verify after change"
-        );
+        // Hash must be untouched.
+        assert!(auth.verify_pin("samepassword"));
+    }
+
+    #[test]
+    fn known_peers_delete_removes_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let peers_path = dir.path().join("host-peers.toml");
+
+        // Seed the file with two peers.
+        let mut initial = KnownPeers::default();
+        initial.peers.push(make_peer("AAAA", "alice"));
+        initial.peers.push(make_peer("BBBB", "bob"));
+        initial.save(&peers_path).unwrap();
+
+        // Load into AuthSettingsState and delete alice.
+        let mut state = AuthSettingsState::new(HostAuthConfig::default(), peers_path.clone());
+        assert_eq!(state.known_peers.peers.len(), 2);
+        state.known_peers.remove_by_pubkey("AAAA");
+        state.known_peers.save(&state.known_peers_path).unwrap();
+
+        // Reload from disk — only bob should remain.
+        let reloaded = KnownPeers::load_or_default(&peers_path).unwrap();
+        assert_eq!(reloaded.peers.len(), 1);
+        assert_eq!(reloaded.peers[0].pubkey_b64, "BBBB");
     }
 }
