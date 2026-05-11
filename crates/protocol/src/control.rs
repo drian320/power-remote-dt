@@ -1,20 +1,46 @@
 use crate::frame::Codec;
 use serde::{Deserialize, Serialize};
 
+/// Maximum byte length of `Hello.auth_payload`. Tofu sends empty; Pin and
+/// Ephemeral send at most this many bytes. The T3 AuthValidator enforces this
+/// cap server-side; producers must not exceed it.
+pub const MAX_AUTH_PAYLOAD_BYTES: usize = 64;
+
+/// Authentication method the viewer asserts in `Hello`. The host's configured
+/// `AuthMode` is authoritative — a mismatch responds with
+/// `HelloReject { PinRequired | EphemeralRequired }`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum AuthMethod {
+    /// Trust-on-first-use: no credential, host decides on consent.
     Tofu = 0,
+    /// PIN-based: `auth_payload` carries the PIN bytes.
     Pin = 1,
+    /// Ephemeral-token: `auth_payload` carries the one-time token bytes.
     Ephemeral = 2,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// Per-session permissions granted by the host in `HelloAck`.
+///
+/// Security invariant: `Default::default() == deny_all()`. Any new field must
+/// also default to the most-restrictive value so that legacy `KnownPeer`
+/// entries loaded without this field (via `#[serde(default)]`) trigger
+/// re-approval rather than silently gaining permissions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionSet {
     pub input: bool,
     pub clipboard: bool,
     pub file_transfer: bool,
     pub audio: bool,
+}
+
+impl Default for PermissionSet {
+    /// Returns `deny_all()` — intentional security default so that legacy
+    /// KnownPeer entries (loaded without a permissions field) always require
+    /// re-approval rather than silently regaining access.
+    fn default() -> Self {
+        Self::deny_all()
+    }
 }
 
 impl PermissionSet {
@@ -44,6 +70,9 @@ impl PermissionSet {
     }
 }
 
+/// Machine-readable reason a `HelloReject` was sent. Allows the viewer to
+/// present targeted UX (PIN dialog, upgrade prompt, etc.) without parsing
+/// the human-readable `reason` string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum HelloRejectCode {
@@ -104,7 +133,10 @@ pub enum ControlMessage {
         codec: Codec,
         /// P6: authentication method the viewer is using.
         auth_method: AuthMethod,
-        /// P6: opaque authentication payload (e.g. PIN bytes, ephemeral token).
+        /// P6: opaque authentication payload.
+        /// Tofu ⇒ empty; Pin ⇒ PIN bytes; Ephemeral ⇒ token bytes.
+        /// Must not exceed `MAX_AUTH_PAYLOAD_BYTES`. The T3 AuthValidator
+        /// enforces this cap and rejects oversized payloads.
         auth_payload: Vec<u8>,
     },
     /// Host → Viewer.
@@ -308,9 +340,25 @@ mod tests {
 
     #[test]
     fn auth_method_discriminants_stable() {
-        assert_eq!(bincode::serialize(&AuthMethod::Tofu).unwrap()[0], 0);
-        assert_eq!(bincode::serialize(&AuthMethod::Pin).unwrap()[0], 1);
-        assert_eq!(bincode::serialize(&AuthMethod::Ephemeral).unwrap()[0], 2);
+        // bincode 1.3 fixint encodes variant_index as u32 LE (4 bytes).
+        // repr(u8) affects in-memory ABI only, not wire bytes.
+        // If bincode is ever upgraded to v2 (which honours repr(u8)),
+        // these assertions will fire loudly, warning of a wire-format change.
+        let tofu = bincode::serialize(&AuthMethod::Tofu).unwrap();
+        assert_eq!(
+            tofu.len(),
+            4,
+            "bincode 1.3 fixint encodes variant_index as u32"
+        );
+        assert_eq!(tofu, [0, 0, 0, 0]);
+
+        let pin = bincode::serialize(&AuthMethod::Pin).unwrap();
+        assert_eq!(pin.len(), 4);
+        assert_eq!(pin, [1, 0, 0, 0]);
+
+        let eph = bincode::serialize(&AuthMethod::Ephemeral).unwrap();
+        assert_eq!(eph.len(), 4);
+        assert_eq!(eph, [2, 0, 0, 0]);
     }
 
     #[test]
@@ -337,21 +385,33 @@ mod tests {
 
     #[test]
     fn hello_reject_code_round_trip_and_discriminants() {
-        let codes = [
-            (HelloRejectCode::Unspecified, 0u8),
-            (HelloRejectCode::ProtocolVersionMismatch, 1),
-            (HelloRejectCode::UnsupportedCodec, 2),
-            (HelloRejectCode::PinRequired, 3),
-            (HelloRejectCode::EphemeralRequired, 4),
-            (HelloRejectCode::AuthFailed, 5),
-            (HelloRejectCode::AuthLockout, 6),
-            (HelloRejectCode::ConsentDenied, 7),
+        // bincode 1.3 fixint: variant_index is u32 LE (4 bytes), not u8.
+        // Asserts both the index value and the exact 4-byte encoding so that
+        // a bincode v2 upgrade (which would honour repr(u8) → 1 byte) fires.
+        let codes: &[(HelloRejectCode, [u8; 4])] = &[
+            (HelloRejectCode::Unspecified, [0, 0, 0, 0]),
+            (HelloRejectCode::ProtocolVersionMismatch, [1, 0, 0, 0]),
+            (HelloRejectCode::UnsupportedCodec, [2, 0, 0, 0]),
+            (HelloRejectCode::PinRequired, [3, 0, 0, 0]),
+            (HelloRejectCode::EphemeralRequired, [4, 0, 0, 0]),
+            (HelloRejectCode::AuthFailed, [5, 0, 0, 0]),
+            (HelloRejectCode::AuthLockout, [6, 0, 0, 0]),
+            (HelloRejectCode::ConsentDenied, [7, 0, 0, 0]),
         ];
-        for (c, disc) in codes {
-            let bytes = bincode::serialize(&c).unwrap();
-            assert_eq!(bytes[0], disc, "{c:?} discriminant changed");
+        for (c, expected_bytes) in codes {
+            let bytes = bincode::serialize(c).unwrap();
+            assert_eq!(
+                bytes.len(),
+                4,
+                "{c:?}: bincode 1.3 fixint encodes variant_index as u32"
+            );
+            assert_eq!(
+                bytes.as_slice(),
+                expected_bytes,
+                "{c:?} wire encoding changed"
+            );
             let back: HelloRejectCode = bincode::deserialize(&bytes).unwrap();
-            assert_eq!(c, back);
+            assert_eq!(*c, back);
         }
     }
 
@@ -400,6 +460,50 @@ mod tests {
         let bytes = bincode::serialize(&r).unwrap();
         let back: ControlMessage = bincode::deserialize(&bytes).unwrap();
         assert_eq!(r, back);
+    }
+
+    #[test]
+    fn permission_set_default_is_deny_all() {
+        // Security invariant: Default must equal deny_all so that legacy
+        // KnownPeer entries loaded without a permissions field (via
+        // #[serde(default)]) require re-approval rather than gaining access.
+        assert_eq!(PermissionSet::default(), PermissionSet::deny_all());
+    }
+
+    #[test]
+    fn auth_payload_at_max_size_round_trips() {
+        let h = ControlMessage::Hello {
+            protocol_version: 3,
+            req_width: 1920,
+            req_height: 1080,
+            req_fps: 60,
+            codec: Codec::H265,
+            auth_method: AuthMethod::Pin,
+            auth_payload: vec![0xABu8; MAX_AUTH_PAYLOAD_BYTES],
+        };
+        let bytes = bincode::serialize(&h).unwrap();
+        let back: ControlMessage = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(h, back);
+    }
+
+    #[test]
+    fn hello_ack_round_trip_with_deny_all_permissions() {
+        let h = ControlMessage::HelloAck {
+            session_id: 0xBEEFCAFE,
+            host_monotonic_base_us: 0,
+            neg_width: 1920,
+            neg_height: 1080,
+            neg_fps: 30,
+            neg_bitrate_bps: 5_000_000,
+            host_monitor_rect: MonitorRect::new(0, 0, 1920, 1080),
+            host_virtual_desktop_rect: MonitorRect::new(0, 0, 1920, 1080),
+            negotiated_codec: Codec::H264,
+            host_supported_codecs: vec![Codec::H264],
+            granted_permissions: PermissionSet::deny_all(),
+        };
+        let bytes = bincode::serialize(&h).unwrap();
+        let back: ControlMessage = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(h, back);
     }
 
     #[test]

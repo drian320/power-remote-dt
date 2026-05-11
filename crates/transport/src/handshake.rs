@@ -79,7 +79,7 @@ pub async fn viewer_handshake<T: Transport>(
                         host_virtual_desktop_rect,
                         negotiated_codec,
                         host_supported_codecs,
-                        granted_permissions: _,
+                        granted_permissions: _, // TODO(P6 T5): surface to viewer stats/overlay
                     }) => {
                         return Ok::<SessionAck, TransportError>(SessionAck {
                             session_id,
@@ -94,7 +94,10 @@ pub async fn viewer_handshake<T: Transport>(
                             host_supported_codecs,
                         });
                     }
-                    ReceivedMessage::Control(ControlMessage::HelloReject { reason, code: _ }) => {
+                    ReceivedMessage::Control(ControlMessage::HelloReject {
+                        reason,
+                        code: _, // TODO(P6 T5): surface code to viewer retry/dialog logic
+                    }) => {
                         return Err(TransportError::HelloRejected(reason));
                     }
                     // ignore other messages during handshake
@@ -137,8 +140,8 @@ pub async fn host_handshake<T: Transport>(
                     req_height,
                     req_fps,
                     codec,
-                    auth_method: _,
-                    auth_payload: _,
+                    auth_method: _,  // TODO(P6 T3): pass to AuthValidator
+                    auth_payload: _, // TODO(P6 T3): pass to AuthValidator
                 }) => {
                     if protocol_version != HELLO_PROTOCOL_VERSION {
                         // Tell the viewer why and surface UnsupportedVersion.
@@ -177,6 +180,7 @@ pub async fn host_handshake<T: Transport>(
                         host_virtual_desktop_rect,
                         negotiated_codec: codec,
                         host_supported_codecs: supported.clone(),
+                        // TODO(P6 T4): replace with negotiated PermissionSet from consent flow
                         granted_permissions: PermissionSet::all(),
                     };
                     transport.send_control(ack).await?;
