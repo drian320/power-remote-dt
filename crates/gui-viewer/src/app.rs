@@ -2,26 +2,46 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use prdt_gui_common::{t, Config};
+use prdt_gui_common::{t, Config, HostEntry};
 use tracing::warn;
 
 use crate::LaunchOutcome;
+
+/// Stable identity for a saved host that survives sort reordering.
+/// Uses (label, addr, host_id) — unique enough given the UI prevents duplicates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HostKey {
+    pub label: String,
+    pub addr: String,
+    pub host_id: String,
+}
+
+impl HostKey {
+    pub(crate) fn from_entry(e: &HostEntry) -> Self {
+        Self {
+            label: e.label.clone(),
+            addr: e.addr.clone(),
+            host_id: e.host_id.clone(),
+        }
+    }
+}
 
 pub struct LauncherApp {
     pub(crate) config: Arc<Mutex<Config>>,
     pub(crate) config_path: PathBuf,
     pub(crate) outcome: Arc<Mutex<Option<LaunchOutcome>>>,
-    pub(crate) selected: Option<usize>,
+    /// Identity of the selected host — stable across sort reorderings.
+    pub(crate) selected: Option<HostKey>,
     pub(crate) add_form_open: bool,
     pub(crate) settings_open: bool,
     pub(crate) error: Option<String>,
     pub(crate) draft_host: crate::connect_form::DraftHost,
     /// Shared map written by the OnlineProbe background task (host addr/id → online).
     pub(crate) online_sink: Arc<Mutex<HashMap<String, bool>>>,
-    /// Keep the tokio runtime alive for the duration of the launcher window.
-    _runtime: tokio::runtime::Runtime,
-    /// Keep the probe stop handle alive; dropping it cancels the background task.
+    /// Keep the probe stop handle alive; dropped first to signal graceful stop.
     _probe_handle: Option<crate::online_probe::StopHandle>,
+    /// Keep the tokio runtime alive; dropped after the probe handle.
+    _runtime: Option<tokio::runtime::Runtime>,
 }
 
 impl LauncherApp {
@@ -32,13 +52,19 @@ impl LauncherApp {
     ) -> Self {
         let online_sink: Arc<Mutex<HashMap<String, bool>>> = Arc::new(Mutex::new(HashMap::new()));
 
-        // Build a tokio runtime for the OnlineProbe background task.
-        let runtime =
-            tokio::runtime::Runtime::new().expect("failed to create tokio runtime for OnlineProbe");
+        // Single-thread runtime: one 30s WS probe doesn't need a thread pool.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| {
+                warn!(error = %e, "tokio runtime init failed; online probe disabled");
+                e
+            })
+            .ok();
 
         // Spawn the probe only when a signaling URL is configured.
-        let probe_handle = {
-            let cfg = config.lock().unwrap();
+        let probe_handle = if let Some(rt) = runtime.as_ref() {
+            let cfg = config.lock().unwrap_or_else(|p| p.into_inner());
             let signaling_url_str = cfg.viewer.signaling_url.clone();
             let host_ids: Vec<String> = cfg
                 .viewer
@@ -53,7 +79,7 @@ impl LauncherApp {
                 if let Ok(url) = url::Url::parse(&signaling_url_str) {
                     let ids = Arc::new(Mutex::new(host_ids));
                     let sink = online_sink.clone();
-                    let _guard = runtime.enter();
+                    let _guard = rt.enter();
                     Some(crate::online_probe::spawn(url, ids, sink))
                 } else {
                     None
@@ -61,6 +87,8 @@ impl LauncherApp {
             } else {
                 None
             }
+        } else {
+            None
         };
 
         Self {
@@ -73,8 +101,8 @@ impl LauncherApp {
             error: None,
             draft_host: crate::connect_form::DraftHost::default(),
             online_sink,
-            _runtime: runtime,
             _probe_handle: probe_handle,
+            _runtime: runtime,
         }
     }
 }
@@ -137,7 +165,20 @@ impl eframe::App for LauncherApp {
 
 impl LauncherApp {
     pub(crate) fn try_connect(&mut self) {
-        let Some(idx) = self.selected else { return };
+        let Some(ref key) = self.selected.clone() else {
+            return;
+        };
+        // Resolve the stable HostKey back to a live-config index so sort
+        // reordering in hosts_list::render never causes mismatched connections.
+        let idx = {
+            let cfg = self.config.lock().unwrap_or_else(|p| p.into_inner());
+            cfg.viewer
+                .hosts
+                .iter()
+                .position(|h| HostKey::from_entry(h) == *key)
+        };
+        let Some(idx) = idx else { return };
+
         // Stamp last_connected at button-press time. The launcher closes
         // immediately after this call (window Close command), so there is no
         // async success callback available in this architecture. The actual
@@ -145,7 +186,7 @@ impl LauncherApp {
         // TODO(P6 T8 follow-up): move stamp to actual connect-success site
         // once the viewer crate exposes a result channel.
         {
-            let mut cfg = self.config.lock().unwrap();
+            let mut cfg = self.config.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(entry) = cfg.viewer.hosts.get_mut(idx) {
                 entry.last_connected = std::time::SystemTime::now();
             }
@@ -154,7 +195,7 @@ impl LauncherApp {
                     "failed to save config after last_connected update");
             }
         }
-        let cfg = self.config.lock().unwrap();
+        let cfg = self.config.lock().unwrap_or_else(|p| p.into_inner());
         let Some(entry) = cfg.viewer.hosts.get(idx) else {
             return;
         };

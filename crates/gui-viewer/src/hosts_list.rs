@@ -3,7 +3,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use prdt_gui_common::t;
 
-use crate::app::LauncherApp;
+use crate::app::{HostKey, LauncherApp};
 
 /// Format a `SystemTime` as a human-readable relative string.
 /// Returns `"never"` for `UNIX_EPOCH`, `"just now"` for < 60 s ago,
@@ -31,8 +31,12 @@ pub fn format_relative(t: SystemTime) -> String {
 
 pub fn render(ui: &mut egui::Ui, app: &mut LauncherApp) {
     // Snapshot config and online state under the lock; release before UI work.
-    let mut cfg = app.config.lock().unwrap().clone();
-    let online = app.online_sink.lock().unwrap().clone();
+    let mut cfg = app.config.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    let online = app
+        .online_sink
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
 
     // Sort: online-first, then last_connected DESC (most recent first).
     cfg.viewer.hosts.sort_by_key(|e| {
@@ -47,9 +51,10 @@ pub fn render(ui: &mut egui::Ui, app: &mut LauncherApp) {
     if cfg.viewer.hosts.is_empty() {
         ui.label(t!("viewer-no-connections"));
     } else {
-        for (orig_i, h) in cfg.viewer.hosts.iter().enumerate() {
-            // Find the original index in the unsorted config for selection tracking.
-            let selected = app.selected == Some(orig_i);
+        for h in cfg.viewer.hosts.iter() {
+            // Use stable HostKey so selection survives sort reordering.
+            let key = HostKey::from_entry(h);
+            let selected = app.selected.as_ref() == Some(&key);
             let is_online = online
                 .get(&h.addr)
                 .or_else(|| online.get(&h.host_id))
@@ -68,7 +73,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut LauncherApp) {
                 detail
             );
             if ui.selectable_label(selected, row_text).clicked() {
-                app.selected = Some(orig_i);
+                app.selected = Some(key);
             }
         }
     }
@@ -110,6 +115,69 @@ mod tests {
             format_relative(now - Duration::from_secs(86400 * 31)),
             "long ago"
         );
+    }
+
+    /// Regression: clicking a row after sort must select the correct host identity.
+    /// Before the HostKey fix, app.selected held the sorted-view index, which
+    /// diverged from the live-config index after reordering — causing "Home" clicks
+    /// to connect to "Work".
+    #[test]
+    fn selection_key_survives_sort_reordering() {
+        use crate::app::HostKey;
+
+        let now = SystemTime::now();
+        let older = now - Duration::from_secs(3600);
+
+        // Config order: [recent-offline, old-online]. Sort puts old-online first.
+        let hosts: Vec<HostEntry> = [
+            HostEntry {
+                label: "Home".into(),
+                mode: "direct".into(),
+                addr: "1.1.1.1:9000".into(),
+                host_id: String::new(),
+                pubkey: String::new(),
+                last_connected: now,
+                last_known_online: Some(false),
+            },
+            HostEntry {
+                label: "Work".into(),
+                mode: "direct".into(),
+                addr: "2.2.2.2:9000".into(),
+                host_id: String::new(),
+                pubkey: String::new(),
+                last_connected: older,
+                last_known_online: Some(true),
+            },
+        ]
+        .into();
+
+        let online: HashMap<String, bool> = HashMap::new();
+        let mut sorted = hosts.clone();
+        sorted.sort_by_key(|e| {
+            let is_online = online
+                .get(&e.addr)
+                .or_else(|| online.get(&e.host_id))
+                .copied()
+                .unwrap_or(e.last_known_online.unwrap_or(false));
+            (Reverse(is_online), Reverse(e.last_connected))
+        });
+
+        // After sort: row[0] = Work (online), row[1] = Home (recent but offline).
+        assert_eq!(sorted[0].label, "Work");
+        assert_eq!(sorted[1].label, "Home");
+
+        // Simulate user clicking row[1] (Home): key built from sorted view.
+        let clicked_key = HostKey::from_entry(&sorted[1]);
+        assert_eq!(clicked_key.label, "Home");
+        assert_eq!(clicked_key.addr, "1.1.1.1:9000");
+
+        // Resolve key back to live-config index — must be 0 (Home's original position).
+        let live_idx = hosts
+            .iter()
+            .position(|h| HostKey::from_entry(h) == clicked_key)
+            .expect("key must resolve to live-config entry");
+        assert_eq!(live_idx, 0, "Home is at index 0 in live config");
+        assert_eq!(hosts[live_idx].label, "Home");
     }
 
     #[test]
