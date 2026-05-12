@@ -1,7 +1,7 @@
 # power-remote-dt — Project Status & Roadmap
 
 **Last updated:** 2026-05-12
-**Latest tag:** `phase-p5b1-t5-t6-pipewire-runtime-complete`
+**Latest tag:** `phase-p5b2a-libspa-pod-dmabuf-complete`
 **Branch state:** `phase0-sw-codec-wire` (post-tag) — **Phase 4 + Plan 4 B1 + B4 + B6 + B7 + B8 完了 + MF エンコーダ fallback 完了 + host session liveness 完了 + NVDEC arc-swap 化 完了 + ソフトウェアコーデック OpenH264 完了 (B3 のみ HW ブロック保留)**
 **Test count:** 348+ automated Rust tests + 11 Python tests; new crate `prdt-media-sw` 6 tests (Phase 1) + Phase 0 protocol/transport new tests + Phase 5 latency-bench new test (≥10 new tests per plan §8 acceptance)
 
@@ -305,6 +305,64 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
     will surface "negotiated format not BGRA/BGRx; aborting". DMABUF
     zero-copy, KDE/Sway/Hyprland matrix, and Wayland-native input remain
     P5B-2.
+
+- **P5B-2a (`phase-p5b2a-libspa-pod-dmabuf-complete`, 2026-05-12)**:
+  libspa POD negotiation + DMABUF zero-copy capture path.
+  - Replaces the two P5B-1-successor T5 stubs (`parse_video_format` /
+    `build_format_params`) with real libspa POD build + parse via new
+    `crates/media-linux/src/wayland_portal/format.rs` (`BuiltParams { bytes }`
+    + `as_pods(&self) -> Vec<&Pod>` + `pub fn build()` + `pub fn parse()` +
+    typed `ParseError`). `build()` advertises BGRA/BGRx + size range
+    (320×240..7680×4320, default 1920×1080) + framerate range (15/1..60/1,
+    default 60/1) + modifier enum (`DRM_FORMAT_MOD_LINEAR | DRM_FORMAT_MOD_INVALID`).
+  - New `crates/media-linux/src/wayland_portal/dmabuf.rs`:
+    `pub unsafe fn map_dmabuf_plane<D: SpaDataLike>(d: D) -> io::Result<MappedPlane>`
+    `mmap(PROT_READ, MAP_PRIVATE)`s a `F_DUPFD_CLOEXEC`-dup'd FD.
+    `MappedPlane { _fd: OwnedFd, ptr, len, data_off }` — `_fd` declared FIRST
+    so the explicit `Drop` impl's `munmap` runs BEFORE `OwnedFd::drop` closes
+    the dup'd FD. `trait SpaDataLike` exposes `fd / maxsize / mapoffset`
+    so unit tests inject a stub without constructing a `spa_data` (private
+    in pipewire-rs 0.9). Production blanket impl on `&pipewire::spa::buffer::Data`.
+  - `wayland_portal/stream.rs`: `process()` callback gains a
+    `match classify_spa_data_type(d.as_raw().type_)` arm:
+    - `SPA_DATA_DmaBuf` → `unsafe { map_dmabuf_plane }` → read chunk-bounded
+      region → pool-buffer fill → `try_send`. No compositor-side memfd
+      serialise; no full-framebuffer intermediate copy.
+    - `SPA_DATA_MemFd | SPA_DATA_MemPtr` → existing `d.data()` slice path
+      (unchanged P5B-1 successor behaviour).
+    - Unknown → warn + drop frame.
+    `param_changed` now `info!`-logs the negotiated `(w, h, fmt, modifier)`
+    and disconnects + warns on `DRM_FORMAT_MOD_INVALID` (tiled, not
+    CPU-readable; renegotiation auto-retry is a follow-up TODO).
+    Classifier uses `pipewire::spa::buffer::DataType` (libspa 0.9.2 typed
+    wrapper); test-facing u32 aliases are ABI literals (DmaBuf=3, MemFd=2,
+    MemPtr=1) verified against `/usr/include/spa-0.2/spa/buffer/buffer.h`.
+  - **No new workspace deps** — reuses existing `pipewire = "0.9"` POD
+    builder, `libc`, `tracing`, `thiserror`.
+  - **Constraints baked in**: BGRA/BGRx only (NV12 rejected as
+    `UnsupportedFormat`); implicit sync only (no `SPA_META_SyncTimeline`);
+    modifier list `[LINEAR=0, INVALID=-1]` (MOD_INVALID disconnects;
+    renegotiation deferred); always-on (no feature flag — MemFd is the
+    automatic fallback for compositors that don't advertise DMABUF).
+  - **Tests**: 1 format::build (round_trip_bgra) + 4 format::parse
+    (round-trip / rejects Audio / rejects NV12 / extracts modifier) +
+    3 dmabuf (pattern read+drop / dup keeps original / fd=-1 → Err) +
+    2 stream dispatch (classifier table / build_format_params yields one POD)
+    = **10 new tests**. Container clippy clean on `prdt-media-linux`;
+    affected crate slice (`prdt-protocol -p prdt-media-core -p prdt-media-sw
+    -p prdt-media-policy -p prdt-media-linux`) lib tests 140 passed / 0
+    failed / 1 ignored. X11 contract test (`capture_source_contract`)
+    3 pass / 1 ignored — P5B-1 regression guard green. Full workspace
+    cargo test gate not feasible in the dev container (gdk-sys / alsa-sys
+    require system libs the bookworm image doesn't install); matches the
+    P5B-1 successor verification scope.
+  - **Out of scope (deferred)**: cursor metadata (P5B-2b), multi-compositor
+    smoke matrix KDE/Sway/Hyprland (P5B-2b), explicit sync (P5B-3+),
+    NV12 multi-plane (P5C), EGL/Vulkan import (P5C), MOD_INVALID
+    renegotiation auto-retry (P5B-2a follow-up; currently disconnect + log).
+  - **Smoke walkthrough**: `docs/superpowers/p5b1-smoke-walkthrough.md`
+    §P5B-2a Section D (GNOME DMABUF zero-copy) + Section E (MemFd
+    fallback regression) + Section F (MOD_INVALID handling).
 
 ### **C. 計測 / 観測 系(blocker 解消用)**
 

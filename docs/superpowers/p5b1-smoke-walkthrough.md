@@ -267,3 +267,130 @@ Expect:
   This is acceptable for dev iteration; revisit if it appears in clean
   shutdown paths (the `Drop` impl logs `warn!` intentionally so leaks are
   visible).
+
+---
+
+## P5B-2a — DMABUF zero-copy + libspa POD negotiation
+
+The `phase-p5b2a-libspa-pod-dmabuf-complete` tag replaces the two T5 staged
+stubs in `wayland_portal/stream.rs` with real libspa POD build + parse
+and adds a DMABUF receive path. Sections D + E below extend the
+P5B-1 walkthrough; Sections A / A' / B / C remain unchanged.
+
+### Section D — GNOME DMABUF smoke (real compositor + zero-copy verified)
+
+**Pre-conditions:**
+- Ubuntu 24.04+ GNOME (Wayland session) with `libpipewire-0.3 >= 0.3.55`.
+- `prdt-host` binary from this branch (container build per Section A).
+- `xdg-desktop-portal` ≥ 1.18 (DMABUF advertising landed in 1.16+).
+
+**Steps:**
+
+1. Start the host with debug tracing on the negotiation lines:
+
+   ```bash
+   RUST_LOG=info,prdt_media_linux::wayland_portal=debug \
+       ./prdt-host --bitrate-mbps 5 --silent-allow --headless \
+       2>&1 | tee p5b2a-gnome-dmabuf-run.log
+   ```
+
+2. Click **Allow** in the consent dialog (first run only — Section A's
+   token reuse path applies as before).
+
+3. Expect the negotiation log line shortly after the dialog closes:
+
+   ```
+   pipewire negotiated format w=1920 h=1080 fmt=BGRA modifier=Some(0)
+   ```
+
+   The `modifier=Some(0)` value is `DRM_FORMAT_MOD_LINEAR` — the
+   compositor handed us a CPU-readable DMABUF.
+
+4. Connect a viewer. Confirm frames flow at ≥ 20 fps after first IDR.
+
+5. **CPU usage check** (the zero-copy payoff):
+
+   ```bash
+   pidstat -p $(pgrep -f prdt-host) 1 30
+   ```
+
+   Expected: sustained capture at 1080p60 with `%CPU` noticeably below
+   the P5B-1 successor's MemFd baseline. The exact delta is environment-
+   dependent; the qualitative signal is that the DMABUF arm fires (no
+   per-frame compositor-side memfd serialise + read-side memcpy of the
+   full framebuffer; only the single pool-buffer fill remains).
+
+6. **Verify the DMABUF arm is firing** (rather than the MemFd fallback)
+   by temporarily raising verbosity at the dispatch seam:
+
+   ```bash
+   RUST_LOG=info,prdt_media_linux::wayland_portal::stream=trace ./prdt-host …
+   ```
+
+   You should NOT see `unsupported SpaData type` lines. If you see only
+   `frame dropped (channel full)` lines and no warn!, the dispatch is
+   silent (correct).
+
+### Section E — MemFd fallback regression (older compositor)
+
+**Pre-conditions:**
+- A compositor that does NOT advertise DMABUF support — older
+  `xdg-desktop-portal` (≤ 1.14) or a deliberate `xdg-desktop-portal-wlr`
+  configured without the dmabuf module.
+- Same `prdt-host` binary.
+
+**Steps:**
+
+1. Start the host as in Section D.
+
+2. Expect the negotiation log to show:
+
+   ```
+   pipewire negotiated format w=… h=… fmt=BGRA modifier=None
+   ```
+
+   The `modifier=None` indicates no VideoModifier was on the negotiated
+   POD; the compositor will deliver MemFd or MemPtr.
+
+3. Connect a viewer; frames continue to flow. The dispatch hits the
+   `MemFd` / `MemPtr` arm (existing P5B-1 path), not DMABUF.
+
+4. Confirm `RUST_LOG=…wayland_portal::stream=trace` shows no
+   `dmabuf mmap failed` warns and no `unsupported SpaData type` warns.
+
+### Section F — DRM_FORMAT_MOD_INVALID handling (synthetic / future)
+
+If a compositor selects `DRM_FORMAT_MOD_INVALID` (tiled, not CPU-readable):
+
+```
+pipewire negotiated format w=… h=… fmt=BGRA modifier=Some(-1)
+compositor selected DRM_FORMAT_MOD_INVALID (tiled); disconnecting stream. TODO(P5B-2a follow-up): renegotiate with LINEAR-only modifier list.
+```
+
+…and the producer surfaces `Capture(linux-wayland-portal: PipeWire channel closed (mainloop exited))` on the next `next_frame()`. The host's outer session loop tears down the producer and falls back to the X11 path on the next reconnect (or stays disconnected if `--capture-backend wayland` is forced). Renegotiation auto-retry with LINEAR-only is **deferred to a P5B-2a follow-up** — flagged in code as a `TODO(P5B-2a follow-up)`.
+
+### Out of scope (deferred to P5B-2b / P5C)
+
+- Cursor metadata (`Cursor::Metadata` mode 4) — P5B-2b.
+- KDE / Sway / Hyprland smoke matrix — P5B-2b.
+- Explicit sync (`SPA_META_SyncTimeline` + `SPA_DATA_SyncObj`) — P5B-3+.
+- NV12 multi-plane — P5C (lands with the HW encoder).
+- EGL import / GPU readback / Vulkan — P5C.
+- `/dev/dri/card0` direct ioctl — never (portal handles allocation).
+
+### Known issues / follow-ups (P5B-2a specific)
+
+- **MOD_INVALID renegotiation auto-retry:** currently a graceful
+  disconnect + log; no auto-retry with a narrower modifier list. Flagged
+  as `TODO(P5B-2a follow-up)` in `wayland_portal/stream.rs`. Real
+  compositor data needed before deciding the right strategy
+  (xdg-desktop-portal-wlr / OBS Studio's approach is to re-`connect()`
+  with `[LINEAR]` only and warn if that also returns MOD_INVALID).
+- **`param_changed` logging cadence:** `info!`-level on every
+  `param_changed` call. If GNOME re-issues on monitor reconfigure and
+  smoke shows spam, gate behind `std::sync::Once`. Not pre-emptively
+  gated (spec §9 open question 3).
+- **Single read-side memcpy remains:** the DMABUF arm still copies once
+  from the mapped pointer into a pool-acquired `Vec<u8>` so the existing
+  channel-bound `RawFrame` API is unchanged. P5C may eliminate this last
+  copy via direct EGL import or GPU readback.
