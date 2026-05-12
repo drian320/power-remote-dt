@@ -128,8 +128,26 @@ pub fn probe() -> std::sync::Arc<dyn prdt_media_policy::CapabilityProbe> {
     std::sync::Arc::new(prdt_media_linux::policy::LinuxSwProbe)
 }
 
-pub fn factory() -> std::sync::Arc<dyn prdt_media_policy::ProducerFactory> {
-    std::sync::Arc::new(prdt_media_linux::policy::LinuxSwFactory)
+/// Build the producer factory.
+///
+/// `capture_backend_arg` is the raw `--capture-backend` CLI value (`"auto"`,
+/// `"x11"`, `"wayland"`, or anything else). It is parsed via
+/// `prdt_media_linux::policy::CaptureBackendChoice::parse` on Linux; ignored
+/// on other platforms (Windows has no Wayland axis — capture is always DXGI
+/// Desktop Duplication).
+pub fn factory(
+    capture_backend_arg: &str,
+) -> std::sync::Arc<dyn prdt_media_policy::ProducerFactory> {
+    use prdt_media_linux::policy::{detect_capture_backend, CaptureBackendChoice, LinuxSwFactory};
+    let choice = CaptureBackendChoice::parse(capture_backend_arg);
+    let (backend, reason) = detect_capture_backend(choice);
+    tracing::info!(
+        choice = ?choice,
+        resolved = ?backend,
+        reason,
+        "P5B-1 capture backend resolved"
+    );
+    std::sync::Arc::new(LinuxSwFactory::new(backend))
 }
 
 #[cfg(test)]

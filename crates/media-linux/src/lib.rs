@@ -6,6 +6,7 @@
 #![cfg(target_os = "linux")]
 #![allow(dead_code)]
 
+pub mod capture_source;
 pub mod core_adapter;
 pub mod error;
 pub mod frame;
@@ -13,15 +14,35 @@ pub mod i420_to_bgra;
 pub mod linux_sw_producer;
 pub mod policy;
 pub mod sw_pipeline;
+pub mod wayland_portal;
 pub mod x11_capture;
 
+pub use capture_source::{CaptureSource, CaptureSourceError};
 pub use error::LinuxMediaError;
 pub use frame::BgraFrame;
 
 /// Production wiring entry point — host calls this to obtain a boxed
-/// `VideoProducer` for the Linux SW path. Width/height come from the
-/// X server; the host need only pass bitrate + fps (and the
-/// `--encoder` flag selection, currently always SW on Linux).
+/// `VideoProducer` for the Linux SW path. The capture source is injected
+/// (the factory picks X11 or Wayland-portal); width/height come from the
+/// capture source via `geometry()`.
+#[cfg(target_os = "linux")]
+pub fn build_video_producer_with(
+    capture: Box<dyn CaptureSource>,
+    bitrate_bps: u32,
+    fps: u32,
+) -> anyhow::Result<linux_sw_producer::LinuxSwProducer> {
+    use anyhow::Context as _;
+    let (w, h) = capture.geometry();
+    let enc =
+        sw_pipeline::LinuxSwEncoder::new(w, h, bitrate_bps, fps).context("LinuxSwEncoder::new")?;
+    linux_sw_producer::LinuxSwProducer::new(capture, enc, fps).context("LinuxSwProducer::new")
+}
+
+/// Legacy entry point — X11-only convenience wrapper retained so callers
+/// that still want X11 explicitly (smoke tests, the
+/// `build_video_decoder`-paired helper) don't have to assemble the
+/// `Box<dyn CaptureSource>` themselves. Internally equivalent to
+/// `build_video_producer_with(Box::new(X11ShmCapturer::new()?), ...)`.
 #[cfg(target_os = "linux")]
 pub fn build_video_producer(
     bitrate_bps: u32,
@@ -29,13 +50,10 @@ pub fn build_video_producer(
 ) -> anyhow::Result<linux_sw_producer::LinuxSwProducer> {
     use anyhow::Context as _;
     let cap = x11_capture::X11ShmCapturer::new().context("X11ShmCapturer::new")?;
-    let enc = sw_pipeline::LinuxSwEncoder::new(cap.width(), cap.height(), bitrate_bps, fps)
-        .context("LinuxSwEncoder::new")?;
-    linux_sw_producer::LinuxSwProducer::new(cap, enc, fps).context("LinuxSwProducer::new")
+    build_video_producer_with(Box::new(cap), bitrate_bps, fps)
 }
 
-/// Production wiring entry point — viewer calls this to obtain a SW
-/// decoder.
+/// Production wiring entry point — viewer calls this to obtain a SW decoder.
 #[cfg(target_os = "linux")]
 pub fn build_video_decoder() -> anyhow::Result<sw_pipeline::LinuxSwDecoder> {
     sw_pipeline::LinuxSwDecoder::new().map_err(Into::into)

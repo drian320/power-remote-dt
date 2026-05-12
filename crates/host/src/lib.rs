@@ -151,6 +151,14 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     force_sw: bool,
 
+    /// Linux-only: capture-source backend. `auto` (default) probes for a
+    /// reachable xdg-desktop-portal on a Wayland session and picks
+    /// `wayland`; otherwise falls back to `x11`. `wayland` forces the
+    /// portal path (errors hard if no portal is reachable); `x11` forces
+    /// MIT-SHM (works on WSLg / X11 sessions). Ignored on non-Linux.
+    #[arg(long, default_value = "auto")]
+    pub capture_backend: String,
+
     /// Run in CLI-only mode without launching the GUI. Required for headless servers / CI.
     #[arg(long)]
     headless: bool,
@@ -804,7 +812,8 @@ pub async fn run_host(
             force_sw,
         };
         let probe_arc = platform_probe();
-        let factory_arc = platform_factory();
+        // P5B-1: resolve capture-side backend (Linux only — Windows ignores).
+        let factory_arc = platform_factory(&args.capture_backend);
         let scoring_policy: std::sync::Arc<dyn prdt_media_policy::SelectionPolicy> =
             std::sync::Arc::new(prdt_media_policy::ScoringPolicy::load_default_or_fallback());
         {
@@ -1353,6 +1362,41 @@ fn to_policy_codec(c: prdt_protocol::Codec) -> prdt_media_policy::Codec {
             );
             prdt_media_policy::Codec::H264
         }
+    }
+}
+
+// Cross-platform CLI parser tests — run on all platforms.
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn cli_capture_backend_default_is_auto() {
+        let args = Args::try_parse_from([
+            "prdt-host",
+            "--bitrate-mbps",
+            "5",
+            "--silent-allow",
+            "--headless",
+        ])
+        .expect("default parse");
+        assert_eq!(args.capture_backend, "auto");
+    }
+
+    #[test]
+    fn cli_capture_backend_wayland_parses() {
+        let args = Args::try_parse_from([
+            "prdt-host",
+            "--bitrate-mbps",
+            "5",
+            "--silent-allow",
+            "--headless",
+            "--capture-backend",
+            "wayland",
+        ])
+        .expect("wayland parse");
+        assert_eq!(args.capture_backend, "wayland");
     }
 }
 
