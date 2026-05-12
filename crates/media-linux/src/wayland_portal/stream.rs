@@ -360,38 +360,47 @@ impl PipeWireStream {
                         }
                     })
                     .process(move |stream, _ud| {
-                        let Some(mut buf) = stream.dequeue_buffer() else {
+                        // Strategy B: use dequeue_raw_buffer / queue_raw_buffer throughout.
+                        // Buffer::from_raw is pub(crate) in pipewire-0.9.2 and cannot be
+                        // called from outside the crate. We replicate datas_mut() inline
+                        // using the documented raw pointer API instead.
+                        //
+                        // SAFETY: dequeue_raw_buffer returns either a valid *mut pw_buffer or
+                        // null. The pointer is owned by the stream's buffer pool; we return it
+                        // via queue_raw_buffer at the end (RAII guard covers early returns).
+                        let pw_buf_ptr: *mut pipewire::sys::pw_buffer =
+                            unsafe { stream.dequeue_raw_buffer() };
+                        if pw_buf_ptr.is_null() {
                             return;
+                        }
+
+                        // RAII guard: always return the buffer to the pool on exit.
+                        struct PwBufGuard<'s> {
+                            stream: &'s pipewire::stream::Stream,
+                            ptr: *mut pipewire::sys::pw_buffer,
+                        }
+                        impl Drop for PwBufGuard<'_> {
+                            fn drop(&mut self) {
+                                // SAFETY: ptr was obtained from dequeue_raw_buffer on this
+                                // stream and has not been queued elsewhere.
+                                unsafe { self.stream.queue_raw_buffer(self.ptr) };
+                            }
+                        }
+                        let _guard = PwBufGuard {
+                            stream,
+                            ptr: pw_buf_ptr,
                         };
 
-                        // P5B-2b: drain SPA_META_Cursor BEFORE consuming the
-                        // video data so cursor state is up-to-date on this frame.
+                        // P5B-2b: drain SPA_META_Cursor BEFORE consuming the video data so
+                        // cursor state is up-to-date on this frame. Use the raw pw_buffer
+                        // pointer to reach the spa_buffer without any transmute.
                         //
-                        // Adapter approach: `pipewire::buffer::Buffer` (0.9.2)
-                        // holds `buf: NonNull<pw_sys::pw_buffer>` as its first
-                        // field (no public as_raw_ptr). We transmute-copy to
-                        // extract the NonNull pointer, then follow `.buffer` to
-                        // reach `*const spa_sys::spa_buffer`. This is safe because:
-                        //  1. Buffer is a repr(Rust) struct whose first field IS
-                        //     the NonNull pointer (verified from buffer.rs source).
-                        //  2. The Buffer is alive for the entire closure body.
-                        //  3. read_meta_cursor copies all pixel data before return.
-                        {
-                            // SAFETY: transmute_copy reads the first 8 bytes of
-                            // `buf` which is NonNull<pw_buffer> (= *mut pw_buffer).
-                            // Buffer's layout starts with this field.
-                            let pw_buf_ptr: *mut pipewire::sys::pw_buffer =
-                                unsafe { std::mem::transmute_copy(&buf) };
-                            let spa_buf_ptr: *const pipewire::spa::sys::spa_buffer =
-                                if pw_buf_ptr.is_null() {
-                                    std::ptr::null()
-                                } else {
-                                    // SAFETY: pw_buf_ptr is non-null (NonNull invariant);
-                                    // .buffer field is the associated spa_buffer set by
-                                    // PipeWire at buffer allocation time.
-                                    unsafe { (*pw_buf_ptr).buffer as *const _ }
-                                };
+                        // SAFETY: pw_buf_ptr is non-null (checked above); (*pw_buf_ptr).buffer
+                        // is the associated spa_buffer set by PipeWire at allocation time.
+                        let spa_buf_ptr: *const pipewire::spa::sys::spa_buffer =
+                            unsafe { (*pw_buf_ptr).buffer as *const _ };
 
+                        if !spa_buf_ptr.is_null() {
                             struct SpaRawPtr(*const pipewire::spa::sys::spa_buffer);
                             impl crate::wayland_portal::cursor::SpaBufferLike for SpaRawPtr {
                                 fn as_raw_spa_buffer(
@@ -418,8 +427,34 @@ impl PipeWireStream {
                             }
                         }
 
-                        let datas = buf.datas_mut();
-                        let Some(d) = datas.first_mut() else { return };
+                        // Video data path: replicate Buffer::datas_mut() inline using the
+                        // raw pw_buffer pointer. Data is #[repr(transparent)] over spa_data
+                        // so the cast (*spa_buf).datas as *mut Data is sound (same as the
+                        // pipewire-0.9.2 source does in Buffer::datas_mut).
+                        //
+                        // SAFETY: pw_buf_ptr is non-null; spa_buf_ptr follows the same
+                        // PipeWire contract as in Buffer::datas_mut.
+                        let datas_slice: &mut [pipewire::spa::buffer::Data] = unsafe {
+                            use std::convert::TryFrom;
+                            let spa_buf: *mut pipewire::spa::sys::spa_buffer =
+                                (*pw_buf_ptr).buffer;
+                            if spa_buf.is_null()
+                                || (*spa_buf).n_datas == 0
+                                || (*spa_buf).datas.is_null()
+                            {
+                                &mut []
+                            } else {
+                                let datas =
+                                    (*spa_buf).datas as *mut pipewire::spa::buffer::Data;
+                                std::slice::from_raw_parts_mut(
+                                    datas,
+                                    usize::try_from((*spa_buf).n_datas).unwrap(),
+                                )
+                            }
+                        };
+                        let Some(d) = datas_slice.first_mut() else {
+                            return;
+                        };
 
                         let chunk = d.chunk();
                         let stride = chunk.stride().unsigned_abs();
@@ -537,7 +572,6 @@ impl PipeWireStream {
                                 // Producer dropped; let mainloop wind down naturally.
                             }
                         }
-                        let _ = stream; // stream captured for type inference only
                     })
                     .register();
 

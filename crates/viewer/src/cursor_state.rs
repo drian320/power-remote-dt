@@ -50,7 +50,21 @@ impl CursorState {
         self.hotspot_x = hotspot_x;
         self.hotspot_y = hotspot_y;
         if let Some(b) = bitmap {
-            self.bitmap = Some(Arc::new(b));
+            // Defense in depth: protocol decoder already validates this, but a
+            // buggy decoder upgrade or future field change could let bad values
+            // through. Skip the bitmap update on mismatch; keep the cached bitmap.
+            let valid_invisible = b.width == 0 && b.height == 0 && b.bgra.is_empty();
+            let expected = (b.width as usize) * (b.height as usize) * 4;
+            if valid_invisible || b.bgra.len() == expected {
+                self.bitmap = Some(Arc::new(b));
+            } else {
+                tracing::warn!(
+                    width = b.width,
+                    height = b.height,
+                    bgra_len = b.bgra.len(),
+                    "skipping cursor bitmap update — len mismatch (kept cache)"
+                );
+            }
         }
         // If bitmap is None: keep cached (reuse).
     }
@@ -127,5 +141,39 @@ mod tests {
         s.apply(1, 0, 0, 0, 0, Some(b1));
         s.apply(1, 0, 0, 0, 0, Some(b2)); // same id; bitmap-presence triggers swap
         assert_eq!(s.bitmap().map(|b| (b.width, b.height)), Some((4, 2)));
+    }
+
+    #[test]
+    fn apply_skips_bitmap_with_len_mismatch_keeps_cache() {
+        let mut s = CursorState::new();
+        // Seed with a valid 2x1 bitmap.
+        s.apply(
+            1,
+            0,
+            0,
+            0,
+            0,
+            Some(CursorBitmap {
+                width: 2,
+                height: 1,
+                bgra: vec![0u8; 8],
+            }),
+        );
+        assert!(s.visible());
+        // Apply a malformed bitmap — claims 4x4 but only 4 bytes.
+        s.apply(
+            2,
+            0,
+            0,
+            0,
+            0,
+            Some(CursorBitmap {
+                width: 4,
+                height: 4,
+                bgra: vec![0u8; 4],
+            }),
+        );
+        // Cache must still be the valid 2x1 from the first apply.
+        assert_eq!(s.bitmap().map(|b| (b.width, b.height)), Some((2, 1)));
     }
 }

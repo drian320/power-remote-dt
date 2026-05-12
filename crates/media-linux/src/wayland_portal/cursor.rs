@@ -225,6 +225,14 @@ pub unsafe fn read_meta_cursor<B: SpaBufferLike>(
         return Err(CursorMetaError::UnsupportedFormat(b.format));
     }
     let stride = b.stride as u32;
+    // Reject stride < w*4: the per-row from_raw_parts reads (w*4) bytes, so a
+    // narrower stride would cause the last row to walk into adjacent memory.
+    let min_stride = w
+        .checked_mul(4)
+        .ok_or(CursorMetaError::UnsupportedFormat(b.format))?;
+    if stride < min_stride {
+        return Err(CursorMetaError::UnsupportedFormat(b.format));
+    }
     let pixel_rel_off = b.offset; // offset within spa_meta_bitmap struct
     let pixel_abs_off =
         bmp_off
@@ -438,5 +446,28 @@ mod tests {
         let bmp = r.bitmap.expect("Some bitmap");
         // Red as RGBA(255,0,0,255) → BGRA(0,0,255,255).
         assert_eq!(bmp.bgra, vec![0x00, 0x00, 0xff, 0xff]);
+    }
+
+    #[test]
+    fn read_meta_cursor_rejects_stride_less_than_width_times_4() {
+        // 2x2 BGRA cursor with stride=4 (should be 8). Triggers stride<w*4 reject.
+        let pixels = vec![0u8; 4 * 2]; // only 8 bytes total (stride*h = 4*2)
+        let payload = build_cursor_payload(
+            1,
+            (0, 0),
+            (0, 0),
+            Some((
+                spa_sys::SPA_VIDEO_FORMAT_BGRA,
+                (2, 2),
+                4_i32, // bad stride: 4 < 2*4=8
+                pixels,
+            )),
+        );
+        let buf = TestBuf::with_cursor_meta(payload);
+        let r = unsafe { read_meta_cursor(&&buf) };
+        assert!(
+            matches!(r, Err(CursorMetaError::UnsupportedFormat(_))),
+            "expected UnsupportedFormat for stride<w*4, got {r:?}"
+        );
     }
 }

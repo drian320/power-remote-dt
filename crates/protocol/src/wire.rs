@@ -660,6 +660,32 @@ pub fn decode_control(buf: &[u8]) -> Result<ControlMessage, ProtocolError> {
         return Err(ProtocolError::UnknownControlKind(kind));
     }
     let msg: ControlMessage = bincode::deserialize(&buf[1..])?;
+    // Validate CursorUpdate bitmap dimensions/length after deserialisation.
+    if let ControlMessage::CursorUpdate {
+        bitmap: Some(ref b),
+        ..
+    } = msg
+    {
+        // Cap check: reject dimensions exceeding the 256x256 spec cap.
+        if b.width > 256 || b.height > 256 {
+            return Err(ProtocolError::InvalidCursorBitmap {
+                width: b.width,
+                height: b.height,
+                bgra_len: b.bgra.len(),
+            });
+        }
+        // Length consistency check: bgra must be exactly width*height*4 bytes,
+        // except for the invisible-cursor sentinel (0x0 with empty vec).
+        let valid_invisible = b.width == 0 && b.height == 0 && b.bgra.is_empty();
+        let expected = (b.width as usize) * (b.height as usize) * 4;
+        if !valid_invisible && b.bgra.len() != expected {
+            return Err(ProtocolError::InvalidCursorBitmap {
+                width: b.width,
+                height: b.height,
+                bgra_len: b.bgra.len(),
+            });
+        }
+    }
     Ok(msg)
 }
 
@@ -865,5 +891,53 @@ mod control_tests {
         let buf = encode_control(&msg).expect("encode ok");
         let decoded = decode_control(&buf).expect("decode ok");
         assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn cursor_update_rejects_mismatched_bgra_len() {
+        // Claim 100x100 but supply only 4 bytes — length mismatch.
+        let msg = ControlMessage::CursorUpdate {
+            id: 1,
+            position_x: 0,
+            position_y: 0,
+            hotspot_x: 0,
+            hotspot_y: 0,
+            bitmap: Some(crate::control::CursorBitmap {
+                width: 100,
+                height: 100,
+                bgra: vec![0u8; 4],
+            }),
+        };
+        // Encode succeeds (encoder does not validate).
+        let buf = encode_control(&msg).expect("encode ok");
+        // Decode must reject with InvalidCursorBitmap.
+        let r = decode_control(&buf);
+        assert!(
+            matches!(r, Err(ProtocolError::InvalidCursorBitmap { .. })),
+            "expected InvalidCursorBitmap, got {r:?}"
+        );
+    }
+
+    #[test]
+    fn cursor_update_rejects_oversize_dimensions() {
+        // 1000x1000 exceeds the 256x256 spec cap.
+        let msg = ControlMessage::CursorUpdate {
+            id: 1,
+            position_x: 0,
+            position_y: 0,
+            hotspot_x: 0,
+            hotspot_y: 0,
+            bitmap: Some(crate::control::CursorBitmap {
+                width: 1000,
+                height: 1000,
+                bgra: vec![0u8; 4_000_000],
+            }),
+        };
+        let buf = encode_control(&msg).expect("encode ok");
+        let r = decode_control(&buf);
+        assert!(
+            matches!(r, Err(ProtocolError::InvalidCursorBitmap { .. })),
+            "expected InvalidCursorBitmap, got {r:?}"
+        );
     }
 }
