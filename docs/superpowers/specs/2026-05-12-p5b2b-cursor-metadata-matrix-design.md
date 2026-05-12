@@ -317,6 +317,10 @@ The walkthrough document (`docs/superpowers/p5b1-smoke-walkthrough.md`) gains ne
 - **Cursor on Windows host** — DXGI path keeps Embedded-style cursor (always baked into frame). Windows host sends zero `CursorUpdate` messages.
 - **Graceful v3↔v4 fallback** — strict version match preserved (existing convention); operators upgrade both sides.
 - **Explicit sync** for cursor pixel data — implicit sync only (cursors are RGBA8 in shared mem, not DMABUF tiles).
+- **Windows D3D11 cursor overlay full implementation** — stubbed in T5;
+  full pixel-shader draw lands in a Windows follow-up branch with
+  cross-platform CI validation (Debian bookworm container cannot
+  compile media-win).
 
 ## 7. Risks
 
