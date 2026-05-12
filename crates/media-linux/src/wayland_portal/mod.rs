@@ -5,7 +5,10 @@
 
 #![cfg(target_os = "linux")]
 
+pub mod capturer;
+pub mod session;
 pub mod token;
 
-// Re-exports filled in T4-T6.
+pub use capturer::{WaylandPortalCapturer, WaylandPortalCapturerInitError};
+pub use session::{PortalSession, PortalStartOutput, WaylandPortalError};
 pub use token::PortalSessionToken;

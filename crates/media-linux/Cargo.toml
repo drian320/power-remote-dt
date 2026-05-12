@@ -25,6 +25,7 @@ libc = "0.2"
 serde = { workspace = true }
 toml = { workspace = true }
 zbus = { version = "4", default-features = false, features = ["tokio"] }
+ashpd = { version = "0.12", default-features = false, features = ["tokio"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "time", "rt", "macros"] }
