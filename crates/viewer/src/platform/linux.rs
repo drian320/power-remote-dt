@@ -133,6 +133,7 @@ pub fn present_frame(
     r: &mut PlatformRender,
     f: &PlatformFrame,
     _decoder_label: &str,
+    shared: &crate::ViewerShared,
 ) -> Result<(), super::RenderError> {
     let PlatformFrame::I420(i420) = f;
     let stream_w = i420.width;
@@ -153,6 +154,32 @@ pub fn present_frame(
     // (B in lowest byte, A=0xFF in highest).
     i420_to_bgra(i420, &mut r.scratch_bgra);
 
+    // P5B-2b: cursor composite (Linux softbuffer).
+    // Lock briefly, copy out the values we need, then drop the lock before
+    // the blend to avoid holding it across the CPU operation.
+    if let Ok(s) = shared.cursor.lock() {
+        if s.visible() {
+            if let Some(bmp) = s.bitmap() {
+                let top_left_x = s.position_x - s.hotspot_x;
+                let top_left_y = s.position_y - s.hotspot_y;
+                let bmp_w = bmp.width as i32;
+                let bmp_h = bmp.height as i32;
+                let bgra_copy = bmp.bgra.clone();
+                drop(s);
+                alpha_blend_bgra(
+                    &mut r.scratch_bgra,
+                    stream_w as i32,
+                    stream_h as i32,
+                    bmp_w,
+                    bmp_h,
+                    top_left_x,
+                    top_left_y,
+                    &bgra_copy,
+                );
+            }
+        }
+    }
+
     let mut buf = r
         .surface
         .buffer_mut()
@@ -165,6 +192,50 @@ pub fn present_frame(
 
     let _ = &r.window; // suppress unused-field warning; kept to extend Surface lifetime
     Ok(())
+}
+
+/// CPU alpha-blend a BGRA source rectangle onto a BGRA destination
+/// framebuffer. Source pixels' alpha channel modulates the contribution.
+/// Clips source to the destination bounds.
+#[allow(clippy::too_many_arguments)]
+fn alpha_blend_bgra(
+    dst: &mut [u8],
+    dst_w: i32,
+    dst_h: i32,
+    src_w: i32,
+    src_h: i32,
+    dst_x: i32,
+    dst_y: i32,
+    src: &[u8],
+) {
+    let x0 = dst_x.max(0);
+    let y0 = dst_y.max(0);
+    let x1 = (dst_x + src_w).min(dst_w);
+    let y1 = (dst_y + src_h).min(dst_h);
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let src_offset_x = (x0 - dst_x) as usize;
+    let src_offset_y = (y0 - dst_y) as usize;
+
+    for y in y0..y1 {
+        let row_dst = ((y * dst_w + x0) * 4) as usize;
+        let row_src = ((src_offset_y + (y - y0) as usize) * src_w as usize + src_offset_x) * 4;
+        for x in 0..((x1 - x0) as usize) {
+            let s = &src[row_src + x * 4..row_src + x * 4 + 4];
+            let d = &mut dst[row_dst + x * 4..row_dst + x * 4 + 4];
+            let alpha = s[3] as u32;
+            if alpha == 0 {
+                continue;
+            }
+            // Standard over-operator: dst = src*alpha + dst*(1-alpha).
+            let inv = 255 - alpha;
+            d[0] = ((s[0] as u32 * alpha + d[0] as u32 * inv) / 255) as u8;
+            d[1] = ((s[1] as u32 * alpha + d[1] as u32 * inv) / 255) as u8;
+            d[2] = ((s[2] as u32 * alpha + d[2] as u32 * inv) / 255) as u8;
+            d[3] = 255;
+        }
+    }
 }
 
 /// Resize the renderer. softbuffer auto-resizes on the next
@@ -228,6 +299,28 @@ mod tests {
             Ok(_) => panic!("expected build_consumer to fail"),
             Err(e) => e,
         }
+    }
+
+    #[test]
+    fn alpha_blend_bgra_red_over_black() {
+        let mut dst = vec![0u8; 4 * 4]; // 2x2 black BGRA
+        let src = vec![0x00, 0x00, 0xff, 0xff]; // 1x1 red opaque (BGRA: B=0,G=0,R=255,A=255)
+        alpha_blend_bgra(&mut dst, 2, 2, 1, 1, 0, 0, &src);
+        // Top-left pixel should be red, rest black.
+        assert_eq!(dst[0..4], [0x00, 0x00, 0xff, 0xff]);
+        assert_eq!(dst[4..8], [0, 0, 0, 0]);
+        assert_eq!(dst[8..12], [0, 0, 0, 0]);
+        assert_eq!(dst[12..16], [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn alpha_blend_bgra_clips_negative_offset() {
+        let mut dst = vec![0u8; 4 * 4]; // 2x2 black
+        let src = vec![0x00, 0x00, 0xff, 0xff, 0x00, 0xff, 0x00, 0xff]; // 2x1: red+green
+                                                                        // Place at (-1, 0): only x=1 of source draws at dst x=0.
+        alpha_blend_bgra(&mut dst, 2, 2, 2, 1, -1, 0, &src);
+        assert_eq!(dst[0..4], [0x00, 0xff, 0x00, 0xff], "green at (0,0)");
+        assert_eq!(dst[4..8], [0, 0, 0, 0], "(1,0) unchanged");
     }
 
     #[test]

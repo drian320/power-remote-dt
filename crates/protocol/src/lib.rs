@@ -12,7 +12,8 @@ pub mod wire;
 pub use clock::now_monotonic_us;
 
 pub use control::{
-    AuthMethod, ControlMessage, HelloRejectCode, MonitorRect, PermissionSet, MAX_AUTH_PAYLOAD_BYTES,
+    AuthMethod, ControlMessage, CursorBitmap, HelloRejectCode, MonitorRect, PermissionSet,
+    MAX_AUTH_PAYLOAD_BYTES,
 };
 pub use error::ProtocolError;
 pub use frame::{Codec, EncodedFrame};

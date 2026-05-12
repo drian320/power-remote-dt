@@ -188,6 +188,7 @@ pub fn present_frame(
     r: &mut PlatformRender,
     f: &PlatformFrame,
     decoder_label: &str,
+    _shared: &crate::ViewerShared,
 ) -> Result<(), super::RenderError> {
     let needs_new = match (f, r.renderer.as_ref()) {
         (PlatformFrame::Nv12(nv12), Some(WinRenderer::Mf(rmf))) => {
