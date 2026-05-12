@@ -394,3 +394,80 @@ compositor selected DRM_FORMAT_MOD_INVALID (tiled); disconnecting stream. TODO(P
   from the mapped pointer into a pool-acquired `Vec<u8>` so the existing
   channel-bound `RawFrame` API is unchanged. P5C may eliminate this last
   copy via direct EGL import or GPU readback.
+
+---
+
+## P5B-2b — Cursor metadata + 2-compositor smoke matrix
+
+### Section G — GNOME (mutter) cursor metadata
+
+**Pre-conditions:**
+- Ubuntu 24.04 GNOME (Wayland session); mutter ≥ 42.
+- v4 `prdt-host` + v4 `prdt-viewer` from this branch.
+- `xdg-desktop-portal-gnome` ≥ 42 (Metadata cursor mode landed in 41).
+
+**Steps:**
+
+1. Start the host with cursor-mode tracing:
+
+   ```bash
+   RUST_LOG=info,prdt_media_linux::wayland_portal=debug \
+       ./prdt-host --bitrate-mbps 5 --silent-allow --headless \
+       2>&1 | tee p5b2b-gnome-cursor-run.log
+   ```
+
+2. Click **Allow**. Expect:
+
+   ```
+   portal advertises Metadata cursor mode — using it
+   ```
+
+3. Connect a v4 viewer (`./prdt-viewer`).
+
+4. Move the host's cursor. Expect the viewer's window cursor to track
+   the host's pointer at near-zero latency (independent of video FPS).
+
+5. Change cursor shape on the host (hover over a resize handle / text
+   field). The viewer's cursor should update with the new shape within
+   one frame.
+
+### Section H — KDE (kwin) cursor metadata
+
+**Pre-conditions:**
+- Kubuntu 24.04 KDE (Wayland session); kwin ≥ 5.27.
+- v4 `prdt-host` + v4 `prdt-viewer`.
+- `xdg-desktop-portal-kde` ≥ 5.27.
+
+**Steps:**
+
+1. Start the host as in §G.
+2. Click **Share** in the KDE dialog. Same expected log line ("portal
+   advertises Metadata cursor mode").
+3. Connect viewer. Same shape + position tracking verification.
+
+### Section I — Embedded fallback regression
+
+**Pre-conditions:** A compositor that does NOT advertise Metadata
+(e.g. old GNOME 40 / `xdg-desktop-portal-wlr`).
+
+**Expected log:**
+
+```
+portal does not advertise Metadata cursor mode — falling back to Embedded
+```
+
+Viewer shows the cursor baked into the frame (existing P5B-1 successor
+behaviour); no `CursorUpdate` messages on the wire.
+
+### Known issues / follow-ups (P5B-2b specific)
+
+- **Windows D3D11 overlay**: stubbed; full pixel-shader draw lands in
+  a Windows follow-up branch.
+- **Sway / Hyprland / wlroots**: not in this matrix; revisit in P5C.
+- **HiDPI cursor scaling**: cursor coordinates pass through as logical
+  pixels; if the viewer has a different DPI than the host, the cursor
+  position may be off-by-scale. Logged but not auto-corrected.
+- **`SetCursor(NULL)` on Windows viewer**: hides OS-native cursor when
+  the viewer window has focus + cursor is within the render rect.
+  Restores on focus loss / cursor-leave. Race with modal dialogs may
+  cause brief double-cursor flashes.
