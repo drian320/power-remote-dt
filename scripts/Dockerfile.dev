@@ -13,5 +13,8 @@ RUN apt-get update -qq && \
         libclang-dev && \
     rm -rf /var/lib/apt/lists/*
 
+# Bake in rustfmt and clippy so ephemeral container invocations have them.
+RUN rustup component add rustfmt clippy
+
 # Cargo cache mount and target dir come in from the host at runtime
 # (see scripts/dev-container.sh). The image itself stays small.

@@ -1,49 +1,265 @@
-//! Wayland portal capture backend stub — scaffolding for T6.
+//! Wayland portal capture backend — real implementation (T6).
 //!
-//! `WaylandPortalCapturer` satisfies the `CaptureSource` trait so that the
-//! factory can reference the type now; actual PipeWire frame pulling is wired
-//! up in T6. Until then every method returns a sentinel value or error.
+//! Wires `PortalSession` + `PipeWireStream` + `PortalSessionToken`
+//! through the `CaptureSource` trait.
 
 #![cfg(target_os = "linux")]
 
 use crate::capture_source::{CaptureSource, CaptureSourceError};
 use thiserror::Error;
 
+use super::{PortalSession, PipeWireStream, PipeWireStreamError, PortalSessionToken, WaylandPortalError};
+use ashpd::desktop::{screencast::Screencast, Session};
+
 /// Errors produced when constructing a `WaylandPortalCapturer`.
 #[derive(Debug, Error)]
 pub enum WaylandPortalCapturerInitError {
-    /// PipeWire frame pulling is not yet implemented (arrives in T6).
-    #[error("wayland portal capturer not yet implemented")]
-    NotImplemented,
+    #[error("portal session start failed: {0}")]
+    PortalSession(#[from] WaylandPortalError),
+
+    #[error("pipewire stream connect failed: {0}")]
+    PipeWireStream(#[from] PipeWireStreamError),
 }
 
-/// Capture backend stub for the Wayland XDG ScreenCast portal.
+/// Capture backend for the Wayland XDG ScreenCast portal.
 ///
-/// This type exists so the factory layer can reference it during P5B-1.
-/// Frame capture is implemented in T6 (PipeWire integration).
+/// Lifecycle: `new` → `capture_into` (repeated) → `shutdown`.
+/// Dropping without `shutdown` is allowed but logs a warning; the
+/// portal session will age out on the compositor side eventually.
 pub struct WaylandPortalCapturer {
-    _todo: (),
+    /// Some until `shutdown()` is called; consumed for `session.close().await`.
+    session: Option<Session<'static, Screencast<'static>>>,
+    /// Always `Some` during lifetime — stream owns the pipewire mainloop thread.
+    /// `None` only after `shutdown()`.
+    stream: Option<PipeWireStream>,
+    token_path: std::path::PathBuf,
+    /// Set `true` by `shutdown()`; `Drop` warns if `false`.
+    shutdown_completed: bool,
 }
 
 impl WaylandPortalCapturer {
-    /// Attempt to construct a `WaylandPortalCapturer`.
+    /// Build the capturer.
     ///
-    /// Always returns `Err(NotImplemented)` until T6.
-    pub fn new() -> Result<Self, WaylandPortalCapturerInitError> {
-        Err(WaylandPortalCapturerInitError::NotImplemented)
+    /// 1. Load restore token from disk (if any).
+    /// 2. Open portal session — fires OS consent dialog first launch, or
+    ///    restores previous grant if token is still valid.
+    /// 3. On `RestoreTokenRejected`: delete token file, retry without token
+    ///    (operator will see the dialog again).
+    /// 4. Connect PipeWire stream to the node id returned by portal.
+    /// 5. Persist any new restore token returned by the portal.
+    pub async fn new(
+        token_path: std::path::PathBuf,
+    ) -> Result<Self, WaylandPortalCapturerInitError> {
+        // Step 1 — load persisted token.
+        let token = PortalSessionToken::load_or_default(&token_path);
+        let token_opt = token.token_opt().map(str::to_owned);
+
+        // Step 2 / 3 — open portal session with optional restore token.
+        let output = {
+            let first_try =
+                PortalSession::start_with_token_opt(token_opt.as_deref()).await;
+
+            match first_try {
+                Ok(o) => o,
+                Err(ref e) if e.is_token_invalid() => {
+                    tracing::warn!(
+                        token_path = %token_path.display(),
+                        "portal rejected stored restore_token; deleting and retrying as first launch"
+                    );
+                    let _ = std::fs::remove_file(&token_path);
+                    // Retry without token — propagate any error from this call.
+                    PortalSession::start_with_token_opt(None).await?
+                }
+                Err(e) => return Err(WaylandPortalCapturerInitError::PortalSession(e)),
+            }
+        };
+
+        let super::session::PortalStartOutput {
+            session,
+            pipewire_fd,
+            pipewire_node_id,
+            restore_token: new_token,
+        } = output;
+
+        // Step 4 — connect PipeWire stream.
+        let stream = PipeWireStream::connect(pipewire_fd, pipewire_node_id)?;
+
+        // Step 5 — persist new restore token if portal issued one.
+        if let Some(tok) = new_token {
+            let to_save = PortalSessionToken::with_token(tok, "unknown");
+            if let Err(e) = to_save.save(&token_path) {
+                tracing::warn!(
+                    error = %e,
+                    token_path = %token_path.display(),
+                    "failed to persist portal restore token; next launch will show consent dialog"
+                );
+            }
+        }
+
+        Ok(Self {
+            session: Some(session),
+            stream: Some(stream),
+            token_path,
+            shutdown_completed: false,
+        })
+    }
+
+    /// Orderly shutdown: close PipeWire stream (joins thread), then close
+    /// the D-Bus portal session.
+    ///
+    /// Sets `shutdown_completed` so `Drop` does not emit the leak warning.
+    pub async fn shutdown(mut self) -> Result<(), WaylandPortalError> {
+        // Consume stream first — joins the PipeWire mainloop thread.
+        if let Some(s) = self.stream.take() {
+            s.shutdown();
+        }
+
+        // Close the portal session.
+        if let Some(sess) = self.session.take() {
+            PortalSession::close(sess).await?;
+        }
+
+        self.shutdown_completed = true;
+        Ok(())
+    }
+
+    // ── #[cfg(test)] helper ───────────────────────────────────────────────────
+
+    #[cfg(test)]
+    fn with_test_state(
+        stream: Option<PipeWireStream>,
+        session: Option<Session<'static, Screencast<'static>>>,
+        token_path: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            session,
+            stream,
+            token_path,
+            shutdown_completed: false,
+        }
     }
 }
 
 impl CaptureSource for WaylandPortalCapturer {
     fn geometry(&self) -> (u32, u32) {
-        // Stub — real geometry comes from the PipeWire stream in T6.
-        (1, 1)
+        self.stream
+            .as_ref()
+            .map(|s| s.current_size())
+            .unwrap_or((0, 0))
     }
 
-    fn capture_into(&mut self, _out: &mut Vec<u8>) -> Result<(), CaptureSourceError> {
-        // Stub — real capture is wired up in T6.
-        Err(CaptureSourceError::WouldBlock(
-            "wayland portal capturer not yet implemented".into(),
-        ))
+    fn capture_into(&mut self, out: &mut Vec<u8>) -> Result<(), CaptureSourceError> {
+        let Some(stream) = self.stream.as_mut() else {
+            return Err(CaptureSourceError::Terminal {
+                backend: "wayland-portal",
+                reason: "capturer shut down".into(),
+            });
+        };
+
+        // The CaptureSource trait is sync; the producer wraps the call in
+        // `spawn_blocking`, so blocking here is safe.
+        let frame = stream
+            .rx()
+            .blocking_recv()
+            .ok_or_else(|| CaptureSourceError::Terminal {
+                backend: "wayland-portal",
+                reason: "pipewire stream closed".into(),
+            })?;
+
+        let width = frame.width as usize;
+        let height = frame.height as usize;
+        let stride = frame.stride as usize;
+
+        if stride > width * 4 {
+            // Row-by-row copy to strip Intel iGPU stride padding.
+            out.clear();
+            out.reserve(width * height * 4);
+            for y in 0..frame.height {
+                out.extend_from_slice(frame.row(y));
+            }
+        } else {
+            out.clear();
+            out.extend_from_slice(&frame.data);
+        }
+
+        Ok(())
+    }
+}
+
+impl Drop for WaylandPortalCapturer {
+    fn drop(&mut self) {
+        if !self.shutdown_completed {
+            tracing::warn!(
+                "WaylandPortalCapturer dropped without explicit shutdown(); \
+                 portal session will leak until the compositor times it out"
+            );
+        }
+        // stream's own Drop fires the PipeWire quit signal best-effort (T5).
+        // session: cannot .await session.close() inside Drop — log only.
+    }
+}
+
+// ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pin the `shutdown_completed` discipline: newly constructed state has the
+    /// flag false; once set it suppresses the Drop warning.
+    ///
+    /// This exercises the private-fields invariant via the test constructor
+    /// without needing a real portal or PipeWire daemon.
+    #[test]
+    fn shutdown_completed_default_is_false() {
+        let capturer = WaylandPortalCapturer::with_test_state(
+            None,
+            None,
+            std::path::PathBuf::from("/tmp/test-portal-session.toml"),
+        );
+        assert!(
+            !capturer.shutdown_completed,
+            "shutdown_completed must be false before explicit shutdown"
+        );
+        // Force the flag so Drop won't warn during this test.
+        let mut c = capturer;
+        c.shutdown_completed = true;
+    }
+
+    /// geometry() returns (0, 0) when the stream slot is None (post-shutdown
+    /// safety net).
+    #[test]
+    fn geometry_returns_zero_when_stream_none() {
+        let capturer = WaylandPortalCapturer::with_test_state(
+            None,
+            None,
+            std::path::PathBuf::from("/tmp/test-portal-session.toml"),
+        );
+        assert_eq!(capturer.geometry(), (0, 0));
+        let mut c = capturer;
+        c.shutdown_completed = true; // suppress Drop warn
+    }
+
+    /// capture_into returns Terminal when the stream is None.
+    #[test]
+    fn capture_into_terminal_when_stream_none() {
+        let mut capturer = WaylandPortalCapturer::with_test_state(
+            None,
+            None,
+            std::path::PathBuf::from("/tmp/test-portal-session.toml"),
+        );
+        let mut buf = Vec::new();
+        let result = capturer.capture_into(&mut buf);
+        assert!(
+            matches!(
+                result,
+                Err(CaptureSourceError::Terminal {
+                    backend: "wayland-portal",
+                    ..
+                })
+            ),
+            "expected Terminal error when stream is None"
+        );
+        capturer.shutdown_completed = true; // suppress Drop warn
     }
 }

@@ -195,19 +195,14 @@ impl ProducerFactory for LinuxSwFactory {
             CaptureBackend::X11Shm => crate::build_video_producer(cfg.initial_bitrate_bps, cfg.fps)
                 .map_err(|e| FactoryError::InvalidConfig(kind, e.to_string()))?,
             CaptureBackend::WaylandPortal => {
-                // T5/T6 deferred — pipewire runtime is not built on this branch.
-                // WaylandPortalCapturer::new() returns NotImplemented from T4's
-                // stub; we propagate it as Unavailable so operator gets a clean
-                // error fast instead of a silent X11 substitution.
-                let cap_result = crate::wayland_portal::WaylandPortalCapturer::new();
+                // T6 landed WaylandPortalCapturer::new(token_path) (async).
+                // T7 will wire the full async factory path; until then return
+                // Unavailable so the operator gets a clean error fast.
                 return Err(FactoryError::Unavailable(
                     kind,
-                    format!(
-                        "WaylandPortal capture backend is in the Foundation-only milestone; \
-                         T5/T6 (PipeWire runtime) deferred — see commit 684f43d. \
-                         Use --capture-backend x11 or omit the flag. Inner: {:?}",
-                        cap_result.err()
-                    ),
+                    "WaylandPortal capture backend (T6 Foundation) requires T7 \
+                     factory async rewire; use --capture-backend x11 or omit the flag."
+                        .into(),
                 ));
             }
         };
