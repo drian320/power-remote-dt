@@ -1,7 +1,7 @@
 # power-remote-dt — Project Status & Roadmap
 
 **Last updated:** 2026-05-12
-**Latest tag:** `phase-p5b2b-cursor-metadata-matrix-complete`
+**Latest tag:** `phase-p5b2c-cursor-hide-polish-complete`
 **Branch state:** `phase0-sw-codec-wire` (post-tag) — **Phase 4 + Plan 4 B1 + B4 + B6 + B7 + B8 完了 + MF エンコーダ fallback 完了 + host session liveness 完了 + NVDEC arc-swap 化 完了 + ソフトウェアコーデック OpenH264 完了 (B3 のみ HW ブロック保留)**
 **Test count:** 348+ automated Rust tests + 11 Python tests; new crate `prdt-media-sw` 6 tests (Phase 1) + Phase 0 protocol/transport new tests + Phase 5 latency-bench new test (≥10 new tests per plan §8 acceptance)
 
@@ -408,6 +408,33 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
   - **Smoke walkthrough**: `docs/superpowers/p5b1-smoke-walkthrough.md`
     §P5B-2b Section G (GNOME cursor metadata) + Section H (KDE cursor
     metadata).
+
+- **P5B-2c (`phase-p5b2c-cursor-hide-polish-complete`, 2026-05-12)**:
+  OS-native cursor hide + P5B-2b reviewer polish bundle.
+  - Viewer hides OS-native cursor when window has focus AND host is
+    emitting a visible cursor bitmap (`cursor_state::should_hide_os_cursor`).
+    Self-correcting: Embedded-mode host leaves OS cursor visible, so user
+    always has at least one pointer. winit `Window::set_cursor_visible`
+    is cross-platform (works on both Linux softbuffer + Windows D3D11).
+    Trigger sites: `WindowEvent::Focused` + `WindowEvent::CursorMoved`.
+    `ViewerShared` gains `focused: Arc<Mutex<bool>>` field.
+  - **Reviewer polish bundle** (P5B-2b MEDIUM/LOW items from code-reviewer +
+    Codex): cursor forwarder task now integrates `CancellationToken` +
+    joins via `tokio::join!`; `LinuxSwFactory::create` stashes `cursor_rx`
+    AFTER `build_video_producer_with` succeeds (no stale slot on error);
+    `alpha_blend_bgra` gains `debug_assert_eq!` on src/dst buffer length;
+    `protocol_version: 3` literals in protocol crate test fixtures bumped
+    to 4; `wayland_portal/cursor.rs` module-header comment refreshed to
+    point at the production `dequeue_raw_buffer` adapter.
+  - **Tests**: 1 new (`should_hide_os_cursor_only_when_focused_and_visible`
+    table over (focused, visible) corner cases). Total P5B-2b+P5B-2c new
+    tests since master = 16.
+  - **Out of scope (deferred)**: Sway / Hyprland / wlroots matrix (P5C);
+    Windows D3D11 cursor overlay full implementation (follow-up branch);
+    MOD_INVALID renegotiation auto-retry (P5B-2a follow-up; smoke data
+    needed first); HiDPI cursor scaling refinement.
+  - **Smoke walkthrough**: `docs/superpowers/p5b1-smoke-walkthrough.md`
+    §P5B-2c Section J (OS cursor hide verification).
 
 ### **C. 計測 / 観測 系(blocker 解消用)**
 

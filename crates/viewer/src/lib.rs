@@ -460,6 +460,9 @@ struct ViewerShared {
     /// Viewer-side cursor compositing state. Updated by the receive task
     /// on each CursorUpdate message; read by the render thread in present_frame.
     cursor: Arc<Mutex<crate::cursor_state::CursorState>>,
+    /// Whether the viewer window currently has OS focus. Updated by
+    /// `WindowEvent::Focused`; read by `update_os_cursor_visibility`.
+    pub focused: Arc<std::sync::Mutex<bool>>,
 }
 
 struct ViewerApp {
@@ -487,6 +490,22 @@ struct ViewerApp {
     /// Set by overlay control polling when the user clicked Disconnect.
     /// Checked in about_to_wait to call event_loop.exit().
     disconnect_requested: bool,
+}
+
+/// Read the current focus + cursor-visibility state from `shared` and update
+/// the OS-native cursor visibility on the window accordingly.
+///
+/// Called from `WindowEvent::Focused` and `WindowEvent::CursorMoved` so that
+/// cursor-hide state is always consistent with the latest focus + host-cursor
+/// bitmap state.
+fn update_os_cursor_visibility(r: &PlatformRender, shared: &ViewerShared) {
+    let focused = shared.focused.lock().ok().map(|g| *g).unwrap_or(true);
+    let hide = shared
+        .cursor
+        .lock()
+        .ok()
+        .is_some_and(|c| crate::cursor_state::should_hide_os_cursor(focused, &c));
+    r.window().set_cursor_visible(!hide);
 }
 
 impl ApplicationHandler for ViewerApp {
@@ -564,10 +583,19 @@ impl ApplicationHandler for ViewerApp {
                     r.window().request_redraw();
                 }
             }
+            WindowEvent::Focused(focused) => {
+                if let Ok(mut g) = self.shared.focused.lock() {
+                    *g = focused;
+                }
+                if let Some(r) = self.render.as_ref() {
+                    update_os_cursor_visibility(r, &self.shared);
+                }
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 if let Some(r) = self.render.as_ref() {
                     let win_size = r.window().inner_size();
                     self.emit_mouse_move(position, win_size.width, win_size.height);
+                    update_os_cursor_visibility(r, &self.shared);
                 }
             }
             WindowEvent::MouseInput { button, state, .. } => {
@@ -1362,6 +1390,7 @@ pub fn run_with_args(
         status_title: Mutex::new(None),
         granted_permissions: Mutex::new(None),
         cursor: Arc::new(Mutex::new(crate::cursor_state::CursorState::new())),
+        focused: Arc::new(std::sync::Mutex::new(true)),
     });
 
     // Build the tokio runtime on a dedicated worker thread.

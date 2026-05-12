@@ -81,6 +81,17 @@ impl CursorState {
     }
 }
 
+/// Compute whether to suppress the viewer's OS-native cursor.
+///
+/// Hide when the viewer window has focus AND the host is actively
+/// rendering a visible cursor bitmap. Self-correcting: an Embedded-mode
+/// host (no CursorUpdate messages) leaves `state.visible() == false`, so
+/// the OS cursor stays visible and the user always has at least one
+/// pointer.
+pub fn should_hide_os_cursor(focused: bool, state: &CursorState) -> bool {
+    focused && state.visible()
+}
+
 impl Default for CursorState {
     fn default() -> Self {
         Self::new()
@@ -141,6 +152,45 @@ mod tests {
         s.apply(1, 0, 0, 0, 0, Some(b1));
         s.apply(1, 0, 0, 0, 0, Some(b2)); // same id; bitmap-presence triggers swap
         assert_eq!(s.bitmap().map(|b| (b.width, b.height)), Some((4, 2)));
+    }
+
+    #[test]
+    fn should_hide_os_cursor_only_when_focused_and_visible() {
+        let mut empty = CursorState::new();
+        assert!(!super::should_hide_os_cursor(false, &empty));
+        assert!(!super::should_hide_os_cursor(true, &empty));
+
+        empty.apply(
+            1,
+            0,
+            0,
+            0,
+            0,
+            Some(prdt_protocol::CursorBitmap {
+                width: 2,
+                height: 1,
+                bgra: vec![0u8; 8],
+            }),
+        );
+        assert!(empty.visible());
+        assert!(!super::should_hide_os_cursor(false, &empty));
+        assert!(super::should_hide_os_cursor(true, &empty));
+
+        let mut invisible = CursorState::new();
+        invisible.apply(
+            2,
+            0,
+            0,
+            0,
+            0,
+            Some(prdt_protocol::CursorBitmap {
+                width: 0,
+                height: 0,
+                bgra: vec![],
+            }),
+        );
+        assert!(!invisible.visible());
+        assert!(!super::should_hide_os_cursor(true, &invisible));
     }
 
     #[test]

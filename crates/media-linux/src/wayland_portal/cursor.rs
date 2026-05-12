@@ -35,18 +35,16 @@
 //! spa_point  { x: i32, y: i32 }
 //! ```
 //!
-//! # pipewire::buffer::Buffer raw-pointer access (deviation from plan)
+//! # Production adapter (stream.rs)
 //!
-//! `pipewire::buffer::Buffer` (pipewire-0.9.2) holds
-//! `buf: NonNull<pw_sys::pw_buffer>` but exposes NO public `as_raw_ptr()`.
-//! The plan's blanket impl on `&pipewire::spa::buffer::Buffer` refers to a
-//! type that does not exist in this crate version (`pipewire::spa` re-exports
-//! libspa, which has no `Buffer` type). The production impl of `SpaBufferLike`
-//! for `pipewire::buffer::Buffer` must be added at the call site (stream.rs /
-//! capturer.rs) using `unsafe { &*(buf.datas_mut() as *const _ as *const _) }`
-//! or by accessing the underlying `pw_buffer.buffer` pointer directly via a
-//! locally-written unsafe helper. The trait in this module is kept so the
-//! test harness and future callers have the correct interface.
+//! `crates/media-linux/src/wayland_portal/stream.rs::.process` obtains the
+//! raw `*mut pw_buffer` via `Stream::dequeue_raw_buffer` (pipewire-rs 0.9.2
+//! `stream/mod.rs:154`), follows the `.buffer` field to a
+//! `*const spa_sys::spa_buffer`, and wraps it in a local `SpaRawPtr` struct
+//! that implements `SpaBufferLike` by returning the stored pointer. The
+//! raw API is unsafe (caller must `queue_raw_buffer` the pointer back) but
+//! it avoids the `transmute_copy` UB of the earlier `Buffer` private-field
+//! extraction approach. See P5B-2b critical fix commit `63b0802`.
 //!
 //! # Format normalization
 //!
