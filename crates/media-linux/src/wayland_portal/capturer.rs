@@ -8,7 +8,9 @@
 use crate::capture_source::{CaptureSource, CaptureSourceError};
 use thiserror::Error;
 
-use super::{PortalSession, PipeWireStream, PipeWireStreamError, PortalSessionToken, WaylandPortalError};
+use super::{
+    PipeWireStream, PipeWireStreamError, PortalSession, PortalSessionToken, WaylandPortalError,
+};
 use ashpd::desktop::{screencast::Screencast, Session};
 
 /// Errors produced when constructing a `WaylandPortalCapturer`.
@@ -56,8 +58,7 @@ impl WaylandPortalCapturer {
 
         // Step 2 / 3 — open portal session with optional restore token.
         let output = {
-            let first_try =
-                PortalSession::start_with_token_opt(token_opt.as_deref()).await;
+            let first_try = PortalSession::start_with_token_opt(token_opt.as_deref()).await;
 
             match first_try {
                 Ok(o) => o,

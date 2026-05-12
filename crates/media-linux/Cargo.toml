@@ -26,6 +26,7 @@ serde = { workspace = true }
 toml = { workspace = true }
 zbus = { version = "4", default-features = false, features = ["tokio"] }
 ashpd = { version = "0.12", default-features = false, features = ["tokio"] }
+dirs = { workspace = true }
 # pipewire 0.9 — requires libpipewire-0.3 >= 0.3.55 system lib (Debian
 # bookworm ships 0.3.65, Ubuntu 24.04+ ships 1.0+). Older systems
 # (Ubuntu 22.04 jammy = 0.3.48) cannot build this; see scripts/dev-container.sh
