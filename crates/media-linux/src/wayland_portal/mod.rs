@@ -7,12 +7,14 @@
 #![cfg(target_os = "linux")]
 
 pub mod capturer;
+pub mod dmabuf;
 pub mod format;
 pub mod session;
 pub mod stream;
 pub mod token;
 
 pub use capturer::{WaylandPortalCapturer, WaylandPortalCapturerInitError};
+pub use dmabuf::{map_dmabuf_plane, MappedPlane, SpaDataLike};
 pub use format::{
     BuiltParams, NegotiatedFormat, ParseError, DRM_FORMAT_MOD_INVALID, DRM_FORMAT_MOD_LINEAR,
 };
