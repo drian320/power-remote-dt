@@ -14,6 +14,7 @@ pub mod i420_to_bgra;
 pub mod linux_sw_producer;
 pub mod policy;
 pub mod sw_pipeline;
+pub mod wayland_portal;
 pub mod x11_capture;
 
 pub use capture_source::{CaptureSource, CaptureSourceError};

@@ -22,6 +22,8 @@ tokio = { workspace = true, features = ["time", "rt", "macros"] }
 async-trait = "0.1"
 anyhow = "1"
 libc = "0.2"
+serde = { workspace = true }
+toml = { workspace = true }
 zbus = { version = "4", default-features = false, features = ["tokio"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
