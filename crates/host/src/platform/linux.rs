@@ -135,9 +135,14 @@ pub fn probe() -> std::sync::Arc<dyn prdt_media_policy::CapabilityProbe> {
 /// `prdt_media_linux::policy::CaptureBackendChoice::parse` on Linux; ignored
 /// on other platforms (Windows has no Wayland axis — capture is always DXGI
 /// Desktop Duplication).
+///
+/// Returns the concrete `LinuxSwFactory` so the host can call
+/// `take_cursor_rx()` after `PolicyDriven::bootstrap` to wire the cursor
+/// forwarding channel. The returned `Arc` coerces to `Arc<dyn ProducerFactory>`
+/// where the trait object is needed.
 pub fn factory(
     capture_backend_arg: &str,
-) -> std::sync::Arc<dyn prdt_media_policy::ProducerFactory> {
+) -> std::sync::Arc<prdt_media_linux::policy::LinuxSwFactory> {
     use prdt_media_linux::policy::{detect_capture_backend, CaptureBackendChoice, LinuxSwFactory};
     let choice = CaptureBackendChoice::parse(capture_backend_arg);
     let (backend, reason) = detect_capture_backend(choice);

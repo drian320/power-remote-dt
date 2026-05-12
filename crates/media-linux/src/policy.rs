@@ -160,20 +160,65 @@ pub fn portal_runtime_available_blocking(timeout: Duration) -> Result<bool, anyh
 // Factory
 // ---------------------------------------------------------------------------
 
+/// Convert a `media-linux` cursor update to the wire `ControlMessage`.
+///
+/// `width`/`height` are clamped from `u32` to `u16` — the 256×256 cap
+/// in `read_meta_cursor` means values above `u16::MAX` cannot occur in
+/// practice, but we clamp defensively.
+pub fn cursor_to_control(
+    c: crate::wayland_portal::cursor::CursorUpdate,
+) -> prdt_protocol::ControlMessage {
+    prdt_protocol::ControlMessage::CursorUpdate {
+        id: c.id,
+        position_x: c.position_x,
+        position_y: c.position_y,
+        hotspot_x: c.hotspot_x,
+        hotspot_y: c.hotspot_y,
+        bitmap: c.bitmap.map(|b| prdt_protocol::control::CursorBitmap {
+            width: b.width.min(u16::MAX as u32) as u16,
+            height: b.height.min(u16::MAX as u32) as u16,
+            bgra: b.bgra,
+        }),
+    }
+}
+
 /// Producer factory. `capture_backend` is fixed at construction time: the
 /// host resolves it once via `detect_capture_backend(args.into())` before
 /// building the factory.
+///
+/// After `create()` is called on the WaylandPortal arm, `take_cursor_rx()`
+/// returns the cursor update receiver. The host should call this immediately
+/// after `PolicyDriven::bootstrap` succeeds and spawn a forwarder task that
+/// drains the channel and sends each update over `transport.send_control`.
+/// X11 capture never populates the slot.
 pub struct LinuxSwFactory {
     capture_backend: CaptureBackend,
+    /// Populated by `create()` on the WaylandPortal arm. The host calls
+    /// `take_cursor_rx()` once to receive it and spawn the forwarder.
+    cursor_rx_slot: std::sync::Mutex<
+        Option<tokio::sync::mpsc::Receiver<crate::wayland_portal::cursor::CursorUpdate>>,
+    >,
 }
 
 impl LinuxSwFactory {
     pub fn new(capture_backend: CaptureBackend) -> Self {
-        Self { capture_backend }
+        Self {
+            capture_backend,
+            cursor_rx_slot: std::sync::Mutex::new(None),
+        }
     }
 
     pub fn capture_backend(&self) -> CaptureBackend {
         self.capture_backend
+    }
+
+    /// Take the cursor receiver populated by the last `create()` call on the
+    /// WaylandPortal arm. Returns `None` for X11 or if already taken.
+    /// Call once after `PolicyDriven::bootstrap` to receive the channel.
+    pub fn take_cursor_rx(
+        &self,
+    ) -> Option<tokio::sync::mpsc::Receiver<crate::wayland_portal::cursor::CursorUpdate>> {
+        self.cursor_rx_slot.lock().ok().and_then(|mut g| g.take())
     }
 }
 
@@ -203,13 +248,22 @@ impl ProducerFactory for LinuxSwFactory {
                     .enable_all()
                     .build()
                     .map_err(|e| FactoryError::Unavailable(kind, format!("portal runtime: {e}")))?;
-                let cap = rt
+                let (cap, cursor_rx) = rt
                     .block_on(crate::wayland_portal::WaylandPortalCapturer::new(
                         token_path,
                     ))
                     .map_err(|e| {
                         FactoryError::Unavailable(kind, format!("WaylandPortalCapturer::new: {e}"))
                     })?;
+
+                // Stash cursor_rx in the slot so the host can retrieve it via
+                // take_cursor_rx() after bootstrap and spawn the forwarder task
+                // inside its tokio runtime (create() is sync; spawning here
+                // would need a Handle::current() which isn't guaranteed).
+                if let Ok(mut slot) = self.cursor_rx_slot.lock() {
+                    *slot = Some(cursor_rx);
+                }
+
                 crate::build_video_producer_with(Box::new(cap), cfg.initial_bitrate_bps, cfg.fps)
                     .map_err(|e| FactoryError::InvalidConfig(kind, e.to_string()))?
             }

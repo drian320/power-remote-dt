@@ -206,13 +206,16 @@ pub enum PixelFormat {
     BGRx,
 }
 
-/// Public handle to the PipeWire mainloop thread and its frame receiver.
+/// Public handle to the PipeWire mainloop thread.
+///
+/// Frame and cursor receivers are returned from [`PipeWireStream::connect`]
+/// as separate values (not stored here) so the capturer can own them
+/// independently of the stream lifecycle.
 pub struct PipeWireStream {
     /// `None` after `shutdown()` consumes the handle.
     thread: Option<JoinHandle<()>>,
     quit_tx: pipewire::channel::Sender<LoopCommand>,
     stop: Arc<AtomicBool>,
-    rx: mpsc::Receiver<RawFrame>,
     current_size: Arc<Mutex<(u32, u32)>>,
 }
 
@@ -227,13 +230,33 @@ pub enum PipeWireStreamError {
 
 impl PipeWireStream {
     /// Spawn the dedicated PipeWire mainloop thread and connect to the portal
-    /// FD. Returns once `Stream::connect` has been issued; frames arrive
-    /// asynchronously via [`Self::rx`].
+    /// FD. Returns a 3-tuple `(Self, frame_rx, cursor_rx)`.
     ///
-    /// * `fd`      — `OwnedFd` from `PortalSession::open_pipewire_remote`.
-    /// * `node_id` — PipeWire node id from the Start response.
-    pub fn connect(fd: OwnedFd, node_id: u32) -> Result<Self, PipeWireStreamError> {
-        let (tx, rx) = mpsc::channel::<RawFrame>(2);
+    /// * `fd`            — `OwnedFd` from `PortalSession::open_pipewire_remote`.
+    /// * `node_id`       — PipeWire node id from the Start response.
+    /// * `frame_buf_cap` — mpsc capacity for raw video frames (typically 2).
+    /// * `cursor_buf_cap`— mpsc capacity for cursor updates (typically 8).
+    ///
+    /// The `cursor_rx` channel carries `CursorUpdate` values drained from
+    /// `SPA_META_Cursor` in each PipeWire buffer's process callback. If the
+    /// portal negotiated `CursorMode::Embedded` instead of `Metadata`, no
+    /// updates will arrive (the callback returns `Absent` silently).
+    pub fn connect(
+        fd: OwnedFd,
+        node_id: u32,
+        frame_buf_cap: usize,
+        cursor_buf_cap: usize,
+    ) -> Result<
+        (
+            Self,
+            mpsc::Receiver<RawFrame>,
+            mpsc::Receiver<crate::wayland_portal::cursor::CursorUpdate>,
+        ),
+        PipeWireStreamError,
+    > {
+        let (tx, rx) = mpsc::channel::<RawFrame>(frame_buf_cap);
+        let (cursor_tx, cursor_rx) =
+            mpsc::channel::<crate::wayland_portal::cursor::CursorUpdate>(cursor_buf_cap);
         let (quit_tx, quit_rx) = pipewire::channel::channel::<LoopCommand>();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = stop.clone();
@@ -288,6 +311,7 @@ impl PipeWireStream {
                 // --- callbacks --------------------------------------------------
                 let mut pool = FramePool::with_capacity(2);
                 let tx_cb = tx.clone();
+                let cursor_tx_cb = cursor_tx.clone();
                 let sz_cb = current_size_thread.clone();
 
                 let _listener = stream
@@ -339,6 +363,61 @@ impl PipeWireStream {
                         let Some(mut buf) = stream.dequeue_buffer() else {
                             return;
                         };
+
+                        // P5B-2b: drain SPA_META_Cursor BEFORE consuming the
+                        // video data so cursor state is up-to-date on this frame.
+                        //
+                        // Adapter approach: `pipewire::buffer::Buffer` (0.9.2)
+                        // holds `buf: NonNull<pw_sys::pw_buffer>` as its first
+                        // field (no public as_raw_ptr). We transmute-copy to
+                        // extract the NonNull pointer, then follow `.buffer` to
+                        // reach `*const spa_sys::spa_buffer`. This is safe because:
+                        //  1. Buffer is a repr(Rust) struct whose first field IS
+                        //     the NonNull pointer (verified from buffer.rs source).
+                        //  2. The Buffer is alive for the entire closure body.
+                        //  3. read_meta_cursor copies all pixel data before return.
+                        {
+                            // SAFETY: transmute_copy reads the first 8 bytes of
+                            // `buf` which is NonNull<pw_buffer> (= *mut pw_buffer).
+                            // Buffer's layout starts with this field.
+                            let pw_buf_ptr: *mut pipewire::sys::pw_buffer =
+                                unsafe { std::mem::transmute_copy(&buf) };
+                            let spa_buf_ptr: *const pipewire::spa::sys::spa_buffer =
+                                if pw_buf_ptr.is_null() {
+                                    std::ptr::null()
+                                } else {
+                                    // SAFETY: pw_buf_ptr is non-null (NonNull invariant);
+                                    // .buffer field is the associated spa_buffer set by
+                                    // PipeWire at buffer allocation time.
+                                    unsafe { (*pw_buf_ptr).buffer as *const _ }
+                                };
+
+                            struct SpaRawPtr(*const pipewire::spa::sys::spa_buffer);
+                            impl crate::wayland_portal::cursor::SpaBufferLike for SpaRawPtr {
+                                fn as_raw_spa_buffer(
+                                    &self,
+                                ) -> *const pipewire::spa::sys::spa_buffer {
+                                    self.0
+                                }
+                            }
+
+                            let adapter = SpaRawPtr(spa_buf_ptr);
+                            match unsafe {
+                                crate::wayland_portal::cursor::read_meta_cursor(&adapter)
+                            } {
+                                Ok(Some(c)) => {
+                                    let _ = cursor_tx_cb.try_send(c);
+                                }
+                                Ok(None) => {} // id==0; no new metadata
+                                Err(crate::wayland_portal::cursor::CursorMetaError::Absent) => {
+                                    // Expected on Embedded-mode streams and first frames
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "cursor meta parse failed");
+                                }
+                            }
+                        }
+
                         let datas = buf.datas_mut();
                         let Some(d) = datas.first_mut() else { return };
 
@@ -503,13 +582,13 @@ impl PipeWireStream {
             })
             .map_err(|e| PipeWireStreamError::SpawnFailed(e.to_string()))?;
 
-        Ok(Self {
+        let stream = Self {
             thread: Some(thread),
             quit_tx,
             stop,
-            rx,
             current_size,
-        })
+        };
+        Ok((stream, rx, cursor_rx))
     }
 
     /// Orderly shutdown: sends `Shutdown` to the mainloop and joins the thread.
@@ -522,12 +601,6 @@ impl PipeWireStream {
                 tracing::warn!(?e, "PipeWire mainloop thread join failed");
             }
         }
-    }
-
-    /// Mutable reference to the frame receiver. The `Capturer` (T6) owns the
-    /// `PipeWireStream` and drives this receiver on the tokio runtime.
-    pub fn rx(&mut self) -> &mut mpsc::Receiver<RawFrame> {
-        &mut self.rx
     }
 
     /// Last negotiated (width, height). Returns `(0, 0)` before the first
@@ -691,5 +764,28 @@ mod tests {
         // side parse test lives in format::tests::parse_round_trip_bgra (T2).
         let pods = build_format_params();
         assert_eq!(pods.as_pods().len(), 1, "exactly one EnumFormat POD");
+    }
+
+    #[test]
+    fn pipewire_stream_connect_emits_two_receivers() {
+        // Compile-time type-shape assertion: verify the connect() signature
+        // returns a 3-tuple (Self, frame_rx, cursor_rx). The assignment below
+        // fails to compile if PipeWireStream::connect returned a different shape.
+        // The value is never called — the type check is the sole assertion.
+        type ConnectFn = fn(
+            std::os::fd::OwnedFd,
+            u32,
+            usize,
+            usize,
+        ) -> Result<
+            (
+                PipeWireStream,
+                mpsc::Receiver<RawFrame>,
+                mpsc::Receiver<crate::wayland_portal::cursor::CursorUpdate>,
+            ),
+            PipeWireStreamError,
+        >;
+        let _check: ConnectFn = PipeWireStream::connect;
+        let _ = _check;
     }
 }

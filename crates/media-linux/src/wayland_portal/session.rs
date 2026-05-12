@@ -129,6 +129,10 @@ pub struct PortalStartOutput {
     /// New restore token issued by the compositor (if any). Persist this with
     /// `PortalSessionToken::save` so the next session can skip the picker UI.
     pub restore_token: Option<String>,
+    /// Cursor mode that was actually negotiated with the portal.
+    /// `CursorMode::Metadata` when the compositor advertises it; otherwise
+    /// `CursorMode::Embedded` (cursor baked into the video frame).
+    pub cursor_mode: CursorMode,
 }
 
 // ---------------------------------------------------------------------------
@@ -164,12 +168,28 @@ impl PortalSession {
         tracing::info!("portal session: created");
 
         // 3. Configure which sources to capture.
-        //    Single monitor, embedded cursor, persistent until explicitly
-        //    revoked (so the compositor issues a restore token).
+        //    Single monitor, persistent until explicitly revoked (so the
+        //    compositor issues a restore token).
+        //
+        //    P5B-2b: probe available cursor modes and prefer Metadata so the
+        //    host receives per-frame spa_meta_cursor updates instead of baking
+        //    the cursor into the video frame. Fall back to Embedded if the
+        //    portal (or the compositor behind it) doesn't advertise Metadata.
+        let available_modes = proxy.available_cursor_modes().await.unwrap_or_default();
+        let cursor_mode = if available_modes.contains(CursorMode::Metadata) {
+            tracing::info!("portal advertises Metadata cursor mode — using it");
+            CursorMode::Metadata
+        } else {
+            tracing::warn!(
+                ?available_modes,
+                "portal does not advertise Metadata cursor mode — falling back to Embedded"
+            );
+            CursorMode::Embedded
+        };
         proxy
             .select_sources(
                 &session,
-                CursorMode::Embedded,
+                cursor_mode,
                 SourceType::Monitor.into(),
                 false, // multiple = false: one monitor only
                 restore_token,
@@ -209,6 +229,7 @@ impl PortalSession {
             pipewire_fd,
             pipewire_node_id,
             restore_token: new_restore_token,
+            cursor_mode,
         })
     }
 
