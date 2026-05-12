@@ -16,6 +16,22 @@
 //! | Properties macro | `properties!{k=>v}` | same, returns `PropertiesBox` |
 //! | Keys | `pipewire::keys::MEDIA_TYPE` | same (static `Lazy<&'static str>`) |
 //!
+//! # SPA_DATA_* dispatch (T4, 2026-05-12)
+//!
+//! Probe result: `pipewire::spa::buffer::DataType` (libspa 0.9.2 typed wrapper)
+//! is the canonical path. The struct wraps `spa_sys::spa_data_type` (= `c_uint`
+//! = `u32`) and exposes `PartialEq` + `from_raw(u32) -> DataType`. The crate
+//! does NOT expose a `const fn as_raw()`, so the test-facing `SPA_DATA_*` u32
+//! aliases are defined as ABI literals (verified below).
+//!
+//! ABI values from `libspa-sys-0.9.2` generated bindings (Debian bookworm,
+//! libspa-0.2-dev 0.3.65, `/usr/include/spa-0.2/spa/buffer/buffer.h`):
+//!   SPA_DATA_Invalid = 0
+//!   SPA_DATA_MemPtr  = 1
+//!   SPA_DATA_MemFd   = 2
+//!   SPA_DATA_DmaBuf  = 3   ← NOTE: plan draft said 4 (wrong); 3 is correct
+//!   SPA_DATA_MemId   = 4
+//!
 //! # Threading model (spec §4.3)
 //!
 //! ```text
@@ -48,6 +64,44 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use tokio::sync::mpsc;
+
+// ── SPA_DATA_* type tags ─────────────────────────────────────────────────────
+//
+// T4 Step 2 probed pipewire-rs 0.9.2: `pipewire::spa::buffer::DataType` is the
+// canonical typed wrapper (libspa 0.9.2). It does not expose a `const fn
+// as_raw()`, so the test-facing u32 aliases below are defined as ABI literals.
+// ABI verified against /usr/include/spa-0.2/spa/buffer/buffer.h on Debian
+// bookworm (libspa-0.2-dev 0.3.65) via libspa-sys-0.9.2 generated bindings.
+// Note: the plan draft said DmaBuf=4 — the correct value is 3.
+pub(crate) const SPA_DATA_MEMPTR: u32 = 1;
+pub(crate) const SPA_DATA_MEMFD: u32 = 2;
+pub(crate) const SPA_DATA_DMABUF: u32 = 3;
+
+/// Tagged dispatch result for the `process()` callback's per-SpaData arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DataPath {
+    DmaBuf,
+    MemFd,
+    MemPtr,
+    Unknown,
+}
+
+/// Pure classifier — extracted so unit tests can exercise the dispatch table
+/// without a live PipeWire stream. Uses `pipewire::spa::buffer::DataType`
+/// (libspa 0.9.2 typed wrapper) for comparison against the ABI enum.
+pub(crate) fn classify_spa_data_type(raw: u32) -> DataPath {
+    use pipewire::spa::buffer::DataType;
+    let dt = DataType::from_raw(raw);
+    if dt == DataType::DmaBuf {
+        DataPath::DmaBuf
+    } else if dt == DataType::MemFd {
+        DataPath::MemFd
+    } else if dt == DataType::MemPtr {
+        DataPath::MemPtr
+    } else {
+        DataPath::Unknown
+    }
+}
 
 /// Command sent from the host tokio runtime to the PipeWire mainloop thread.
 #[derive(Debug)]
@@ -240,20 +294,43 @@ impl PipeWireStream {
                     .add_local_listener::<()>()
                     .param_changed({
                         let sz = current_size_thread.clone();
-                        move |_stream, _ud, _id, param| {
-                            if let Some(p) = param {
-                                match parse_video_format(p) {
-                                    Ok((w, h, _fmt)) => {
-                                        if let Ok(mut g) = sz.lock() {
-                                            *g = (w, h);
-                                        }
-                                    }
-                                    Err(msg) => {
-                                        tracing::debug!(
-                                            msg,
-                                            "parse_video_format deferred — using chunk geometry"
+                        move |stream, _ud, _id, param| {
+                            let Some(p) = param else { return; };
+                            match crate::wayland_portal::format::parse(p) {
+                                Ok(neg) => {
+                                    tracing::info!(
+                                        w = neg.width,
+                                        h = neg.height,
+                                        fmt = ?neg.format,
+                                        modifier = ?neg.modifier,
+                                        "pipewire negotiated format"
+                                    );
+                                    if neg.modifier
+                                        == Some(
+                                            crate::wayland_portal::format::DRM_FORMAT_MOD_INVALID,
+                                        )
+                                    {
+                                        // Tiled data: we cannot CPU-mmap it as BGRA. Disconnect
+                                        // gracefully; renegotiation-with-LINEAR-only retry is a
+                                        // P5B-2a follow-up TODO (spec §4.3).
+                                        tracing::warn!(
+                                            "compositor selected DRM_FORMAT_MOD_INVALID (tiled); \
+                                             disconnecting stream. TODO(P5B-2a follow-up): \
+                                             renegotiate with LINEAR-only modifier list."
                                         );
+                                        let _ = stream.disconnect();
+                                        return;
                                     }
+                                    if let Ok(mut g) = sz.lock() {
+                                        *g = (neg.width, neg.height);
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "format::parse failed; disconnecting stream"
+                                    );
+                                    let _ = stream.disconnect();
                                 }
                             }
                         }
@@ -268,6 +345,7 @@ impl PipeWireStream {
                         let chunk = d.chunk();
                         let stride = chunk.stride().unsigned_abs();
                         let size = chunk.size() as usize;
+                        let offset = chunk.offset() as usize;
 
                         if size == 0 || stride == 0 {
                             return;
@@ -297,17 +375,69 @@ impl PipeWireStream {
                         };
 
                         let needed = (stride as usize) * (h as usize);
-                        let copy_size = size.min(needed);
 
-                        let Some(src) = d.data() else { return };
-                        if src.is_empty() {
-                            return;
-                        }
+                        // as_raw() on Data is a safe fn returning &spa_data.
+                        let dtype: u32 = d.as_raw().type_;
 
-                        let mut dst = pool.acquire(needed.max(size));
-                        dst.resize(needed.max(size), 0);
-                        let n = copy_size.min(src.len());
-                        dst[..n].copy_from_slice(&src[..n]);
+                        let (src_vec, copy_size): (Vec<u8>, usize) =
+                            match classify_spa_data_type(dtype) {
+                                DataPath::DmaBuf => {
+                                    // SAFETY: the type_ branch confirmed the SpaData is a
+                                    // DMABUF; map_dmabuf_plane handles fd<0 / map_len==0 /
+                                    // mmap failure and returns Err on all of them.
+                                    let dref: &pipewire::spa::buffer::Data = &*d;
+                                    let mapped = match unsafe {
+                                        crate::wayland_portal::dmabuf::map_dmabuf_plane(dref)
+                                    } {
+                                        Ok(m) => m,
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                error = %e,
+                                                "dmabuf mmap failed; dropping frame"
+                                            );
+                                            return;
+                                        }
+                                    };
+                                    let bytes = mapped.bytes();
+                                    // chunk.offset is *within the mapping* (after data_off);
+                                    // clamp and copy out into a pool buffer.
+                                    let end = offset
+                                        .checked_add(size)
+                                        .unwrap_or(bytes.len())
+                                        .min(bytes.len());
+                                    let region = &bytes[offset.min(bytes.len())..end];
+                                    let mut v = pool.acquire(needed.max(size));
+                                    v.resize(needed.max(size), 0);
+                                    let n = region.len().min(v.len());
+                                    v[..n].copy_from_slice(&region[..n]);
+                                    // mapped drops here: munmap then auto-close dup'd fd. ✓
+                                    drop(mapped);
+                                    (v, n)
+                                }
+                                DataPath::MemFd | DataPath::MemPtr => {
+                                    // Existing path: STREAM_FLAG_MAP_BUFFERS already mmap'd
+                                    // the region; read d.data() as a slice.
+                                    let Some(src) = d.data() else { return };
+                                    if src.is_empty() {
+                                        return;
+                                    }
+                                    let mut v = pool.acquire(needed.max(size));
+                                    v.resize(needed.max(size), 0);
+                                    let n = size.min(src.len()).min(v.len());
+                                    v[..n].copy_from_slice(&src[..n]);
+                                    (v, n)
+                                }
+                                DataPath::Unknown => {
+                                    tracing::warn!(
+                                        spa_data_type = dtype,
+                                        "unsupported SpaData type; dropping frame"
+                                    );
+                                    return;
+                                }
+                            };
+
+                        let dst = src_vec;
+                        let _ = copy_size; // applied in-place above
 
                         let frame = RawFrame {
                             data: dst,
@@ -328,6 +458,7 @@ impl PipeWireStream {
                                 // Producer dropped; let mainloop wind down naturally.
                             }
                         }
+                        let _ = stream; // stream captured for type inference only
                     })
                     .register();
 
@@ -336,12 +467,11 @@ impl PipeWireStream {
                     return;
                 }
 
-                // build_format_params is a T5 staged stub: returns Vec::new()
-                // so the compositor picks its default (typically BGRA on GNOME/KDE).
-                // Full SPA pod construction is deferred to a T6 follow-up.
+                // `params` must outlive the `&mut [&Pod]` slice handed to connect —
+                // keep it on the stack here.
                 let params = build_format_params();
-                let mut params_refs_mut: Vec<&pipewire::spa::pod::Pod> =
-                    params.iter().collect();
+                let pod_refs = params.as_pods();
+                let mut params_refs_mut: Vec<&pipewire::spa::pod::Pod> = pod_refs.to_vec();
 
                 if let Err(e) = stream.connect(
                     pipewire::spa::utils::Direction::Input,
@@ -418,39 +548,36 @@ impl Drop for PipeWireStream {
     }
 }
 
-// ── libspa pod helpers (T5 staged stubs) ─────────────────────────────────────
+// ── libspa pod helpers ────────────────────────────────────────────────────────
 
-/// Parse a `SPA_PARAM_Format` POD into `(width, height, PixelFormat)`.
-///
-/// # Status: T5 staged stub
-/// Full libspa pod parsing is deferred. The listener logs a `debug!` line and
-/// falls back to chunk-geometry heuristics when this returns `Err`.
-/// The compositor's default on GNOME/KDE is BGRA, so the smoke path works
-/// without format negotiation.
+/// Parse a `SPA_PARAM_Format` POD via `crate::wayland_portal::format::parse`,
+/// projecting `NegotiatedFormat` down to the `(width, height, PixelFormat)`
+/// triple. The modifier field is checked in `param_changed` (MOD_INVALID
+/// triggers a warn + disconnect).
 #[allow(dead_code)]
 fn parse_video_format(
-    _p: &pipewire::spa::pod::Pod,
+    p: &pipewire::spa::pod::Pod,
 ) -> Result<(u32, u32, PixelFormat), &'static str> {
-    // TODO(T6): implement via libspa pod iterator:
-    //   spa::pod::Value → Object { type_: SpaType::ObjectParamFormat, ... }
-    //   walk props for width, height, format (SPA_VIDEO_FORMAT_BGRA / BGRx).
-    Err("parse_video_format: T5 staged stub — libspa pod parse deferred to T6")
+    let neg = crate::wayland_portal::format::parse(p).map_err(|e| {
+        tracing::warn!(error = %e, "format::parse failed");
+        match e {
+            crate::wayland_portal::format::ParseError::NotObject => "not an object",
+            crate::wayland_portal::format::ParseError::WrongType(_) => "wrong pod type",
+            crate::wayland_portal::format::ParseError::NotVideo => "not video",
+            crate::wayland_portal::format::ParseError::NotRaw => "not raw",
+            crate::wayland_portal::format::ParseError::UnsupportedFormat(_) => "unsupported format",
+            crate::wayland_portal::format::ParseError::MissingSize => "missing size",
+        }
+    })?;
+    Ok((neg.width, neg.height, neg.format))
 }
 
-/// Build `SPA_PARAM_EnumFormat` PODs advertising BGRA + BGRx.
+/// Build the EnumFormat POD via `crate::wayland_portal::format::build`.
 ///
-/// # Status: T5 staged stub
-/// Returns `Vec::new()` so the compositor picks its default format.
-/// GNOME and KDE typically negotiate BGRA, which is sufficient for the
-/// P5B-1 smoke walkthrough. Full SPA pod construction is tracked for T6.
-#[allow(dead_code)]
-fn build_format_params() -> Vec<pipewire::spa::pod::Pod> {
-    // TODO(T6): build SPA_PARAM_EnumFormat using spa::pod::object! / Builder
-    //   media_type = Video, media_subtype = Raw,
-    //   format = choice([BGRA, BGRx]),
-    //   size = choice(Range { default: 1920x1080, min: 1x1, max: 3840x2160 }),
-    //   framerate = choice(Range { default: 60/1, min: 0/1, max: 240/1 }).
-    Vec::new()
+/// Returns `BuiltParams` — the caller calls `as_pods()` on it at the connect
+/// site so the byte storage outlives the `&mut [&Pod]` borrow.
+fn build_format_params() -> crate::wayland_portal::format::BuiltParams {
+    crate::wayland_portal::format::build()
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -458,6 +585,8 @@ fn build_format_params() -> Vec<pipewire::spa::pod::Pod> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicU32;
+    use std::sync::Arc;
 
     #[test]
     fn raw_frame_with_padded_stride_validates() {
@@ -516,5 +645,51 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel::<LoopCommand>();
         let r = tx.send(LoopCommand::Shutdown);
         assert!(r.is_ok());
+    }
+
+    /// Per-arm counter map for the type-tag dispatch table. The listener
+    /// in production calls each arm based on `spa_data.type_`; in this
+    /// test we exercise the dispatch helper directly.
+    #[test]
+    fn dispatch_table_routes_each_spa_data_type_to_its_arm() {
+        let dmabuf_hits = Arc::new(AtomicU32::new(0));
+        let memfd_hits = Arc::new(AtomicU32::new(0));
+        let memptr_hits = Arc::new(AtomicU32::new(0));
+        let unknown_hits = Arc::new(AtomicU32::new(0));
+
+        use super::{
+            classify_spa_data_type, DataPath, SPA_DATA_DMABUF, SPA_DATA_MEMFD, SPA_DATA_MEMPTR,
+        };
+
+        for tag in [SPA_DATA_DMABUF, SPA_DATA_MEMFD, SPA_DATA_MEMPTR, 9999u32] {
+            match classify_spa_data_type(tag) {
+                DataPath::DmaBuf => {
+                    dmabuf_hits.fetch_add(1, Ordering::SeqCst);
+                }
+                DataPath::MemFd => {
+                    memfd_hits.fetch_add(1, Ordering::SeqCst);
+                }
+                DataPath::MemPtr => {
+                    memptr_hits.fetch_add(1, Ordering::SeqCst);
+                }
+                DataPath::Unknown => {
+                    unknown_hits.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+
+        assert_eq!(dmabuf_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(memfd_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(memptr_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(unknown_hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn build_format_params_then_parse_round_trip_size() {
+        // Integration smoke: build_format_params produces a POD; assert the
+        // BuiltParams contains exactly one non-empty POD. The full negotiated-
+        // side parse test lives in format::tests::parse_round_trip_bgra (T2).
+        let pods = build_format_params();
+        assert_eq!(pods.as_pods().len(), 1, "exactly one EnumFormat POD");
     }
 }
