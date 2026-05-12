@@ -10,8 +10,10 @@ use std::time::Duration;
 use tokio::time::{interval, Interval, MissedTickBehavior};
 
 pub struct LinuxSwProducer {
-    /// `Option` so we can move it into `spawn_blocking` and back. Never
-    /// `None` outside the await boundary.
+    /// `Option` so we can move it into `spawn_blocking` and back. Once a
+    /// `spawn_blocking` task panics, `poisoned` is set and the producer
+    /// permanently returns `Terminal`; callers are expected to drop and rebuild
+    /// via the policy-driven failover.
     capture: Option<Box<dyn CaptureSource>>,
     encoder: Option<LinuxSwEncoder>,
     bgra_buf: Vec<u8>,
@@ -20,6 +22,12 @@ pub struct LinuxSwProducer {
     idr_pending: bool,
     width: u32,
     height: u32,
+    /// Set when a `spawn_blocking` task panics. Once `true`, every subsequent
+    /// `next_frame()` returns immediately without panicking. Caller must drop
+    /// and recreate the producer.
+    poisoned: bool,
+    /// Set after the first geometry-change warning so we don't spam the log.
+    resize_warned: bool,
 }
 
 impl LinuxSwProducer {
@@ -39,6 +47,8 @@ impl LinuxSwProducer {
             idr_pending: true,
             width,
             height,
+            poisoned: false,
+            resize_warned: false,
         })
     }
 }
@@ -57,6 +67,12 @@ fn make_pacer(fps: u32) -> Interval {
 #[async_trait::async_trait]
 impl VideoProducer for LinuxSwProducer {
     async fn next_frame(&mut self) -> Result<EncodedFrame, ProducerError> {
+        if self.poisoned {
+            return Err(ProducerError::Capture(
+                "producer poisoned by inner panic: drop and recreate".into(),
+            ));
+        }
+
         self.pacer.tick().await;
 
         // capture_into is blocking (Wayland path blocks on rx.recv from the
@@ -67,17 +83,41 @@ impl VideoProducer for LinuxSwProducer {
             .capture
             .take()
             .expect("capture taken twice; producer state corrupted");
-        let (bgra, capture, capture_result) = tokio::task::spawn_blocking(move || {
+        let capture_join = tokio::task::spawn_blocking(move || {
             let r = capture.capture_into(&mut bgra);
             (bgra, capture, r)
         })
-        .await
-        .map_err(|e| ProducerError::Other(format!("spawn_blocking capture join: {e}")))?;
+        .await;
+        let (bgra, capture, capture_result) = match capture_join {
+            Ok(triple) => triple,
+            Err(e) => {
+                self.poisoned = true;
+                return Err(ProducerError::Capture(format!(
+                    "producer poisoned by inner panic: {e}"
+                )));
+            }
+        };
         self.bgra_buf = bgra;
-        // Re-read geometry: Wayland can resize mid-session. L4 encoder reconfigure
-        // is already in place; on a size change the encoder rebuilds before the
-        // next encode (see set_target_bitrate / future reconfigure entry point).
+        // Re-read geometry: Wayland can resize mid-session. T1 only records the
+        // new values on the producer; an actual encoder rebuild on size change is
+        // NOT wired up here yet — see follow-up TODO below.
+        //
+        // TODO(P5B-2 / P5C): when `geometry()` changes mid-session, tear down and
+        // rebuild the encoder before the next encode. Until then, a Wayland resize
+        // will silently produce a size-mismatch in the encoder. The X11 path never
+        // resizes (root window is fixed at startup) so the X11 smoke path is
+        // unaffected.
         let (w, h) = capture.geometry();
+        if (w != self.width || h != self.height) && !self.resize_warned {
+            self.resize_warned = true;
+            tracing::warn!(
+                old_w = self.width,
+                old_h = self.height,
+                new_w = w,
+                new_h = h,
+                "capture geometry changed mid-session; encoder rebuild not yet wired (P5B-2)"
+            );
+        }
         self.width = w;
         self.height = h;
         self.capture = Some(capture);
@@ -105,7 +145,7 @@ impl VideoProducer for LinuxSwProducer {
             .encoder
             .take()
             .expect("encoder taken twice; producer state corrupted");
-        let join = tokio::task::spawn_blocking(move || {
+        let encode_join = tokio::task::spawn_blocking(move || {
             let frame = crate::frame::BgraFrame {
                 width,
                 height,
@@ -116,9 +156,16 @@ impl VideoProducer for LinuxSwProducer {
             let result = enc.encode(&frame, force_idr, ts_us);
             (enc, frame.bgra, result)
         })
-        .await
-        .map_err(|e| ProducerError::Other(format!("spawn_blocking join: {e}")))?;
-        let (enc_back, bgra_back, encode_result) = join;
+        .await;
+        let (enc_back, bgra_back, encode_result) = match encode_join {
+            Ok(triple) => triple,
+            Err(e) => {
+                self.poisoned = true;
+                return Err(ProducerError::Capture(format!(
+                    "producer poisoned by inner panic: {e}"
+                )));
+            }
+        };
         self.encoder = Some(enc_back);
         self.bgra_buf = bgra_back;
 

@@ -20,10 +20,19 @@ use thiserror::Error;
 /// tick once and retry on the next pacer beat.
 #[derive(Debug, Error)]
 pub enum CaptureSourceError {
-    /// No frame was available in the configured wait window. The producer
-    /// converts this into a no-op tick (pacer advances but no encoded frame
-    /// is emitted), matching how the existing X11 path handles a slow X
-    /// server.
+    /// No frame was available in the configured wait window.
+    ///
+    /// **Current handling** (P5B-1): the producer surfaces this as
+    /// `ProducerError::Capture("would_block: <reason>")`, which the session loop
+    /// treats the same as any other capture failure.  Future work (P5B-2 or
+    /// later) may distinguish this from `Terminal` and tick-and-retry instead of
+    /// failing the session; until then `WouldBlock` and `Terminal` are
+    /// behaviourally identical at the producer level — backends should use
+    /// `WouldBlock` only when the condition is genuinely transient (e.g. a
+    /// PipeWire empty-queue wakeup) so the future tick-and-retry wiring lands
+    /// without ambiguity.
+    ///
+    /// Carries a short reason string for log triage.
     #[error("would block: {0}")]
     WouldBlock(String),
 

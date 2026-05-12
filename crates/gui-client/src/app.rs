@@ -484,10 +484,10 @@ mod tests {
             .unwrap();
         let _guard = rt.enter();
 
-        let (tx, rx) =
-            tokio::sync::mpsc::unbounded_channel::<prdt_host::ConsentRequest>();
-        let mut consent_rx: Option<tokio::sync::mpsc::UnboundedReceiver<prdt_host::ConsentRequest>> =
-            Some(rx);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<prdt_host::ConsentRequest>();
+        let mut consent_rx: Option<
+            tokio::sync::mpsc::UnboundedReceiver<prdt_host::ConsentRequest>,
+        > = Some(rx);
         let mut pending: Option<PendingPrompt> = None;
         let host_auth = HostAuthConfig::default();
 
@@ -513,10 +513,10 @@ mod tests {
             .unwrap();
         let _guard = rt.enter();
 
-        let (tx, rx) =
-            tokio::sync::mpsc::unbounded_channel::<prdt_host::ConsentRequest>();
-        let mut consent_rx: Option<tokio::sync::mpsc::UnboundedReceiver<prdt_host::ConsentRequest>> =
-            Some(rx);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<prdt_host::ConsentRequest>();
+        let mut consent_rx: Option<
+            tokio::sync::mpsc::UnboundedReceiver<prdt_host::ConsentRequest>,
+        > = Some(rx);
         let mut pending: Option<PendingPrompt> = None;
         let host_auth = HostAuthConfig::default();
 

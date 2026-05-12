@@ -75,6 +75,11 @@ impl Encoder for LinuxOpenh264Encoder {
     }
 
     fn backend_name(&self) -> &'static str {
+        // NOTE: This is the L0 `Encoder` trait surface, NOT the production
+        // VideoProducer.backend_name(). The production path uses
+        // LinuxSwProducer::backend_name() which returns "linux-openh264"
+        // (capture-axis-independent so a future Wayland landing doesn't flicker
+        // the viewer-overlay HUD). Keep both names stable.
         "linux-x11shm-openh264"
     }
 }
