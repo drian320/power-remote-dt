@@ -128,8 +128,18 @@ pub fn probe() -> std::sync::Arc<dyn prdt_media_policy::CapabilityProbe> {
     std::sync::Arc::new(prdt_media_linux::policy::LinuxSwProbe)
 }
 
-pub fn factory() -> std::sync::Arc<dyn prdt_media_policy::ProducerFactory> {
-    std::sync::Arc::new(prdt_media_linux::policy::LinuxSwFactory)
+pub fn factory(
+    capture_backend_arg: &str,
+) -> std::sync::Arc<dyn prdt_media_policy::ProducerFactory> {
+    use prdt_media_linux::policy::{detect_capture_backend, CaptureBackendChoice, LinuxSwFactory};
+    let choice = CaptureBackendChoice::parse(capture_backend_arg);
+    let backend = detect_capture_backend(choice);
+    tracing::info!(
+        choice = ?choice,
+        resolved = ?backend,
+        "P5B-1 capture backend resolved"
+    );
+    std::sync::Arc::new(LinuxSwFactory::new(backend))
 }
 
 #[cfg(test)]

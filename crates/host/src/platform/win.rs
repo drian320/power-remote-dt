@@ -522,6 +522,9 @@ pub fn probe() -> std::sync::Arc<dyn prdt_media_policy::CapabilityProbe> {
     std::sync::Arc::new(prdt_media_win::policy::WindowsProbe)
 }
 
-pub fn factory() -> std::sync::Arc<dyn prdt_media_policy::ProducerFactory> {
+pub fn factory(
+    _capture_backend_arg: &str,
+) -> std::sync::Arc<dyn prdt_media_policy::ProducerFactory> {
+    // Windows has no Wayland axis; arg is ignored.
     std::sync::Arc::new(prdt_media_win::policy::WindowsFactory)
 }

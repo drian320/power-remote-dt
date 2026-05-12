@@ -1,16 +1,10 @@
-//! P5A capability/factory integration for Linux.
+//! P5A capability/factory integration + P5B-1 capture-backend probe.
 //!
-//! Only the OpenH264 SW path is available today. VAAPI / V4L2 / NVENC-Linux
-//! are P5C scope.
-//!
-//! # Factory design note
-//!
-//! `LinuxSwFactory::create` wraps `prdt_media_linux::build_video_producer`
-//! which internally creates an `X11ShmCapturer` (reads geometry from the X
-//! server) and a `LinuxSwEncoder`. Width/height therefore come from the live X
-//! session rather than from `ProducerConfig`; the config values are used only
-//! for `bitrate_bps` and `fps`. This is a Linux-specific constraint: X11 root
-//! geometry is implicit, not passed as a constructor argument.
+//! `LinuxSwProbe` (P5A) reports the encoder side (Openh264 only on Linux).
+//! `CaptureBackend` (P5B-1) selects the *capture* side: X11 MIT-SHM or the
+//! xdg-desktop-portal ScreenCast path. The two axes don't interact today —
+//! Linux ships Openh264 regardless of capture choice — so the policy stays
+//! single-axis (P5C may revisit when VAAPI/NVENC-Linux land).
 
 #![cfg(target_os = "linux")]
 
@@ -19,9 +13,10 @@ use prdt_media_policy::{
     ProducerFactory,
 };
 use prdt_protocol::VideoProducer;
+use std::time::Duration;
 
 // ---------------------------------------------------------------------------
-// Probe
+// Encoder-side probe (unchanged from P5A)
 // ---------------------------------------------------------------------------
 
 pub struct LinuxSwProbe;
@@ -40,10 +35,142 @@ impl CapabilityProbe for LinuxSwProbe {
 }
 
 // ---------------------------------------------------------------------------
+// Capture-side backend
+// ---------------------------------------------------------------------------
+
+/// Concrete capture-side choice as resolved by `detect_capture_backend`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureBackend {
+    X11Shm,
+    WaylandPortal,
+}
+
+/// CLI-level choice. `Auto` is the default and runs the 3-step probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureBackendChoice {
+    Auto,
+    X11,
+    Wayland,
+}
+
+impl CaptureBackendChoice {
+    /// Parse the `--capture-backend <auto|x11|wayland>` CLI value. Returns
+    /// `Auto` for unknown strings after logging a warn — matches the
+    /// `--encoder` parser's tolerance.
+    pub fn parse(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "auto" => Self::Auto,
+            "x11" => Self::X11,
+            "wayland" => Self::Wayland,
+            other => {
+                tracing::warn!(
+                    capture_backend = %other,
+                    "unknown --capture-backend value; treating as auto"
+                );
+                Self::Auto
+            }
+        }
+    }
+}
+
+/// Resolve the capture-side backend choice.
+///
+/// 1. Honour an explicit CLI override (`X11` / `Wayland`).
+/// 2. Otherwise check `WAYLAND_DISPLAY`: if unset, pick X11 (this covers WSLg
+///    and pure X11 sessions cheaply, with no D-Bus traffic).
+/// 3. Otherwise call `portal_runtime_available_blocking` (D-Bus `NameHasOwner`
+///    against `org.freedesktop.portal.Desktop`, 1s timeout). If the call
+///    fails or the portal isn't there, log a warn and fall back to X11.
+///
+/// The probe never calls `CreateSession` — that would fire the consent
+/// dialog every time we probe. The dialog only fires inside
+/// `WaylandPortalCapturer::new` when we actually intend to capture.
+pub fn detect_capture_backend(choice: CaptureBackendChoice) -> CaptureBackend {
+    match choice {
+        CaptureBackendChoice::X11 => return CaptureBackend::X11Shm,
+        CaptureBackendChoice::Wayland => return CaptureBackend::WaylandPortal,
+        CaptureBackendChoice::Auto => {}
+    }
+    if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        tracing::info!("WAYLAND_DISPLAY unset; selecting X11 capture backend");
+        return CaptureBackend::X11Shm;
+    }
+    match portal_runtime_available_blocking(Duration::from_secs(1)) {
+        Ok(true) => {
+            tracing::info!("xdg-desktop-portal reachable; selecting Wayland capture backend");
+            CaptureBackend::WaylandPortal
+        }
+        Ok(false) => {
+            tracing::warn!(
+                "WAYLAND_DISPLAY set but xdg-desktop-portal unreachable; falling back to X11"
+            );
+            CaptureBackend::X11Shm
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "portal probe failed; falling back to X11");
+            CaptureBackend::X11Shm
+        }
+    }
+}
+
+/// Synchronous D-Bus probe. Spins up a tiny `current_thread` tokio runtime
+/// (so we don't depend on being called from one), opens the session bus,
+/// asks `NameHasOwner("org.freedesktop.portal.Desktop")`, and tears down.
+///
+/// Wall-clock timeout = `timeout`. On timeout returns `Ok(false)` (treat as
+/// "portal not available") rather than `Err`, so a slow login doesn't kill
+/// startup; if the timeout proves too tight in smoke (spec §11), bump to 3s
+/// as a follow-up commit — do not bump pre-emptively.
+pub fn portal_runtime_available_blocking(timeout: Duration) -> Result<bool, anyhow::Error> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| anyhow::anyhow!("portal probe tokio runtime: {e}"))?;
+    rt.block_on(async move {
+        let fut = async {
+            let conn = zbus::Connection::session().await?;
+            let proxy = zbus::fdo::DBusProxy::new(&conn).await?;
+            let has = proxy
+                .name_has_owner(zbus::names::BusName::WellKnown(
+                    zbus::names::WellKnownName::try_from("org.freedesktop.portal.Desktop")?,
+                ))
+                .await?;
+            Ok::<bool, anyhow::Error>(has)
+        };
+        match tokio::time::timeout(timeout, fut).await {
+            Ok(Ok(b)) => Ok(b),
+            Ok(Err(e)) => {
+                tracing::debug!(error = %e, "portal probe NameHasOwner returned err");
+                Ok(false)
+            }
+            Err(_elapsed) => {
+                tracing::debug!(?timeout, "portal probe timed out");
+                Ok(false)
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
 
-pub struct LinuxSwFactory;
+/// Producer factory. `capture_backend` is fixed at construction time: the
+/// host resolves it once via `detect_capture_backend(args.into())` before
+/// building the factory.
+pub struct LinuxSwFactory {
+    capture_backend: CaptureBackend,
+}
+
+impl LinuxSwFactory {
+    pub fn new(capture_backend: CaptureBackend) -> Self {
+        Self { capture_backend }
+    }
+
+    pub fn capture_backend(&self) -> CaptureBackend {
+        self.capture_backend
+    }
+}
 
 impl ProducerFactory for LinuxSwFactory {
     fn create(
@@ -57,14 +184,22 @@ impl ProducerFactory for LinuxSwFactory {
                 "Linux P5A only supports Openh264; VAAPI/V4L2/NVENC-Linux deferred to P5C".into(),
             ));
         }
-
-        // `build_video_producer` derives width/height from the live X11 root
-        // window via X11ShmCapturer. The ProducerConfig w/h values are advisory
-        // (used for validation / policy decisions) but not passed to the
-        // constructor here — they are implicit from the X server.
-        let producer = crate::build_video_producer(cfg.initial_bitrate_bps, cfg.fps)
-            .map_err(|e| FactoryError::InvalidConfig(kind, e.to_string()))?;
-
+        // T7 fills the Wayland arm in; for now route both through the X11
+        // helper so the test gate stays green between T2 and T7.
+        let producer = match self.capture_backend {
+            CaptureBackend::X11Shm => crate::build_video_producer(cfg.initial_bitrate_bps, cfg.fps)
+                .map_err(|e| FactoryError::InvalidConfig(kind, e.to_string()))?,
+            CaptureBackend::WaylandPortal => {
+                crate::build_video_producer(cfg.initial_bitrate_bps, cfg.fps).map_err(|e| {
+                    FactoryError::InvalidConfig(
+                        kind,
+                        format!(
+                        "wayland-portal capturer not wired yet (T7); legacy X11 path failed: {e}"
+                    ),
+                    )
+                })?
+            }
+        };
         Ok(Box::new(producer))
     }
 }
@@ -85,7 +220,7 @@ mod tests {
 
     #[test]
     fn linux_factory_rejects_nvenc() {
-        let factory = LinuxSwFactory;
+        let factory = LinuxSwFactory::new(CaptureBackend::X11Shm);
         let cfg = ProducerConfig {
             width: 1920,
             height: 1080,
@@ -94,17 +229,15 @@ mod tests {
             codec: Codec::H264,
         };
         let result = factory.create(BackendKind::Nvenc, &cfg);
-        assert!(result.is_err());
-        match result {
-            Err(FactoryError::Unavailable(BackendKind::Nvenc, _)) => {}
-            Err(other) => panic!("expected Unavailable(Nvenc), got Err({other})"),
-            Ok(_) => panic!("expected Err, got Ok"),
-        }
+        assert!(matches!(
+            result,
+            Err(FactoryError::Unavailable(BackendKind::Nvenc, _))
+        ));
     }
 
     #[test]
     fn linux_factory_rejects_mf_hevc() {
-        let factory = LinuxSwFactory;
+        let factory = LinuxSwFactory::new(CaptureBackend::X11Shm);
         let cfg = ProducerConfig {
             width: 1920,
             height: 1080,
@@ -113,11 +246,81 @@ mod tests {
             codec: Codec::H264,
         };
         let result = factory.create(BackendKind::MfHevc, &cfg);
-        assert!(result.is_err());
-        match result {
-            Err(FactoryError::Unavailable(BackendKind::MfHevc, _)) => {}
-            Err(other) => panic!("expected Unavailable(MfHevc), got Err({other})"),
-            Ok(_) => panic!("expected Err, got Ok"),
+        assert!(matches!(
+            result,
+            Err(FactoryError::Unavailable(BackendKind::MfHevc, _))
+        ));
+    }
+
+    // ----- P5B-1 probe tests -----
+
+    use std::env;
+
+    /// Helper to clear/set env vars for the duration of one test.
+    /// Uses `unsafe` because `std::env::set_var` / `remove_var` are not
+    /// thread-safe; we rely on `cargo test --lib` running these probe tests
+    /// sequentially (they are not marked `#[tokio::test]` so no parallel
+    /// async executor is involved).
+    struct ScopedEnv {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+    impl ScopedEnv {
+        fn unset(key: &'static str) -> Self {
+            let prev = env::var_os(key);
+            // SAFETY: single-threaded test runner; no concurrent env reads.
+            unsafe { env::remove_var(key) };
+            Self { key, prev }
         }
+        fn set(key: &'static str, val: &str) -> Self {
+            let prev = env::var_os(key);
+            // SAFETY: single-threaded test runner; no concurrent env reads.
+            unsafe { env::set_var(key, val) };
+            Self { key, prev }
+        }
+    }
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            match &self.prev {
+                // SAFETY: single-threaded test runner; no concurrent env reads.
+                Some(v) => unsafe { env::set_var(self.key, v) },
+                None => unsafe { env::remove_var(self.key) },
+            }
+        }
+    }
+
+    #[test]
+    fn detect_backend_x11_when_wayland_display_unset() {
+        let _guard = ScopedEnv::unset("WAYLAND_DISPLAY");
+        let got = detect_capture_backend(CaptureBackendChoice::Auto);
+        assert_eq!(got, CaptureBackend::X11Shm);
+    }
+
+    #[test]
+    fn detect_backend_cli_override_forces_x11_even_with_wayland_display() {
+        let _guard = ScopedEnv::set("WAYLAND_DISPLAY", "wayland-fake");
+        let got = detect_capture_backend(CaptureBackendChoice::X11);
+        assert_eq!(got, CaptureBackend::X11Shm);
+    }
+
+    #[test]
+    fn detect_backend_cli_override_forces_wayland_even_without_display() {
+        let _guard = ScopedEnv::unset("WAYLAND_DISPLAY");
+        let got = detect_capture_backend(CaptureBackendChoice::Wayland);
+        assert_eq!(got, CaptureBackend::WaylandPortal);
+    }
+
+    #[test]
+    fn detect_backend_auto_falls_back_to_x11_when_portal_unreachable() {
+        // Simulate "WAYLAND_DISPLAY set but no session bus" by pointing
+        // DBUS_SESSION_BUS_ADDRESS at a path that can't be opened. The probe
+        // should warn + return X11Shm, not panic, not hang.
+        let _g1 = ScopedEnv::set("WAYLAND_DISPLAY", "wayland-fake");
+        let _g2 = ScopedEnv::set(
+            "DBUS_SESSION_BUS_ADDRESS",
+            "unix:path=/nonexistent/prdt-test",
+        );
+        let got = detect_capture_backend(CaptureBackendChoice::Auto);
+        assert_eq!(got, CaptureBackend::X11Shm);
     }
 }
