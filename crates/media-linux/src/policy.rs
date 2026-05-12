@@ -189,30 +189,39 @@ impl ProducerFactory for LinuxSwFactory {
                 "Linux P5A only supports Openh264; VAAPI/V4L2/NVENC-Linux deferred to P5C".into(),
             ));
         }
-        // T7 fills the Wayland arm in; for now route both through the X11
-        // helper so the test gate stays green between T2 and T7.
         let producer = match self.capture_backend {
             CaptureBackend::X11Shm => crate::build_video_producer(cfg.initial_bitrate_bps, cfg.fps)
                 .map_err(|e| FactoryError::InvalidConfig(kind, e.to_string()))?,
             CaptureBackend::WaylandPortal => {
-                // T5/T6 deferred — pipewire runtime is not built on this branch.
-                // WaylandPortalCapturer::new() returns NotImplemented from T4's
-                // stub; we propagate it as Unavailable so operator gets a clean
-                // error fast instead of a silent X11 substitution.
-                let cap_result = crate::wayland_portal::WaylandPortalCapturer::new();
-                return Err(FactoryError::Unavailable(
-                    kind,
-                    format!(
-                        "WaylandPortal capture backend is in the Foundation-only milestone; \
-                         T5/T6 (PipeWire runtime) deferred — see commit 684f43d. \
-                         Use --capture-backend x11 or omit the flag. Inner: {:?}",
-                        cap_result.err()
-                    ),
-                ));
+                let token_path = default_portal_token_path();
+                // WaylandPortalCapturer::new is async; ProducerFactory::create is
+                // sync. Spin up a tiny current_thread runtime to drive the portal
+                // session establishment. (The capturer itself takes care of its
+                // own internal threading once running — the producer's per-frame
+                // capture_into is sync and uses blocking_recv.)
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| FactoryError::Unavailable(kind, format!("portal runtime: {e}")))?;
+                let cap = rt
+                    .block_on(crate::wayland_portal::WaylandPortalCapturer::new(
+                        token_path,
+                    ))
+                    .map_err(|e| {
+                        FactoryError::Unavailable(kind, format!("WaylandPortalCapturer::new: {e}"))
+                    })?;
+                crate::build_video_producer_with(Box::new(cap), cfg.initial_bitrate_bps, cfg.fps)
+                    .map_err(|e| FactoryError::InvalidConfig(kind, e.to_string()))?
             }
         };
         Ok(Box::new(producer))
     }
+}
+
+fn default_portal_token_path() -> std::path::PathBuf {
+    dirs::config_dir()
+        .map(|d| d.join("prdt").join("portal-session.toml"))
+        .unwrap_or_else(|| std::path::PathBuf::from("portal-session.toml"))
 }
 
 #[cfg(test)]
@@ -361,15 +370,25 @@ mod tests {
     }
 
     #[test]
-    fn linux_factory_forced_wayland_returns_unavailable_in_foundation() {
+    fn linux_factory_forced_wayland_without_session_surfaces_unavailable() {
+        // In a hermetic test environment there is no working portal / session
+        // bus, so WaylandPortalCapturer::new errors out and the factory
+        // propagates it as Unavailable. The assertion accepts any message that
+        // references the portal, session, or capturer — Foundation markers are
+        // gone.
         let factory = LinuxSwFactory::new(CaptureBackend::WaylandPortal);
         let cfg = make_cfg();
         let result = factory.create(BackendKind::Openh264, &cfg);
         match result {
             Err(FactoryError::Unavailable(BackendKind::Openh264, msg)) => {
+                let lower = msg.to_ascii_lowercase();
                 assert!(
-                    msg.contains("Foundation") || msg.contains("T5") || msg.contains("T6"),
-                    "expected Foundation marker in error message, got: {msg}"
+                    lower.contains("portal")
+                        || lower.contains("session")
+                        || lower.contains("wayland")
+                        || lower.contains("ashpd")
+                        || lower.contains("waylandportalcapturer"),
+                    "expected portal/session/wayland/ashpd marker in error message, got: {msg}"
                 );
             }
             _ => panic!("expected Err(Unavailable(Openh264, _))"),

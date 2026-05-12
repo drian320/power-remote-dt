@@ -9,3 +9,4 @@ Cargo.lock
 /tmp/
 /.omc/state/
 crates/gui-host/assets/*.png
+target-docker/

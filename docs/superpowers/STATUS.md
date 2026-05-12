@@ -1,7 +1,7 @@
 # power-remote-dt — Project Status & Roadmap
 
 **Last updated:** 2026-05-12
-**Latest tag:** `phase-p5b1-wayland-portal-foundation-complete`
+**Latest tag:** `phase-p5b1-t5-t6-pipewire-runtime-complete`
 **Branch state:** `phase0-sw-codec-wire` (post-tag) — **Phase 4 + Plan 4 B1 + B4 + B6 + B7 + B8 完了 + MF エンコーダ fallback 完了 + host session liveness 完了 + NVDEC arc-swap 化 完了 + ソフトウェアコーデック OpenH264 完了 (B3 のみ HW ブロック保留)**
 **Test count:** 348+ automated Rust tests + 11 Python tests; new crate `prdt-media-sw` 6 tests (Phase 1) + Phase 0 protocol/transport new tests + Phase 5 latency-bench new test (≥10 new tests per plan §8 acceptance)
 
@@ -253,6 +253,58 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
     input/clipboard/audio, HW encoder on Linux.
   - **Smoke walkthrough**: `docs/superpowers/p5b1-smoke-walkthrough.md`
     (GNOME dialog reachability + WSLg X11 regression + probe priority).
+
+- **P5B-1 successor (`phase-p5b1-t5-t6-pipewire-runtime`, 2026-05-12)**:
+  Lands the deferred PipeWire runtime on top of the Foundation milestone.
+  `--capture-backend wayland` now produces real frames from the portal's
+  ScreenCast PipeWire stream instead of returning `FactoryError::Unavailable`.
+  PR: TBD.
+  - **`wayland_portal/stream.rs`** (new, T5): dedicated `std::thread` runs
+    the PipeWire mainloop (types are `!Send + !Sync`); cross-thread plumbing
+    is `tokio::sync::mpsc::channel::<RawFrame>(2)` with `try_send` (drop-on-
+    full latest-only semantics matching the X11 path), `pipewire::channel`
+    for `LoopCommand::Shutdown`, `Arc<std::sync::Mutex<(u32, u32)>>` for
+    current geometry. `RawFrame { data, width, height, stride, ts_us }` +
+    `row(y)` helper handles padded-stride frames (Intel iGPU 64-byte
+    alignment). `FramePool` (cap=2) amortises Vec allocation. pipewire
+    0.9.2 API paths adapted from the plan's 0.8 sample: `MainLoopRc`,
+    `ContextBox`, `StreamBox`, `attach(loop_(), …)`.
+  - **`wayland_portal/capturer.rs`** (rewritten, T6): real
+    `WaylandPortalCapturer::new(token_path)` flow: load_or_default token
+    → `PortalSession::start_with_token_opt(token_opt)` → on
+    `RestoreTokenRejected` delete file + retry without token + warn →
+    `PipeWireStream::connect(fd, node_id)` → persist new restore_token if
+    portal returned one. `capture_into` uses `blocking_recv()` inside the
+    sync trait method (producer wraps in `spawn_blocking`); row-by-row
+    stride stripping when `frame.stride > frame.width * 4`. `shutdown(self)`
+    consumes self, joins the pipewire thread via
+    `PipeWireStream::shutdown`, awaits `PortalSession::close`. `Drop` impl
+    logs `warn!` on leak (shutdown wasn't called).
+  - **`policy.rs::LinuxSwFactory::create`** (T7-rewire): WaylandPortal
+    arm now spins up a `tokio::runtime::Builder::new_current_thread()` to
+    drive the async `WaylandPortalCapturer::new(token_path)` from the sync
+    factory boundary; result feeds into `build_video_producer_with(...)`.
+    `default_portal_token_path()` resolves to
+    `$XDG_CONFIG_HOME/prdt/portal-session.toml`.
+  - **Tests**: 3 stream + 3 capturer + 4 factory routing (incl. renamed
+    `linux_factory_forced_wayland_without_session_surfaces_unavailable`)
+    = **10 new tests on top of Foundation's 22**.
+  - **Build env**: `scripts/dev-container.sh` wraps `cargo` in a
+    `rust:1-bookworm` container with libpipewire-0.3-dev + libspa-0.2-dev
+    pre-installed; Ubuntu 22.04 host cannot build pipewire-rs because
+    libspa C ABI < 0.3.55. Container runs as host UID, target lives under
+    `target-docker/` (gitignored). See `scripts/Dockerfile.dev`.
+  - **Smoke**: end-to-end real-frames verification deferred to a session
+    on a Wayland desktop (GNOME / KDE / Sway). Smoke walkthrough doc
+    updated to reflect the post-successor capabilities; out of scope of
+    this branch's CI-style verification.
+  - **Known limitations (P5B-2 follow-ups)**: `parse_video_format` and
+    `build_format_params` are staged stubs — compositor default
+    negotiation lands on BGRA in practice on GNOME/KDE. If a future
+    compositor refuses to default, frames stop arriving and the listener
+    will surface "negotiated format not BGRA/BGRx; aborting". DMABUF
+    zero-copy, KDE/Sway/Hyprland matrix, and Wayland-native input remain
+    P5B-2.
 
 ### **C. 計測 / 観測 系(blocker 解消用)**
 

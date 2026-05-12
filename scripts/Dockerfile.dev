@@ -1,0 +1,20 @@
+FROM rust:1-bookworm
+
+# System libs required to build pipewire-rs 0.9 + ashpd 0.12 on this branch.
+# libpipewire-0.3-dev pulls libspa-0.2-dev transitively but pin it explicitly
+# so a future apt change can't strip it.
+RUN apt-get update -qq && \
+    apt-get install -y -qq --no-install-recommends \
+        libpipewire-0.3-dev \
+        libspa-0.2-dev \
+        pkg-config \
+        build-essential \
+        clang \
+        libclang-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# Bake in rustfmt and clippy so ephemeral container invocations have them.
+RUN rustup component add rustfmt clippy
+
+# Cargo cache mount and target dir come in from the host at runtime
+# (see scripts/dev-container.sh). The image itself stays small.

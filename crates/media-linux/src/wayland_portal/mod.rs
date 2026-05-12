@@ -7,9 +7,10 @@
 
 pub mod capturer;
 pub mod session;
+pub mod stream;
 pub mod token;
-// T5 stream module deferred (see Cargo.toml comment on pipewire).
 
 pub use capturer::{WaylandPortalCapturer, WaylandPortalCapturerInitError};
 pub use session::{PortalSession, PortalStartOutput, WaylandPortalError};
+pub use stream::{LoopCommand, PipeWireStream, PipeWireStreamError, PixelFormat, RawFrame};
 pub use token::PortalSessionToken;
