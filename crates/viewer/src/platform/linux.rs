@@ -208,6 +208,20 @@ fn alpha_blend_bgra(
     dst_y: i32,
     src: &[u8],
 ) {
+    debug_assert_eq!(
+        src.len(),
+        (src_w as usize)
+            .saturating_mul(src_h as usize)
+            .saturating_mul(4),
+        "alpha_blend_bgra: src buffer size mismatch"
+    );
+    debug_assert_eq!(
+        dst.len(),
+        (dst_w as usize)
+            .saturating_mul(dst_h as usize)
+            .saturating_mul(4),
+        "alpha_blend_bgra: dst buffer size mismatch"
+    );
     let x0 = dst_x.max(0);
     let y0 = dst_y.max(0);
     let x1 = (dst_x + src_w).min(dst_w);

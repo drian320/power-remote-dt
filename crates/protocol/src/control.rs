@@ -313,7 +313,7 @@ mod tests {
     #[test]
     fn control_kinds_are_stable() {
         let hello = ControlMessage::Hello {
-            protocol_version: 3,
+            protocol_version: 4,
             req_width: 3840,
             req_height: 2160,
             req_fps: 60,
@@ -455,7 +455,7 @@ mod tests {
     #[test]
     fn hello_round_trip_with_auth_fields() {
         let h = ControlMessage::Hello {
-            protocol_version: 3,
+            protocol_version: 4,
             req_width: 1920,
             req_height: 1080,
             req_fps: 60,
@@ -510,7 +510,7 @@ mod tests {
     #[test]
     fn auth_payload_at_max_size_round_trips() {
         let h = ControlMessage::Hello {
-            protocol_version: 3,
+            protocol_version: 4,
             req_width: 1920,
             req_height: 1080,
             req_fps: 60,
@@ -548,7 +548,7 @@ mod tests {
         // P6 only extends existing variants; no new discriminants.
         assert_eq!(
             ControlMessage::Hello {
-                protocol_version: 3,
+                protocol_version: 4,
                 req_width: 0,
                 req_height: 0,
                 req_fps: 0,

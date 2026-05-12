@@ -256,16 +256,24 @@ impl ProducerFactory for LinuxSwFactory {
                         FactoryError::Unavailable(kind, format!("WaylandPortalCapturer::new: {e}"))
                     })?;
 
-                // Stash cursor_rx in the slot so the host can retrieve it via
-                // take_cursor_rx() after bootstrap and spawn the forwarder task
-                // inside its tokio runtime (create() is sync; spawning here
-                // would need a Handle::current() which isn't guaranteed).
+                let producer = match crate::build_video_producer_with(
+                    Box::new(cap),
+                    cfg.initial_bitrate_bps,
+                    cfg.fps,
+                ) {
+                    Ok(p) => p,
+                    Err(e) => return Err(FactoryError::InvalidConfig(kind, e.to_string())),
+                };
+
+                // Stash cursor_rx in the slot only after the producer is
+                // confirmed healthy. This prevents a stale receiver from being
+                // handed to the host when build_video_producer_with fails (the
+                // forwarder would spin forever on a dead channel).
                 if let Ok(mut slot) = self.cursor_rx_slot.lock() {
                     *slot = Some(cursor_rx);
                 }
 
-                crate::build_video_producer_with(Box::new(cap), cfg.initial_bitrate_bps, cfg.fps)
-                    .map_err(|e| FactoryError::InvalidConfig(kind, e.to_string()))?
+                producer
             }
         };
         Ok(Box::new(producer))

@@ -698,7 +698,7 @@ mod control_tests {
     fn control_hello_round_trip() {
         use crate::control::AuthMethod;
         let msg = ControlMessage::Hello {
-            protocol_version: 3,
+            protocol_version: 4,
             req_width: 3840,
             req_height: 2160,
             req_fps: 60,
