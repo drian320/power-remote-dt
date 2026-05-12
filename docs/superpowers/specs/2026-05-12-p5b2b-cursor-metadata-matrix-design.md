@@ -17,7 +17,7 @@ Ship a 2-compositor smoke walkthrough (GNOME mutter + KDE kwin); Sway / Hyprland
 | Cursor scope | Metadata mode 4 + Embedded fallback | UX (cursor latency dominates user perception of remote-desktop responsiveness); fallback for compositors that don't advertise mode 4 |
 | Protocol bump | `protocol_version: 3 → 4`, hard-bump (strict match) | Matches existing convention (handshake.rs:222 + auth.rs:146); no graceful-degrade plumbing exists |
 | New variant | `ControlMessage::CursorUpdate { … }` at `kind_u8 = 18` | First free slot ≤ 22 (the decode bound); single-file change in `control.rs` |
-| Bitmap wire format | BGRA + cap **256×256** (262 144 B) + **no chunking** | 4K HiDPI cursors top out at 128×128; silent-truncate on overflow keeps cursor visible |
+| Bitmap wire format | BGRA + cap **256×256** (262 144 B) + **no chunking**; host normalizes RGBA/ARGB → BGRA | 4K HiDPI cursors top out at 128×128; silent-truncate on overflow keeps cursor visible. Codex flagged: GNOME/KDE often emit RGBA, not BGRA — normalize at host so viewer has a single code path |
 | Compositor matrix | GNOME (mutter) + KDE (kwin) | 2026-time-of-writing both have stable mode-4 support; Sway/Hyprland descoped |
 | DoD | Auto-evidence ship (container clippy + affected-crate lib tests + 2 new unit tests) | Same as P5A / P6 / P5B-1 / P5B-2a; real-machine smoke deferred to walkthrough doc |
 
@@ -64,6 +64,10 @@ Pure FFI helper that reads `SPA_META_Cursor` out of a `pipewire::spa::buffer::Bu
 /// hand-rolled because libspa-rs 0.9.2 does NOT expose a Rust Meta wrapper
 /// (verified via container probe: `target-docker/.../libspa-0.9.2/src/buffer/mod.rs`
 /// contains zero `Meta`/`spa_meta` references).
+///
+/// Use the C helper `spa_sys::spa_buffer_find_meta(spa_buf, SPA_META_Cursor)`
+/// rather than iterating `metas[]` manually — it's the canonical path used
+/// by OBS Studio (plugins/linux-pipewire/pipewire.c#L889).
 pub(crate) const SPA_META_CURSOR: u32 = 5; // libspa-0.2 meta.h:46
 
 /// Owned cursor snapshot. Mirrors `ControlMessage::CursorUpdate` payload
@@ -82,11 +86,12 @@ pub struct CursorUpdate {
 }
 
 pub struct CursorBitmap {
-    pub format: u32,  // spa_video_format; 0 == invalid, 7 == BGRA (most common)
     pub width: u32,
     pub height: u32,
-    pub stride: i32,
-    pub bgra: Vec<u8>,  // size = stride * height; tightly-packed when stride==width*4
+    /// Tightly packed BGRA8. Host normalizes from RGBA / ARGB (the formats
+    /// GNOME mutter + KDE kwin commonly emit) inside `read_meta_cursor` so
+    /// downstream code (wire encoder + viewer compositor) has a single path.
+    pub bgra: Vec<u8>,  // size == width * height * 4
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -118,22 +123,31 @@ pub enum CursorMetaError {
 pub(crate) unsafe fn read_meta_cursor(
     buf: &pipewire::spa::buffer::Buffer,
 ) -> Result<Option<CursorUpdate>, CursorMetaError> {
-    // 1. Iterate buf.as_raw().metas[0..n_metas]; locate the entry with
-    //    meta.type_ == SPA_META_CURSOR. If none, return Absent.
+    // 1. spa_sys::spa_buffer_find_meta(spa_buf, SPA_META_Cursor). If null,
+    //    return Absent.
     // 2. Bounds-check: meta.size >= sizeof(spa_meta_cursor). If not,
     //    return MetaTooSmall.
     // 3. Read spa_meta_cursor fields (id, position, hotspot, bitmap_offset).
     //    If id == 0, return Ok(None).
-    // 4. If bitmap_offset == 0, return Ok(Some(CursorUpdate { bitmap: None, … })).
+    // 4. If bitmap_offset == 0, return Ok(Some(CursorUpdate { bitmap: None, … }))
+    //    (this is "reuse cached bitmap", NOT "cursor erased" — DO NOT clear).
     // 5. Else bounds-check bitmap_offset >= sizeof(spa_meta_cursor)
     //    && bitmap_offset + sizeof(spa_meta_bitmap) <= meta.size.
     // 6. Read spa_meta_bitmap at meta.data + bitmap_offset. If
     //    bitmap.format == 0, return Ok(Some(CursorUpdate { bitmap: None, … })).
     // 7. Cap check: bitmap.size.width <= 256 && height <= 256;
     //    else BitmapTooLarge (caller silent-truncates to 256×256).
-    // 8. Bitmap.offset == 0 → cursor invisible → CursorBitmap with bgra=Vec::new().
+    // 8. bitmap.offset == 0 → cursor invisible → CursorBitmap with width=0, height=0,
+    //    bgra=Vec::new() (signals "hide cursor compositing" to viewer).
     // 9. Else pixel_ptr = (meta.data + bitmap_offset + bitmap.offset);
-    //    pixel_len = stride * height (clamped). memcpy into owned Vec.
+    //    pixel_len = stride * height. memcpy row-by-row into TIGHTLY PACKED
+    //    Vec<u8> of size (width*height*4), stripping stride padding.
+    // 10. Format normalization (must run before returning):
+    //     - SPA_VIDEO_FORMAT_BGRA (7) → keep as-is
+    //     - SPA_VIDEO_FORMAT_RGBA   → per-pixel swap byte 0 ↔ byte 2 (R↔B)
+    //     - SPA_VIDEO_FORMAT_ARGB   → per-pixel rotate ARGB → BGRA
+    //     - other                   → return UnsupportedFormat(fmt) — viewer
+    //                                  retains cached bitmap (no flicker)
     todo!("implement in T1")
 }
 ```
@@ -194,9 +208,12 @@ pub fn connect(
 
 ```rust
 ControlMessage::CursorUpdate {
-    /// Frame-stable cursor id from `spa_meta_cursor.id`. 0 is never sent
-    /// (host filters out id==0 == "no new metadata"). Viewer uses id to
-    /// detect cursor identity changes for bitmap-cache invalidation.
+    /// Per-frame cursor id from `spa_meta_cursor.id`. 0 is never sent (host
+    /// filters out id==0 == "no new metadata"). **DO NOT** use as a stable
+    /// bitmap identity — Codex flagged that some compositors return a
+    /// constant id while still emitting fresh bitmaps, and others bump id
+    /// per-frame even when the shape is unchanged. Use bitmap presence on
+    /// the wire message as the cache-invalidation signal instead.
     id: u32,
     /// Cursor hotspot position in capture-region-relative LOGICAL pixels.
     /// Origin is the top-left of the capture region (the `host_monitor_rect`
@@ -249,7 +266,7 @@ The Windows host has no cursor-metadata source (DXGI capture path always embeds 
 
 **Shared logic** in `crates/viewer/src/cursor_state.rs` (new):
 - `struct CursorState { id: u32, position_x: i32, position_y: i32, hotspot_x: i32, hotspot_y: i32, bitmap: Option<Arc<CursorBitmap>> }`
-- `pub fn apply(&mut self, msg: ControlMessage::CursorUpdate)` updates position always, replaces `bitmap` only when the message's `bitmap` is `Some`, identifies bitmap-cache hits by `msg.id == self.id`.
+- `pub fn apply(&mut self, msg: ControlMessage::CursorUpdate)` updates position always, replaces `bitmap` only when the message's `bitmap` is `Some` (Codex: do NOT condition on `id` — some compositors recycle ids; bitmap-presence is the signal).
 - `pub fn visible(&self) -> bool` — `false` if `bitmap` is `Some` with `width == 0 || height == 0` (host signalled "hide").
 - `pub fn composite_target(&self, frame_width: u32, frame_height: u32) -> Option<CompositeTarget>` — returns the `(top_left_x, top_left_y, width, height)` rectangle to blit into the frame buffer; `None` when invisible or out-of-bounds.
 
@@ -312,6 +329,9 @@ The walkthrough document (`docs/superpowers/p5b1-smoke-walkthrough.md`) gains ne
 | 5 | `cursor_tx` channel back-pressure drops position updates | mpsc cap=8 with `try_send` drop-newest semantics; position interpolation NOT implemented (drop tolerable at 250Hz) |
 | 6 | v3 viewer fails to connect to v4 host with cryptic `ProtocolVersionMismatch` | STATUS doc + viewer error message both reference the bump explicitly |
 | 7 | Viewer crash on `CursorUpdate` from a malicious host with `bitmap.bgra.len() != width*height*4` | Decode-time validator rejects; protocol test covers |
+| 8 | Future `HelloAck` field-addition breaks v3 decoders | Hard bump avoids this for P5B-2b. Document in spec: never extend an existing variant in a minor wire change — always introduce a new variant or bump protocol_version |
+| 9 | `bitmap_offset == 0` mis-interpreted as "erase cursor" → flicker | `read_meta_cursor` returns `CursorUpdate { bitmap: None }` (keep cached). Documented in code comment + state machine §4 |
+| 10 | `id` reused across distinct cursor shapes (mutter reset-on-monitor-config) | State machine treats bitmap-presence as the cache-invalidation signal; `id` is informational only |
 
 ## 8. Auto-evidence DoD
 
@@ -344,7 +364,13 @@ The walkthrough document (`docs/superpowers/p5b1-smoke-walkthrough.md`) gains ne
 - **libspa C header**: `/usr/include/spa-0.2/spa/buffer/meta.h` (Debian bookworm, libspa-0.2-dev 0.3.65) — `spa_meta_cursor` at line 141, `spa_meta_bitmap` at line 122, `SPA_META_Cursor = 5` at line 46
 - **ashpd 0.12.3**: `CursorMode::Metadata` at `src/desktop/screencast.rs:75`; `available_cursor_modes()` at line 501
 - **libspa-rs 0.9.2**: NO Meta wrapper — bare-FFI required (verified container probe)
-- **OBS Studio**: cursor parse reference at `obs-studio/plugins/linux-pipewire/pipewire.c` (search for `on_process` + `SPA_META_Cursor`)
+- **OBS Studio**: cursor parse reference at `obs-studio/plugins/linux-pipewire/pipewire.c#L889` (`spa_buffer_find_meta` + cursor format normalization)
+- **mutter**: cursor metadata emit path at `src/backends/meta-screen-cast-stream-src.c#L545`
+- **KWin**: cursor metadata emit at `src/plugins/screencast/screencaststream.cpp#L593`
+- **gnome-remote-desktop**: meta-buffer utilities at `src/grd-pipewire-utils.c#L134`
+- **xdg-desktop-portal-gnome**: ScreenCast cursor handling at `src/screencast.c#L868`
+- **xdg-desktop-portal-kde**: ScreenCast interface at `src/screencast.h#L36`
 - **Moonlight-Qt**: D3D11 cursor overlay at `app/streaming/video/base.cpp`
 - **xdg-desktop-portal**: ScreenCast spec [`AvailableCursorModes`](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.ScreenCast.html)
+- **PipeWire docs**: [spa_meta_cursor](https://docs.pipewire.org/structspa__meta__cursor.html) + [spa_meta_bitmap](https://docs.pipewire.org/structspa__meta__bitmap.html)
 - **Protocol surface report** (this session): `ControlMessage` defined at `crates/protocol/src/control.rs:119`; `HELLO_PROTOCOL_VERSION = 3` at `crates/transport/src/handshake.rs:61`; `PROTOCOL_VERSION_REQUIRED = 3` at `crates/host/src/auth.rs:25`; encode/decode at `crates/protocol/src/wire.rs:638-664`; kind=18 is the next free slot ≤ 22
