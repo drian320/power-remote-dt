@@ -16,8 +16,9 @@
 
 use ashpd::desktop::{
     screencast::{CursorMode, Screencast, SourceType},
-    PersistMode, Session,
+    PersistMode, ResponseError, Session,
 };
+use ashpd::PortalError;
 use std::os::fd::OwnedFd;
 use thiserror::Error;
 
@@ -58,6 +59,55 @@ impl WaylandPortalError {
 impl From<ashpd::Error> for WaylandPortalError {
     fn from(e: ashpd::Error) -> Self {
         WaylandPortalError::Ashpd(e.to_string())
+    }
+}
+
+/// Classify an `ashpd::Error` into the structured [`WaylandPortalError`] variants.
+///
+/// `token_was_passed` indicates whether a restore token was supplied to the
+/// current call site. If true, any non-cancel failure is treated as the
+/// compositor rejecting the stored token (grant revoked / token rotated /
+/// monitor disconnected), so T6's delete-and-retry branch fires correctly.
+///
+/// Classification priority:
+/// 1. Structured variant match — `Response(Cancelled)` → `UserCancelled`.
+/// 2. Portal-layer cancel — `Portal(Cancelled(_))` → `UserCancelled`.
+/// 3. String-sniff fallback — contains "cancel" → `UserCancelled`.
+/// 4. Token context — token was passed → `RestoreTokenRejected`.
+/// 5. Default — `Ashpd`.
+fn classify_portal_error(e: ashpd::Error, token_was_passed: bool) -> WaylandPortalError {
+    // 1. Structured match on ashpd::Error variants.
+    match &e {
+        ashpd::Error::Response(ResponseError::Cancelled) => {
+            return WaylandPortalError::UserCancelled;
+        }
+        ashpd::Error::Portal(PortalError::Cancelled(_)) => {
+            return WaylandPortalError::UserCancelled;
+        }
+        // ResponseError::Other is ambiguous — fall through to string check.
+        _ => {}
+    }
+
+    // 2. String-sniff fallback: last resort for cancel paths missed above.
+    // NOTE: ashpd 0.12.3 surfaces most portal-side errors through
+    // Error::Response (two variants: Cancelled / Other) or Error::Portal.
+    // The structured matches above cover the known cancel paths; this string
+    // check is retained as a safety net for any undocumented code path.
+    let s = e.to_string();
+    if s.to_ascii_lowercase().contains("cancel") {
+        return WaylandPortalError::UserCancelled;
+    }
+
+    // 3. If a restore token was in play, any remaining failure is almost
+    // certainly the compositor rejecting the stale/rotated token.
+    if token_was_passed {
+        tracing::warn!(
+            error = %s,
+            "portal session: stored restore_token rejected; T6 should delete and retry"
+        );
+        WaylandPortalError::RestoreTokenRejected(s)
+    } else {
+        WaylandPortalError::Ashpd(s)
     }
 }
 
@@ -103,11 +153,15 @@ impl PortalSession {
     pub async fn start_with_token_opt(
         restore_token: Option<&str>,
     ) -> Result<PortalStartOutput, WaylandPortalError> {
+        let token_was_passed = restore_token.is_some();
+        tracing::info!(has_token = token_was_passed, "portal session: starting");
+
         // 1. Obtain the proxy.
         let proxy = Screencast::new().await?;
 
         // 2. Create the D-Bus session object.
         let session = proxy.create_session().await?;
+        tracing::info!("portal session: created");
 
         // 3. Configure which sources to capture.
         //    Single monitor, embedded cursor, persistent until explicitly
@@ -121,11 +175,17 @@ impl PortalSession {
                 restore_token,
                 PersistMode::ExplicitlyRevoked,
             )
-            .await?;
+            .await
+            .map_err(|e| classify_portal_error(e, token_was_passed))?;
 
         // 4. Present the portal picker. `None` for parent window identifier
         //    is accepted on Wayland headless / CLI hosts without a window.
-        let start_response = proxy.start(&session, None).await?.response()?;
+        let start_response = proxy
+            .start(&session, None)
+            .await
+            .map_err(|e| classify_portal_error(e, token_was_passed))?
+            .response()
+            .map_err(|e| classify_portal_error(e, token_was_passed))?;
 
         // 5. Extract the PipeWire node id from the first stream.
         let streams = start_response.streams();
@@ -133,14 +193,11 @@ impl PortalSession {
         let pipewire_node_id = first_stream.pipe_wire_node_id();
         let new_restore_token = start_response.restore_token().map(str::to_owned);
 
-        if restore_token.is_some() {
-            tracing::info!(
-                node_id = pipewire_node_id,
-                "portal grant restored from token"
-            );
-        } else {
-            tracing::info!(node_id = pipewire_node_id, "new portal grant accepted");
-        }
+        tracing::info!(
+            pipewire_node_id,
+            has_new_token = new_restore_token.is_some(),
+            "portal session: started"
+        );
 
         // 6. Open the PipeWire remote fd.
         let pipewire_fd = proxy.open_pipe_wire_remote(&session).await?;
@@ -189,5 +246,32 @@ mod tests {
         assert!(!WaylandPortalError::Ashpd("dbus failed".into()).is_token_invalid());
         assert!(!WaylandPortalError::UserCancelled.is_token_invalid());
         assert!(!WaylandPortalError::NoStreams.is_token_invalid());
+    }
+
+    #[test]
+    fn classify_cancel_string_fallback_maps_to_user_cancelled() {
+        // ashpd::Error::NoResponse doesn't match a structured cancel variant,
+        // but if its Display contains "cancel" the string fallback fires.
+        // We use a Zbus error whose message embeds "cancel" to exercise the
+        // string-sniff branch directly.
+        let e = ashpd::Error::ParseError("user cancel requested");
+        let result = classify_portal_error(e, false);
+        assert!(
+            matches!(result, WaylandPortalError::UserCancelled),
+            "expected UserCancelled for cancel-containing error string"
+        );
+    }
+
+    #[test]
+    fn classify_non_cancel_with_token_maps_to_token_rejected() {
+        // A non-cancel error when a token was passed should surface as
+        // RestoreTokenRejected so T6's delete-and-retry branch fires.
+        let e = ashpd::Error::ParseError("grant revoked by compositor");
+        let result = classify_portal_error(e, true);
+        assert!(
+            matches!(result, WaylandPortalError::RestoreTokenRejected(_)),
+            "expected RestoreTokenRejected when token_was_passed=true and no cancel in message"
+        );
+        assert!(result.is_token_invalid());
     }
 }
