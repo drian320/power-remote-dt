@@ -1,7 +1,7 @@
 # power-remote-dt — Project Status & Roadmap
 
-**Last updated:** 2026-05-11
-**Latest tag:** `phase-p6-auth-connection-ux-complete`
+**Last updated:** 2026-05-12
+**Latest tag:** `phase-p5b1-wayland-portal-foundation-complete`
 **Branch state:** `phase0-sw-codec-wire` (post-tag) — **Phase 4 + Plan 4 B1 + B4 + B6 + B7 + B8 完了 + MF エンコーダ fallback 完了 + host session liveness 完了 + NVDEC arc-swap 化 完了 + ソフトウェアコーデック OpenH264 完了 (B3 のみ HW ブロック保留)**
 **Test count:** 348+ automated Rust tests + 11 Python tests; new crate `prdt-media-sw` 6 tests (Phase 1) + Phase 0 protocol/transport new tests + Phase 5 latency-bench new test (≥10 new tests per plan §8 acceptance)
 
@@ -213,6 +213,46 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
     - **gui-client UI 統一**: `crates/gui-client/src/app.rs` の `draw_consent_dialog` を 2-button stub から `prdt_gui_host::consent_prompt::ConsentPromptState::show(ctx)` 駆動に置換。Linux 統合 client が `HostAuthConfig::load_or_default` で `default_permissions` + `consent_timeout_seconds` を読み込み、operator が pubkey ラベル + 4 permissions + remember + countdown auto-Deny を gui-host と同等 UX で操作可能に。crate は依然 `#[cfg(windows)] mod app;` ゲートのまま (Linux GUI は P7A 等で別途扱い)、Windows CI で検証。
     - **Tests**: 6 new tests (gui-host `poll_consent_requests_picks_up_request` / `_clears_rx_on_disconnect` 各 1、gui-client 同パターン 2、host `auth::arc_sync_tofu_grants_after_peer_added` 1、consent_prompt 既存 2 を `ConsentDecision` 化)。
     - **残 follow-up**: (c) Ephemeral token expiry renewal flow、(d) PIN change UI (Settings)、(e) audit log、+ smoke walkthrough (Linux WSLg host + Wayland viewer 実機検証は次セッション)。
+
+- **P5B-1 (`phase-p5b1-wayland-portal-foundation-complete`, 2026-05-12)**:
+  Wayland portal capture backend **foundation** (PipeWire runtime deferred —
+  see Out of scope). Adds `trait CaptureSource` (shared by `X11ShmCapturer`
+  and the new `WaylandPortalCapturer`), `CaptureBackend { X11Shm,
+  WaylandPortal }` resolved at startup via a synchronous 3-step probe
+  (`WAYLAND_DISPLAY` env → zbus session → `NameHasOwner` on
+  `org.freedesktop.portal.Desktop`, 1s timeout, no `CreateSession`), CLI
+  `--capture-backend {auto|x11|wayland}`, portal `RestoreToken` TOML
+  persistence with atomic-write + 0600 perms, and the full ashpd 0.12
+  session lifecycle (`create_session → select_sources → start →
+  open_pipewire_remote`, explicit `close().await` because ashpd has no
+  `Drop::close`). PR: TBD.
+  - **Files**: new `crates/media-linux/src/capture_source.rs` (trait +
+    error enum), new `crates/media-linux/src/wayland_portal/{mod, session,
+    capturer, token}.rs`. `LinuxSwProducer` refactored to hold `Box<dyn
+    CaptureSource>`. Factory's WaylandPortal arm currently returns
+    `FactoryError::Unavailable("Foundation-only milestone; T5/T6
+    deferred")` so operators get a clear error instead of a silent X11
+    substitution.
+  - **Out of scope (deferred to a successor branch on Ubuntu 24.04+ /
+    Fedora 39+ / Arch — pipewire >= 0.3.55 required)**:
+    - T5 PipeWire stream + dedicated mainloop thread (`stream.rs`).
+    - T6 Capturer glue wiring session + stream + token through
+      `CaptureSource`. Currently `WaylandPortalCapturer::new()` returns
+      `NotImplemented`.
+    - Rationale: Ubuntu 22.04 dev box ships pipewire 0.3.48; the current
+      libspa Rust crate (>= 0.7) targets the post-0.3.55 C ABI
+      (`spa_video_info_raw.flags` field; `modifier: i64 → u64`). No
+      version on crates.io builds on this host regardless of pin.
+    - Tracking: commit `684f43d` carries the dep removal + comment block.
+  - **Tests**: 4 trait contract + 4 probe + 4 token + 4 session + 6 factory
+    routing/policy + 2 CLI parser + others = **22 new tests** cross-platform.
+    Linux `cargo test --workspace --lib --target x86_64-unknown-linux-gnu`
+    green (34 passed in prdt-media-linux); `cargo clippy -- -D warnings` clean.
+  - **Out of scope of P5B-1 entirely (P5B-2 / P5C)**: DMABUF zero-copy,
+    multi-compositor smoke matrix (KDE/Sway/Hyprland), Wayland-native
+    input/clipboard/audio, HW encoder on Linux.
+  - **Smoke walkthrough**: `docs/superpowers/p5b1-smoke-walkthrough.md`
+    (GNOME dialog reachability + WSLg X11 regression + probe priority).
 
 ### **C. 計測 / 観測 系(blocker 解消用)**
 
