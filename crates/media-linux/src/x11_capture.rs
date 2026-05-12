@@ -166,6 +166,26 @@ impl X11ShmCapturer {
     }
 }
 
+impl crate::capture_source::CaptureSource for X11ShmCapturer {
+    fn geometry(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    fn capture_into(
+        &mut self,
+        out: &mut Vec<u8>,
+    ) -> Result<(), crate::capture_source::CaptureSourceError> {
+        let n = (self.width as usize) * (self.height as usize) * 4;
+        out.resize(n, 0);
+        self.grab_into(out.as_mut_slice()).map_err(|e| {
+            crate::capture_source::CaptureSourceError::Terminal {
+                backend: "linux-x11shm",
+                reason: e.to_string(),
+            }
+        })
+    }
+}
+
 impl Drop for X11ShmCapturer {
     fn drop(&mut self) {
         if let Some(seg) = self.shm.take() {
