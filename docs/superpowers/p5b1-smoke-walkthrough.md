@@ -1,95 +1,126 @@
-# P5B-1 Wayland Portal Foundation — Smoke Walkthrough
+# P5B-1 Wayland Portal — Smoke Walkthrough
 
 This document is the operator-facing smoke checklist for the
-`phase-p5b1-wayland-portal-foundation-complete` tag.
+`phase-p5b1-t5-t6-pipewire-runtime-complete` tag (P5B-1 successor).
 
-**Foundation scope note**: T5 (PipeWire stream) and T6 (capturer glue)
-are deferred to a successor branch on a host with pipewire >= 0.3.55.
-The smoke sections below are honest about what the Foundation milestone
-actually exercises: the probe, the CLI flag, the token persistence, and
-the factory error path. No frames flow through the Wayland portal path in
-this milestone. The WSLg X11 path is unaffected and is the primary
-regression guard.
+The successor branch lands T5 (PipeWire stream) and T6 (capturer glue)
+on top of the Foundation milestone. `--capture-backend wayland` now opens
+the portal consent dialog, persists the RestoreToken, and feeds real
+PipeWire frames into the OpenH264 path. The WSLg X11 path is unaffected
+and remains the primary regression guard.
 
 P5B-2 will add KDE / Sway / Hyprland sections and DMABUF zero-copy; for
-now we verify GNOME dialog reachability + WSLg X11 regression + the
+now we verify GNOME real-frames + WSLg X11 regression + the
 probe-priority log line.
 
 ---
 
-## Section A — GNOME smoke (Foundation: dialog-fire reachability only, no frames)
+## Section A — GNOME smoke (real consent dialog + real frames)
 
 **Pre-conditions:**
-- Ubuntu 22.04+ GNOME (Wayland session).
-- No `~/.config/prdt/portal-session.toml`.
-- `prdt-host` built from this tag (`cargo build --release -p prdt-host`).
+- Ubuntu 24.04+ / Fedora 39+ / Arch with GNOME (Wayland session) AND
+  `libpipewire-0.3 >= 0.3.55`.
+- No `~/.config/prdt/portal-session.toml` (first-run path).
+- `prdt-host` binary from this branch:
+  - **Ubuntu 24.04+ host**: `cargo build --release -p prdt-host` then
+    use `./target/release/prdt-host`.
+  - **Ubuntu 22.04 host** (libpipewire 0.3.48 < required 0.3.55): build
+    inside the Docker container:
+    ```bash
+    ./scripts/dev-container.sh cargo build --release -p prdt-host \
+        --target x86_64-unknown-linux-gnu
+    ```
+    The binary lands in `target-docker/x86_64-unknown-linux-gnu/release/prdt-host`.
+    Copy it to the target Wayland machine before running.
 
 **Steps:**
 
 1. Start the host with verbose tracing:
 
    ```bash
-   RUST_LOG=info ./target/release/prdt-host --bitrate-mbps 5 --silent-allow --headless \
-       --capture-backend wayland 2>&1 | tee p5b1-gnome-run1.log
+   RUST_LOG=info ./prdt-host --bitrate-mbps 5 --silent-allow --headless \
+       2>&1 | tee p5b1-gnome-run1.log
    ```
 
-2. Expect the following log lines (probe + factory path):
+   (No `--capture-backend` override — auto-probe will select WaylandPortal
+   when `WAYLAND_DISPLAY` is set and the portal is reachable.)
+
+2. Expect the following log lines in order:
 
    ```
-   P5B-1 capture backend resolved choice=Wayland resolved=WaylandPortal
+   P5B-1 capture backend resolved choice=Auto resolved=WaylandPortal
+   xdg-desktop-portal reachable; selecting Wayland capture backend
+   portal session: starting has_token=false
+   portal session: started pipewire_node_id=…
    ```
 
-3. Expect a `FactoryError::Unavailable` error immediately after, because
-   `WaylandPortalCapturer::new()` returns `NotImplemented` in the Foundation
-   milestone. The host will exit with a clear diagnostic:
+3. The OS consent dialog fires (GNOME "Allow screen sharing?" prompt).
+   Click **Allow**. Frames begin flowing immediately after.
+
+4. Confirm `~/.config/prdt/portal-session.toml` exists with mode `0600`:
+
+   ```bash
+   ls -l ~/.config/prdt/portal-session.toml
+   stat -c "%a" ~/.config/prdt/portal-session.toml   # expect: 600
+   ```
+
+5. Connect a viewer:
+
+   ```bash
+   ./prdt-client connect <host-id>
+   ```
+
+   Expect the viewer overlay HUD to show `linux-openh264` codec line and
+   frames-per-second >= 20 after the first IDR settles (typically < 3s).
+   Run for at least 30 seconds.
+
+6. Stop the host with Ctrl-C. Check the log does NOT contain:
 
    ```
-   failed to build video producer: Unavailable: Foundation-only milestone; T5/T6 deferred
+   WaylandPortalCapturer dropped without explicit shutdown
    ```
 
-   The host exits fast — no frames are produced and no consent dialog fires.
-   This is intentional and correct for this milestone.
+   If it does fire, this is a known follow-up (see Known issues below);
+   it is safe to proceed for dev iteration.
 
-**What this proves:** T1–T4's plumbing (probe, CLI flag, factory routing,
-capturer constructor stub) is reachable up to the point of factory
-construction. The actual portal consent dialog and the PipeWire stream do
-not fire because the capturer constructor short-circuits at `NotImplemented`.
+7. **Second run (token path):** Re-run the same command. Expect no dialog.
+   Log should show:
 
-**To exercise the full dialog path:** Run the successor branch that wires
-T5/T6 on a host with pipewire >= 0.3.55. The session lifecycle code
-(`PortalSession::start_with_token_opt` → `create_session` →
-`select_sources` → `start` → `open_pipewire_remote`) is already present in
-`crates/media-linux/src/wayland_portal/session.rs`; it simply is not called
-through to completion without T5/T6's stream wiring.
+   ```
+   portal session: starting has_token=true
+   portal session: started pipewire_node_id=…
+   ```
+
+**What this proves:** The full T5/T6/T7-rewire pipeline — portal session
+open, PipeWire mainloop thread, frame channel, stride stripping, token
+persist and restore — is wired end-to-end.
 
 ---
 
-## Section A' — Manual ashpd dialog test (optional, for future implementers)
+## Section A' — RestoreTokenRejected path (for implementers)
 
-Once T5/T6 land on a successor branch, the portal dialog can be exercised
-independently of the full host binary by driving
-`PortalSession::start_with_token_opt` directly. Two approaches:
+T5/T6 implement token-rejection recovery: if the compositor rejects the
+saved token (e.g. the user revoked the portal grant from Settings), the
+capturer deletes the stale token file and retries without a token,
+causing the consent dialog to re-fire.
 
-1. **`cargo test -- --ignored`**: add a `#[test] #[ignore]` integration test
-   in `crates/media-linux/tests/` that calls `start_with_token_opt(None)`
-   on a real GNOME session, asserts the returned token is non-empty, and
-   calls `close().await`. Run with:
+**To exercise this path manually:**
 
-   ```bash
-   cargo test -p prdt-media-linux -- --ignored portal_dialog_fires
+1. Run the host once and confirm `portal-session.toml` exists (Section A
+   steps 1–4).
+2. In GNOME Settings → Privacy → Screen Sharing (or equivalent), revoke
+   the `prdt-host` grant.
+3. Re-run the host. Expect the log to show:
+
+   ```
+   portal restore token rejected; deleting stale token and retrying without token
+   portal session: starting has_token=false
    ```
 
-2. **`examples/` binary**: add
-   `crates/media-linux/examples/portal_dialog_smoke.rs` that does the same
-   in a small `tokio::main` binary:
+   Followed by the consent dialog firing again.
 
-   ```bash
-   cargo run --example portal_dialog_smoke -p prdt-media-linux
-   ```
-
-Neither the test nor the example binary needs to be written now — this note
-is a breadcrumb for the T5/T6 implementer so the dialog path can be verified
-without running the full host stack.
+This exercises the `RestoreTokenRejected` branch in
+`WaylandPortalCapturer::new()` (`crates/media-linux/src/wayland_portal/capturer.rs`).
 
 ---
 
@@ -144,9 +175,9 @@ structurally identical to the pre-P5B-1 code — T1 refactored it behind the
 ## Section C — Probe priority verification (DoD #4)
 
 These steps verify that `--capture-backend` overrides the auto-probe and
-that the Foundation error path is clearly reported.
+that the routing logic is clearly reported.
 
-### C1 — Forced Wayland (expect Foundation error, not ashpd error)
+### C1 — Forced Wayland on a non-Wayland host (expect ashpd error, not stub error)
 
 With `WAYLAND_DISPLAY` unset (WSLg or any non-Wayland host):
 
@@ -158,17 +189,18 @@ WAYLAND_DISPLAY= RUST_LOG=info ./target/release/prdt-host \
 
 Expect:
 - Log: `P5B-1 capture backend resolved choice=Wayland resolved=WaylandPortal`
-- Then a hard failure from the factory with the Foundation-milestone marker:
+- Then a hard failure from the factory because the portal is unreachable
+  (ashpd D-Bus error or session bus unavailable):
   ```
-  failed to build video producer: Unavailable: Foundation-only milestone; T5/T6 deferred
+  failed to build video producer: …
   ```
-- The host exits. No ashpd D-Bus call is made (the error occurs in
-  `WaylandPortalCapturer::new()` before any session is created).
+- The host exits. On the successor branch the capturer constructor now
+  attempts a real ashpd session; on a non-Wayland host it fails at the
+  D-Bus layer (not at a stub).
 
-**Important distinction:** In the Foundation milestone, the error comes from
-the capturer stub, not from ashpd or D-Bus. On a live GNOME session you
-would still see the same `Unavailable` error — the capturer is a
-`NotImplemented` stub regardless of what the portal reports.
+**Note:** The Foundation-milestone `Unavailable: Foundation-only milestone;
+T5/T6 deferred` error is no longer emitted on this branch — the capturer
+is fully wired.
 
 ### C2 — Forced X11 (even with WAYLAND_DISPLAY set)
 
@@ -205,11 +237,6 @@ Expect:
 
 ## Out of scope (deferred)
 
-- **PipeWire runtime (T5/T6)**: deferred to a successor branch on a host
-  with pipewire >= 0.3.55. Ubuntu 22.04 ships pipewire 0.3.48; the current
-  libspa Rust crate (>= 0.7) targets the post-0.3.55 C ABI. No version on
-  crates.io builds on this dev box regardless of pin. See commit `684f43d`
-  for the full rationale and the removed `[dependencies]` block.
 - **DMABUF zero-copy**: deferred to P5B-2. All frames still go through CPU
   `bgra_to_i420`.
 - **Multi-compositor smoke matrix (KDE / Sway / Hyprland)**: deferred to
@@ -223,19 +250,20 @@ Expect:
 
 ## Known issues / follow-ups
 
-- **PipeWire runtime deferred**: the successor branch implementing T5/T6
-  should target a host with pipewire >= 0.3.55 (Ubuntu 24.04+, Fedora 39+,
-  Arch current). The dep removal and the comment block pointing to the ABI
-  mismatch are in commit `684f43d`. Do not attempt to unblock on Ubuntu 22.04
-  by pinning an older libspa version — the ABI break (`spa_video_info_raw`
-  struct field changes) means no published crate version works.
 - **Probe timeout is 1s**: spec §11 noted a cold GNOME login might exceed
-  this. If smoke on the successor branch shows false negatives (portal
-  reachable but probe returns X11 due to slow dbus startup), bump the
-  timeout to 3s in a follow-up commit. Do NOT bump pre-emptively.
-- **`WaylandPortalCapturer::new()` is a `NotImplemented` stub**: the capturer
-  constructor in `crates/media-linux/src/wayland_portal/capturer.rs` returns
-  `CaptureError::NotImplemented` immediately. The factory (`policy.rs`)
-  wraps this as `FactoryError::Unavailable` with the Foundation-milestone
-  message. This is the correct behavior for this milestone — operators get
-  a clear error instead of a silent X11 substitution.
+  this. If smoke shows false negatives (portal reachable but probe returns
+  X11 due to slow dbus startup), bump the timeout to 3s in a follow-up
+  commit. Do NOT bump pre-emptively.
+- **`parse_video_format` / `build_format_params` are staged stubs**:
+  compositor default negotiation typically lands on BGRA on GNOME and KDE.
+  If a compositor refuses to default, the log will show:
+  ```
+  negotiated format not BGRA/BGRx; aborting
+  ```
+  and frames will stop arriving. Tracked as a P5B-2 follow-up.
+- **Drop-without-shutdown leak warn**: `WaylandPortalCapturer dropped
+  without explicit shutdown()` may fire on Ctrl-C if the host's tokio
+  runtime exits before calling `shutdown()` on the producer side cleanly.
+  This is acceptable for dev iteration; revisit if it appears in clean
+  shutdown paths (the `Drop` impl logs `warn!` intentionally so leaks are
+  visible).
