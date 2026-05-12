@@ -522,6 +522,13 @@ pub fn probe() -> std::sync::Arc<dyn prdt_media_policy::CapabilityProbe> {
     std::sync::Arc::new(prdt_media_win::policy::WindowsProbe)
 }
 
+/// Build the producer factory.
+///
+/// `capture_backend_arg` is the raw `--capture-backend` CLI value (`"auto"`,
+/// `"x11"`, `"wayland"`, or anything else). On Windows this argument is
+/// ignored — capture is always DXGI Desktop Duplication; there is no Wayland
+/// axis. The argument is parsed and acted upon only on Linux (via
+/// `prdt_media_linux::policy::CaptureBackendChoice::parse`).
 pub fn factory(
     _capture_backend_arg: &str,
 ) -> std::sync::Arc<dyn prdt_media_policy::ProducerFactory> {
