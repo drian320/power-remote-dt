@@ -57,8 +57,10 @@ pub const DEFAULT_HELLO_TIMEOUT: Duration = Duration::from_secs(3);
 pub const DEFAULT_HELLO_RETRIES: u8 = 3;
 
 /// Wire-level protocol_version that this build of the codebase speaks.
-/// Bumped to 3 in the P6 auth phase.
-pub const HELLO_PROTOCOL_VERSION: u8 = 3;
+/// Bumped to 4 in P5B-2b for the CursorUpdate variant + cursor_mode=Metadata
+/// path. v3 viewers and v4 hosts are mutually incompatible (strict-match
+/// rejection in handshake.rs); operators upgrade both sides simultaneously.
+pub const HELLO_PROTOCOL_VERSION: u8 = 4;
 
 #[derive(Debug, Clone)]
 pub struct HelloRequest {

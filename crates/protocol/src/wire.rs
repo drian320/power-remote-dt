@@ -830,4 +830,40 @@ mod control_tests {
             assert_eq!(back, msg);
         }
     }
+
+    #[test]
+    fn cursor_update_round_trip_no_bitmap() {
+        let msg = ControlMessage::CursorUpdate {
+            id: 7,
+            position_x: 100,
+            position_y: 200,
+            hotspot_x: 3,
+            hotspot_y: 5,
+            bitmap: None,
+        };
+        let buf = encode_control(&msg).expect("encode ok");
+        let decoded = decode_control(&buf).expect("decode ok");
+        assert_eq!(msg, decoded);
+        assert_eq!(buf[0], 18, "kind_u8 must be 18");
+    }
+
+    #[test]
+    fn cursor_update_round_trip_with_bitmap() {
+        let bgra = vec![0xff, 0x00, 0x00, 0xff, 0x00, 0xff, 0x00, 0xff]; // 2x1 BGRA
+        let msg = ControlMessage::CursorUpdate {
+            id: 42,
+            position_x: -10,
+            position_y: 50,
+            hotspot_x: 0,
+            hotspot_y: 0,
+            bitmap: Some(crate::control::CursorBitmap {
+                width: 2,
+                height: 1,
+                bgra,
+            }),
+        };
+        let buf = encode_control(&msg).expect("encode ok");
+        let decoded = decode_control(&buf).expect("decode ok");
+        assert_eq!(msg, decoded);
+    }
 }
