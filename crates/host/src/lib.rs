@@ -813,6 +813,8 @@ pub async fn run_host(
         };
         let probe_arc = platform_probe();
         // P5B-1: resolve capture-side backend (Linux only — Windows ignores).
+        // On Linux, factory() returns Arc<LinuxSwFactory> (concrete) so we can
+        // call take_cursor_rx() after bootstrap to wire the cursor channel.
         let factory_arc = platform_factory(&args.capture_backend);
         let scoring_policy: std::sync::Arc<dyn prdt_media_policy::SelectionPolicy> =
             std::sync::Arc::new(prdt_media_policy::ScoringPolicy::load_default_or_fallback());
@@ -842,9 +844,16 @@ pub async fn run_host(
             initial_bitrate_bps: bitrate_bps,
             codec: policy_codec,
         };
+        // Coerce concrete LinuxSwFactory → trait object for bootstrap (Linux);
+        // on Windows factory_arc is already Arc<dyn ProducerFactory>.
+        #[cfg(target_os = "linux")]
+        let factory_trait_arc: std::sync::Arc<dyn prdt_media_policy::ProducerFactory> =
+            std::sync::Arc::clone(&factory_arc);
+        #[cfg(windows)]
+        let factory_trait_arc = std::sync::Arc::clone(&factory_arc);
         let policy_producer = prdt_media_policy::PolicyDriven::bootstrap(
             std::sync::Arc::clone(&probe_arc),
-            std::sync::Arc::clone(&factory_arc),
+            factory_trait_arc,
             std::sync::Arc::clone(&scoring_policy),
             policy_cfg,
             policy_ctx,
@@ -878,6 +887,27 @@ pub async fn run_host(
             codec = req.codec.name(),
             "encoder ready"
         );
+
+        // P5B-2b (Linux/Wayland): drain cursor channel produced by the factory
+        // and forward each update over the wire as ControlMessage::CursorUpdate.
+        // Mirrors the clipboard watcher task (see clip_task below).
+        // On X11 or Windows, take_cursor_rx() returns None and this is a no-op.
+        #[cfg(target_os = "linux")]
+        {
+            use prdt_media_linux::policy::cursor_to_control;
+            if let Some(mut cursor_rx) = factory_arc.take_cursor_rx() {
+                let cursor_transport = Arc::clone(&transport);
+                tokio::spawn(async move {
+                    while let Some(c) = cursor_rx.recv().await {
+                        let msg = cursor_to_control(c);
+                        if let Err(e) = cursor_transport.send_control(msg).await {
+                            tracing::debug!(?e, "cursor send failed; forwarder exiting");
+                            break;
+                        }
+                    }
+                });
+            }
+        }
 
         let cancel = CancellationToken::new();
         let last_keepalive = Arc::new(AtomicU64::new(now_monotonic_us()));

@@ -47,6 +47,9 @@ pub use linux::{
     MAX_CLIPBOARD_BYTES,
 };
 // P5A policy shims.
+// Note: on Linux, `factory` returns `Arc<LinuxSwFactory>` (concrete) so the
+// host can call `take_cursor_rx()` after bootstrap. The type coerces to
+// `Arc<dyn ProducerFactory>` at the `PolicyDriven::bootstrap` call site.
 #[cfg(target_os = "linux")]
 pub use linux::{factory, probe};
 

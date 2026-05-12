@@ -206,13 +206,16 @@ pub enum PixelFormat {
     BGRx,
 }
 
-/// Public handle to the PipeWire mainloop thread and its frame receiver.
+/// Public handle to the PipeWire mainloop thread.
+///
+/// Frame and cursor receivers are returned from [`PipeWireStream::connect`]
+/// as separate values (not stored here) so the capturer can own them
+/// independently of the stream lifecycle.
 pub struct PipeWireStream {
     /// `None` after `shutdown()` consumes the handle.
     thread: Option<JoinHandle<()>>,
     quit_tx: pipewire::channel::Sender<LoopCommand>,
     stop: Arc<AtomicBool>,
-    rx: mpsc::Receiver<RawFrame>,
     current_size: Arc<Mutex<(u32, u32)>>,
 }
 
@@ -227,13 +230,33 @@ pub enum PipeWireStreamError {
 
 impl PipeWireStream {
     /// Spawn the dedicated PipeWire mainloop thread and connect to the portal
-    /// FD. Returns once `Stream::connect` has been issued; frames arrive
-    /// asynchronously via [`Self::rx`].
+    /// FD. Returns a 3-tuple `(Self, frame_rx, cursor_rx)`.
     ///
-    /// * `fd`      — `OwnedFd` from `PortalSession::open_pipewire_remote`.
-    /// * `node_id` — PipeWire node id from the Start response.
-    pub fn connect(fd: OwnedFd, node_id: u32) -> Result<Self, PipeWireStreamError> {
-        let (tx, rx) = mpsc::channel::<RawFrame>(2);
+    /// * `fd`            — `OwnedFd` from `PortalSession::open_pipewire_remote`.
+    /// * `node_id`       — PipeWire node id from the Start response.
+    /// * `frame_buf_cap` — mpsc capacity for raw video frames (typically 2).
+    /// * `cursor_buf_cap`— mpsc capacity for cursor updates (typically 8).
+    ///
+    /// The `cursor_rx` channel carries `CursorUpdate` values drained from
+    /// `SPA_META_Cursor` in each PipeWire buffer's process callback. If the
+    /// portal negotiated `CursorMode::Embedded` instead of `Metadata`, no
+    /// updates will arrive (the callback returns `Absent` silently).
+    pub fn connect(
+        fd: OwnedFd,
+        node_id: u32,
+        frame_buf_cap: usize,
+        cursor_buf_cap: usize,
+    ) -> Result<
+        (
+            Self,
+            mpsc::Receiver<RawFrame>,
+            mpsc::Receiver<crate::wayland_portal::cursor::CursorUpdate>,
+        ),
+        PipeWireStreamError,
+    > {
+        let (tx, rx) = mpsc::channel::<RawFrame>(frame_buf_cap);
+        let (cursor_tx, cursor_rx) =
+            mpsc::channel::<crate::wayland_portal::cursor::CursorUpdate>(cursor_buf_cap);
         let (quit_tx, quit_rx) = pipewire::channel::channel::<LoopCommand>();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = stop.clone();
@@ -288,6 +311,7 @@ impl PipeWireStream {
                 // --- callbacks --------------------------------------------------
                 let mut pool = FramePool::with_capacity(2);
                 let tx_cb = tx.clone();
+                let cursor_tx_cb = cursor_tx.clone();
                 let sz_cb = current_size_thread.clone();
 
                 let _listener = stream
@@ -336,11 +360,101 @@ impl PipeWireStream {
                         }
                     })
                     .process(move |stream, _ud| {
-                        let Some(mut buf) = stream.dequeue_buffer() else {
+                        // Strategy B: use dequeue_raw_buffer / queue_raw_buffer throughout.
+                        // Buffer::from_raw is pub(crate) in pipewire-0.9.2 and cannot be
+                        // called from outside the crate. We replicate datas_mut() inline
+                        // using the documented raw pointer API instead.
+                        //
+                        // SAFETY: dequeue_raw_buffer returns either a valid *mut pw_buffer or
+                        // null. The pointer is owned by the stream's buffer pool; we return it
+                        // via queue_raw_buffer at the end (RAII guard covers early returns).
+                        let pw_buf_ptr: *mut pipewire::sys::pw_buffer =
+                            unsafe { stream.dequeue_raw_buffer() };
+                        if pw_buf_ptr.is_null() {
+                            return;
+                        }
+
+                        // RAII guard: always return the buffer to the pool on exit.
+                        struct PwBufGuard<'s> {
+                            stream: &'s pipewire::stream::Stream,
+                            ptr: *mut pipewire::sys::pw_buffer,
+                        }
+                        impl Drop for PwBufGuard<'_> {
+                            fn drop(&mut self) {
+                                // SAFETY: ptr was obtained from dequeue_raw_buffer on this
+                                // stream and has not been queued elsewhere.
+                                unsafe { self.stream.queue_raw_buffer(self.ptr) };
+                            }
+                        }
+                        let _guard = PwBufGuard {
+                            stream,
+                            ptr: pw_buf_ptr,
+                        };
+
+                        // P5B-2b: drain SPA_META_Cursor BEFORE consuming the video data so
+                        // cursor state is up-to-date on this frame. Use the raw pw_buffer
+                        // pointer to reach the spa_buffer without any transmute.
+                        //
+                        // SAFETY: pw_buf_ptr is non-null (checked above); (*pw_buf_ptr).buffer
+                        // is the associated spa_buffer set by PipeWire at allocation time.
+                        let spa_buf_ptr: *const pipewire::spa::sys::spa_buffer =
+                            unsafe { (*pw_buf_ptr).buffer as *const _ };
+
+                        if !spa_buf_ptr.is_null() {
+                            struct SpaRawPtr(*const pipewire::spa::sys::spa_buffer);
+                            impl crate::wayland_portal::cursor::SpaBufferLike for SpaRawPtr {
+                                fn as_raw_spa_buffer(
+                                    &self,
+                                ) -> *const pipewire::spa::sys::spa_buffer {
+                                    self.0
+                                }
+                            }
+
+                            let adapter = SpaRawPtr(spa_buf_ptr);
+                            match unsafe {
+                                crate::wayland_portal::cursor::read_meta_cursor(&adapter)
+                            } {
+                                Ok(Some(c)) => {
+                                    let _ = cursor_tx_cb.try_send(c);
+                                }
+                                Ok(None) => {} // id==0; no new metadata
+                                Err(crate::wayland_portal::cursor::CursorMetaError::Absent) => {
+                                    // Expected on Embedded-mode streams and first frames
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "cursor meta parse failed");
+                                }
+                            }
+                        }
+
+                        // Video data path: replicate Buffer::datas_mut() inline using the
+                        // raw pw_buffer pointer. Data is #[repr(transparent)] over spa_data
+                        // so the cast (*spa_buf).datas as *mut Data is sound (same as the
+                        // pipewire-0.9.2 source does in Buffer::datas_mut).
+                        //
+                        // SAFETY: pw_buf_ptr is non-null; spa_buf_ptr follows the same
+                        // PipeWire contract as in Buffer::datas_mut.
+                        let datas_slice: &mut [pipewire::spa::buffer::Data] = unsafe {
+                            use std::convert::TryFrom;
+                            let spa_buf: *mut pipewire::spa::sys::spa_buffer =
+                                (*pw_buf_ptr).buffer;
+                            if spa_buf.is_null()
+                                || (*spa_buf).n_datas == 0
+                                || (*spa_buf).datas.is_null()
+                            {
+                                &mut []
+                            } else {
+                                let datas =
+                                    (*spa_buf).datas as *mut pipewire::spa::buffer::Data;
+                                std::slice::from_raw_parts_mut(
+                                    datas,
+                                    usize::try_from((*spa_buf).n_datas).unwrap(),
+                                )
+                            }
+                        };
+                        let Some(d) = datas_slice.first_mut() else {
                             return;
                         };
-                        let datas = buf.datas_mut();
-                        let Some(d) = datas.first_mut() else { return };
 
                         let chunk = d.chunk();
                         let stride = chunk.stride().unsigned_abs();
@@ -458,7 +572,6 @@ impl PipeWireStream {
                                 // Producer dropped; let mainloop wind down naturally.
                             }
                         }
-                        let _ = stream; // stream captured for type inference only
                     })
                     .register();
 
@@ -503,13 +616,13 @@ impl PipeWireStream {
             })
             .map_err(|e| PipeWireStreamError::SpawnFailed(e.to_string()))?;
 
-        Ok(Self {
+        let stream = Self {
             thread: Some(thread),
             quit_tx,
             stop,
-            rx,
             current_size,
-        })
+        };
+        Ok((stream, rx, cursor_rx))
     }
 
     /// Orderly shutdown: sends `Shutdown` to the mainloop and joins the thread.
@@ -522,12 +635,6 @@ impl PipeWireStream {
                 tracing::warn!(?e, "PipeWire mainloop thread join failed");
             }
         }
-    }
-
-    /// Mutable reference to the frame receiver. The `Capturer` (T6) owns the
-    /// `PipeWireStream` and drives this receiver on the tokio runtime.
-    pub fn rx(&mut self) -> &mut mpsc::Receiver<RawFrame> {
-        &mut self.rx
     }
 
     /// Last negotiated (width, height). Returns `(0, 0)` before the first
@@ -691,5 +798,28 @@ mod tests {
         // side parse test lives in format::tests::parse_round_trip_bgra (T2).
         let pods = build_format_params();
         assert_eq!(pods.as_pods().len(), 1, "exactly one EnumFormat POD");
+    }
+
+    #[test]
+    fn pipewire_stream_connect_emits_two_receivers() {
+        // Compile-time type-shape assertion: verify the connect() signature
+        // returns a 3-tuple (Self, frame_rx, cursor_rx). The assignment below
+        // fails to compile if PipeWireStream::connect returned a different shape.
+        // The value is never called — the type check is the sole assertion.
+        type ConnectFn = fn(
+            std::os::fd::OwnedFd,
+            u32,
+            usize,
+            usize,
+        ) -> Result<
+            (
+                PipeWireStream,
+                mpsc::Receiver<RawFrame>,
+                mpsc::Receiver<crate::wayland_portal::cursor::CursorUpdate>,
+            ),
+            PipeWireStreamError,
+        >;
+        let _check: ConnectFn = PipeWireStream::connect;
+        let _ = _check;
     }
 }

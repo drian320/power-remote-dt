@@ -34,6 +34,9 @@ pub struct WaylandPortalCapturer {
     /// Always `Some` during lifetime — stream owns the pipewire mainloop thread.
     /// `None` only after `shutdown()`.
     stream: Option<PipeWireStream>,
+    /// Frame receiver — separated from `PipeWireStream` since T3 (connect
+    /// returns a 3-tuple). `None` only after `shutdown()`.
+    frame_rx: Option<tokio::sync::mpsc::Receiver<super::stream::RawFrame>>,
     token_path: std::path::PathBuf,
     /// Set `true` by `shutdown()`; `Drop` warns if `false`.
     shutdown_completed: bool,
@@ -41,6 +44,10 @@ pub struct WaylandPortalCapturer {
 
 impl WaylandPortalCapturer {
     /// Build the capturer.
+    ///
+    /// Returns `(Self, cursor_rx)` where `cursor_rx` carries [`super::cursor::CursorUpdate`]
+    /// values drained from `SPA_META_Cursor` on each PipeWire buffer. The cursor
+    /// channel is empty when the portal negotiated `CursorMode::Embedded`.
     ///
     /// 1. Load restore token from disk (if any).
     /// 2. Open portal session — fires OS consent dialog first launch, or
@@ -51,7 +58,13 @@ impl WaylandPortalCapturer {
     /// 5. Persist any new restore token returned by the portal.
     pub async fn new(
         token_path: std::path::PathBuf,
-    ) -> Result<Self, WaylandPortalCapturerInitError> {
+    ) -> Result<
+        (
+            Self,
+            tokio::sync::mpsc::Receiver<super::cursor::CursorUpdate>,
+        ),
+        WaylandPortalCapturerInitError,
+    > {
         // Step 1 — load persisted token.
         let token = PortalSessionToken::load_or_default(&token_path);
         let token_opt = token.token_opt().map(str::to_owned);
@@ -80,10 +93,12 @@ impl WaylandPortalCapturer {
             pipewire_fd,
             pipewire_node_id,
             restore_token: new_token,
+            cursor_mode: _cursor_mode,
         } = output;
 
-        // Step 4 — connect PipeWire stream.
-        let stream = PipeWireStream::connect(pipewire_fd, pipewire_node_id)?;
+        // Step 4 — connect PipeWire stream. connect() returns (stream, frame_rx, cursor_rx).
+        let (stream, frame_rx, cursor_rx) =
+            PipeWireStream::connect(pipewire_fd, pipewire_node_id, 2, 8)?;
 
         // Step 5 — persist new restore token if portal issued one.
         if let Some(tok) = new_token {
@@ -97,12 +112,14 @@ impl WaylandPortalCapturer {
             }
         }
 
-        Ok(Self {
+        let capturer = Self {
             session: Some(session),
             stream: Some(stream),
+            frame_rx: Some(frame_rx),
             token_path,
             shutdown_completed: false,
-        })
+        };
+        Ok((capturer, cursor_rx))
     }
 
     /// Orderly shutdown: close PipeWire stream (joins thread), then close
@@ -110,7 +127,9 @@ impl WaylandPortalCapturer {
     ///
     /// Sets `shutdown_completed` so `Drop` does not emit the leak warning.
     pub async fn shutdown(mut self) -> Result<(), WaylandPortalError> {
-        // Consume stream first — joins the PipeWire mainloop thread.
+        // Drop frame_rx first so the PipeWire thread's try_send returns Closed
+        // and it can unblock, then consume stream to join the thread.
+        drop(self.frame_rx.take());
         if let Some(s) = self.stream.take() {
             s.shutdown();
         }
@@ -129,12 +148,14 @@ impl WaylandPortalCapturer {
     #[cfg(test)]
     fn with_test_state(
         stream: Option<PipeWireStream>,
+        frame_rx: Option<tokio::sync::mpsc::Receiver<super::stream::RawFrame>>,
         session: Option<Session<'static, Screencast<'static>>>,
         token_path: std::path::PathBuf,
     ) -> Self {
         Self {
             session,
             stream,
+            frame_rx,
             token_path,
             shutdown_completed: false,
         }
@@ -150,7 +171,7 @@ impl CaptureSource for WaylandPortalCapturer {
     }
 
     fn capture_into(&mut self, out: &mut Vec<u8>) -> Result<(), CaptureSourceError> {
-        let Some(stream) = self.stream.as_mut() else {
+        let Some(frame_rx) = self.frame_rx.as_mut() else {
             return Err(CaptureSourceError::Terminal {
                 backend: "wayland-portal",
                 reason: "capturer shut down".into(),
@@ -159,8 +180,7 @@ impl CaptureSource for WaylandPortalCapturer {
 
         // The CaptureSource trait is sync; the producer wraps the call in
         // `spawn_blocking`, so blocking here is safe.
-        let frame = stream
-            .rx()
+        let frame = frame_rx
             .blocking_recv()
             .ok_or_else(|| CaptureSourceError::Terminal {
                 backend: "wayland-portal",
@@ -216,6 +236,7 @@ mod tests {
         let capturer = WaylandPortalCapturer::with_test_state(
             None,
             None,
+            None,
             std::path::PathBuf::from("/tmp/test-portal-session.toml"),
         );
         assert!(
@@ -234,6 +255,7 @@ mod tests {
         let capturer = WaylandPortalCapturer::with_test_state(
             None,
             None,
+            None,
             std::path::PathBuf::from("/tmp/test-portal-session.toml"),
         );
         assert_eq!(capturer.geometry(), (0, 0));
@@ -241,10 +263,11 @@ mod tests {
         c.shutdown_completed = true; // suppress Drop warn
     }
 
-    /// capture_into returns Terminal when the stream is None.
+    /// capture_into returns Terminal when frame_rx is None (post-shutdown).
     #[test]
     fn capture_into_terminal_when_stream_none() {
         let mut capturer = WaylandPortalCapturer::with_test_state(
+            None,
             None,
             None,
             std::path::PathBuf::from("/tmp/test-portal-session.toml"),
@@ -259,7 +282,7 @@ mod tests {
                     ..
                 })
             ),
-            "expected Terminal error when stream is None"
+            "expected Terminal error when frame_rx is None"
         );
         capturer.shutdown_completed = true; // suppress Drop warn
     }

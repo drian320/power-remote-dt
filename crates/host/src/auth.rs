@@ -22,7 +22,7 @@ use subtle::ConstantTimeEq;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 
-const PROTOCOL_VERSION_REQUIRED: u8 = 3;
+const PROTOCOL_VERSION_REQUIRED: u8 = 4;
 const AUTH_PAYLOAD_MAX_BYTES: usize = 64;
 
 /// The result of a single Hello-time auth decision.
@@ -388,7 +388,7 @@ mod tests {
 
     fn make_hello() -> ControlMessage {
         ControlMessage::Hello {
-            protocol_version: 3,
+            protocol_version: 4,
             auth_method: AuthMethod::Tofu,
             auth_payload: vec![],
             req_width: 1920,

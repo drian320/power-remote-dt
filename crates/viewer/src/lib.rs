@@ -20,6 +20,9 @@ mod overlay_ipc;
 #[allow(dead_code)] // wired into ViewerApp in Task 3
 mod overlay_supervisor;
 
+mod cursor_state;
+pub use cursor_state::CursorState;
+
 mod latency;
 use latency::LatencyProbe;
 
@@ -454,6 +457,9 @@ struct ViewerShared {
     /// Written once by the worker task after handshake; read by the overlay
     /// (Windows) and available for future Linux overlay consumers.
     granted_permissions: Mutex<Option<prdt_protocol::PermissionSet>>,
+    /// Viewer-side cursor compositing state. Updated by the receive task
+    /// on each CursorUpdate message; read by the render thread in present_frame.
+    cursor: Arc<Mutex<crate::cursor_state::CursorState>>,
 }
 
 struct ViewerApp {
@@ -697,7 +703,7 @@ impl ViewerApp {
         let maybe_frame = self.shared.latest_frame.lock().unwrap().take();
         let mut presented_host_ts: Option<u64> = None;
         if let Some((frame, host_ts_us)) = maybe_frame {
-            if let Err(e) = present_frame(render, &frame, &self.decoder) {
+            if let Err(e) = present_frame(render, &frame, &self.decoder, &self.shared) {
                 if matches!(e, RenderError::DeviceLost(_)) {
                     tracing::error!(?e, "present_frame device-lost; viewer cannot continue");
                     self.should_exit = true;
@@ -1355,6 +1361,7 @@ pub fn run_with_args(
         latency: Arc::new(LatencyProbe::new()),
         status_title: Mutex::new(None),
         granted_permissions: Mutex::new(None),
+        cursor: Arc::new(Mutex::new(crate::cursor_state::CursorState::new())),
     });
 
     // Build the tokio runtime on a dedicated worker thread.
@@ -1992,6 +1999,19 @@ fn spawn_worker_tasks(
                     }
                     Ok(ReceivedMessage::Control(ControlMessage::Pong { .. })) => {
                         control_count += 1;
+                    }
+                    Ok(ReceivedMessage::Control(ControlMessage::CursorUpdate {
+                        id,
+                        position_x,
+                        position_y,
+                        hotspot_x,
+                        hotspot_y,
+                        bitmap,
+                    })) => {
+                        control_count += 1;
+                        if let Ok(mut s) = recv_shared.cursor.lock() {
+                            s.apply(id, position_x, position_y, hotspot_x, hotspot_y, bitmap);
+                        }
                     }
                     Ok(ReceivedMessage::Control(ControlMessage::ClipboardText { text })) => {
                         control_count += 1;

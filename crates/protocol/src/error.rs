@@ -25,6 +25,13 @@ pub enum ProtocolError {
 
     #[error("bincode: {0}")]
     Bincode(#[from] bincode::Error),
+
+    #[error("invalid cursor bitmap: {width}x{height} but bgra_len={bgra_len}")]
+    InvalidCursorBitmap {
+        width: u16,
+        height: u16,
+        bgra_len: usize,
+    },
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 # power-remote-dt — Project Status & Roadmap
 
 **Last updated:** 2026-05-12
-**Latest tag:** `phase-p5b2a-libspa-pod-dmabuf-complete`
+**Latest tag:** `phase-p5b2b-cursor-metadata-matrix-complete`
 **Branch state:** `phase0-sw-codec-wire` (post-tag) — **Phase 4 + Plan 4 B1 + B4 + B6 + B7 + B8 完了 + MF エンコーダ fallback 完了 + host session liveness 完了 + NVDEC arc-swap 化 完了 + ソフトウェアコーデック OpenH264 完了 (B3 のみ HW ブロック保留)**
 **Test count:** 348+ automated Rust tests + 11 Python tests; new crate `prdt-media-sw` 6 tests (Phase 1) + Phase 0 protocol/transport new tests + Phase 5 latency-bench new test (≥10 new tests per plan §8 acceptance)
 
@@ -363,6 +363,51 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
   - **Smoke walkthrough**: `docs/superpowers/p5b1-smoke-walkthrough.md`
     §P5B-2a Section D (GNOME DMABUF zero-copy) + Section E (MemFd
     fallback regression) + Section F (MOD_INVALID handling).
+
+- **P5B-2b (`phase-p5b2b-cursor-metadata-matrix-complete`, 2026-05-12)**:
+  Wayland-portal cursor_mode=Metadata + viewer-side cursor compositing
+  + GNOME (mutter) + KDE (kwin) smoke walkthrough.
+  - New `crates/media-linux/src/wayland_portal/cursor.rs`:
+    bare-FFI `read_meta_cursor<B: SpaBufferLike>(buf: &B) -> Result<Option<CursorUpdate>, CursorMetaError>`
+    parses `SPA_META_Cursor` + `spa_meta_bitmap` via `spa_sys` raw pointers
+    (libspa-rs 0.9.2 exposes no Meta wrapper) and normalizes pixel data
+    from BGRA / RGBA / ARGB to tightly-packed BGRA8.
+  - `wayland_portal/session.rs`: probes `Screencast::available_cursor_modes()`
+    at start; selects `CursorMode::Metadata` when advertised, falls back
+    to `CursorMode::Embedded` with a warn log otherwise.
+  - `wayland_portal/stream.rs::PipeWireStream::connect` signature widens
+    to return `(stream, frame_rx, cursor_rx)`; process callback drains
+    cursor meta before the existing video data dispatch.
+  - `crates/protocol/src/control.rs`: new `ControlMessage::CursorUpdate`
+    variant at `kind_u8 = 18` carrying
+    `{ id, position_x, position_y, hotspot_x, hotspot_y, bitmap: Option<CursorBitmap> }`.
+    `CursorBitmap { width: u16, height: u16, bgra: Vec<u8> }` — tightly
+    packed BGRA8, `width==0 && height==0` signals "cursor invisible".
+  - `protocol_version` bumped `3 → 4` at `crates/transport/src/handshake.rs:61`
+    + `crates/host/src/auth.rs:25`. Hard bump — v3 viewers and v4 hosts
+    are mutually incompatible (strict-match rejection); operators upgrade
+    both sides simultaneously.
+  - `crates/viewer/src/cursor_state.rs`: viewer-side `CursorState` holds
+    the latest position + cached `Arc<CursorBitmap>`. `apply()` overwrites
+    position always; replaces cached bitmap ONLY when the wire message
+    carries a new one (bitmap-presence is the cache-invalidation signal;
+    `id` is informational only per Codex finding).
+  - `crates/viewer/src/platform/linux.rs`: CPU `alpha_blend_bgra` helper
+    composites the cursor on top of `scratch_bgra` before
+    `softbuffer::Surface::present()`. Windows D3D11 path stubbed in T5
+    pending follow-up branch (bookworm container cannot compile media-win).
+  - **Tests**: 4 `cursor::read_meta_cursor` + 3 `cursor_state` + 2
+    `alpha_blend_bgra` + 2 wire `cursor_update_round_trip` = **11 new
+    tests**. Container clippy clean on `prdt-media-linux + prdt-protocol +
+    prdt-transport + prdt-host + prdt-viewer`. Affected-slice lib tests
+    pass; X11 contract regression guard still 3 pass / 1 ignored.
+  - **Out of scope (deferred)**: Sway / Hyprland / wlroots smoke (P5C);
+    Windows D3D11 cursor overlay full implementation (follow-up branch);
+    cursor bitmap chunking (>256×256 silent-truncates); cursor coordinate
+    HiDPI scaling refinement (logical-pixel passthrough only).
+  - **Smoke walkthrough**: `docs/superpowers/p5b1-smoke-walkthrough.md`
+    §P5B-2b Section G (GNOME cursor metadata) + Section H (KDE cursor
+    metadata).
 
 ### **C. 計測 / 観測 系(blocker 解消用)**
 

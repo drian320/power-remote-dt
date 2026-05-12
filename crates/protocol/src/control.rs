@@ -115,6 +115,19 @@ impl MonitorRect {
     }
 }
 
+/// Tightly packed BGRA8 cursor bitmap carried inside
+/// [`ControlMessage::CursorUpdate`]. `width == 0 && height == 0` means
+/// "cursor invisible" — viewer hides compositing but does NOT show the
+/// OS-native cursor inside the capture region.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CursorBitmap {
+    pub width: u16,
+    pub height: u16,
+    /// BGRA8 tightly packed: `len() == width * height * 4` when both
+    /// dimensions are non-zero, else `Vec::new()`.
+    pub bgra: Vec<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ControlMessage {
     /// Viewer → Host.
@@ -225,6 +238,29 @@ pub enum ControlMessage {
     /// `LatencyReport` already carry timing data; this is purely a
     /// liveness signal that fires unconditionally every 1s.
     KeepAlive,
+    /// Host → Viewer. Cursor metadata update for cursor_mode=Metadata path.
+    ///
+    /// Sent only when negotiated protocol_version >= 4 AND the host's
+    /// capture backend supports `SPA_META_Cursor` extraction (Linux portal
+    /// only; Windows DXGI bakes the cursor into the frame and never emits
+    /// this variant).
+    ///
+    /// Coordinates are in capture-region-relative LOGICAL pixels; the
+    /// origin is the top-left of `HelloAck.host_monitor_rect`. May fall
+    /// outside the rect when the cursor is at an edge; viewer clamps.
+    ///
+    /// `bitmap == None` is a position-only update (viewer reuses cached
+    /// bitmap). `bitmap == Some { width: 0, height: 0, .. }` is "cursor
+    /// invisible". Otherwise `bitmap.bgra.len() == width * height * 4`
+    /// (decode validator enforces).
+    CursorUpdate {
+        id: u32,
+        position_x: i32,
+        position_y: i32,
+        hotspot_x: i32,
+        hotspot_y: i32,
+        bitmap: Option<CursorBitmap>,
+    },
     /// Pre-Noise connectivity probe; both sides send these for each candidate
     /// and echo matching ProbeAck back. Used by
     /// `CustomUdpTransport::probe_and_commit_peer`.
@@ -262,6 +298,7 @@ impl ControlMessage {
             Self::FileTransferEnd { .. } => 15,
             Self::LatencyReport { .. } => 16,
             Self::KeepAlive => 17,
+            Self::CursorUpdate { .. } => 18,
             Self::Probe { .. } => 20,
             Self::ProbeAck { .. } => 21,
             Self::HelloReject { .. } => 22,
