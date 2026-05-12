@@ -471,3 +471,36 @@ behaviour); no `CursorUpdate` messages on the wire.
   the viewer window has focus + cursor is within the render rect.
   Restores on focus loss / cursor-leave. Race with modal dialogs may
   cause brief double-cursor flashes.
+
+---
+
+## P5B-2c — OS-native cursor hide
+
+### Section J — Two-cursor regression check
+
+**Pre-conditions:**
+- v4 host + v4 viewer.
+- A compositor that advertises `CursorMode::Metadata` (GNOME mutter ≥ 42, KDE kwin ≥ 5.27).
+- Viewer window initially focused.
+
+**Steps:**
+
+1. Start the host + viewer per §G or §H.
+2. Move the host's cursor. Confirm the composited host cursor tracks in the viewer.
+3. **Verify ONE cursor visible**:
+   - Hover the OS cursor over the viewer window. The OS-native cursor should DISAPPEAR.
+   - Only the composited host cursor remains visible.
+4. **Verify focus-loss restores OS cursor**:
+   - Alt-Tab to another window. The viewer loses focus.
+   - Hover back over the viewer window. The OS-native cursor reappears (focus is on the other window).
+5. **Verify focus-regain hides OS cursor again**:
+   - Click on the viewer window to focus it.
+   - The OS-native cursor disappears once the cursor is over the window.
+6. **Verify Embedded-mode fallback keeps OS cursor visible**:
+   - Connect to a host running with `--capture-backend wayland` on a compositor that does NOT advertise Metadata mode (e.g. xdg-desktop-portal-wlr without cursor metadata patches).
+   - The cursor is baked into the frame; `cursor_state.visible() == false`.
+   - The OS-native cursor stays visible (user always has at least one pointer).
+
+### Known issues / follow-ups (P5B-2c)
+
+- **Modal dialog cursor restore race**: opening a modal dialog (e.g. a permissions prompt) within the viewer may briefly re-show the OS cursor. The visibility helper re-asserts on the next `CursorMoved` event, so the flash is bounded to one frame. Tracked but not pre-emptively gated.
