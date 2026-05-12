@@ -890,24 +890,10 @@ pub async fn run_host(
 
         // P5B-2b (Linux/Wayland): drain cursor channel produced by the factory
         // and forward each update over the wire as ControlMessage::CursorUpdate.
-        // Mirrors the clipboard watcher task (see clip_task below).
+        // Receive the channel handle before cancel is created; task is spawned below.
         // On X11 or Windows, take_cursor_rx() returns None and this is a no-op.
         #[cfg(target_os = "linux")]
-        {
-            use prdt_media_linux::policy::cursor_to_control;
-            if let Some(mut cursor_rx) = factory_arc.take_cursor_rx() {
-                let cursor_transport = Arc::clone(&transport);
-                tokio::spawn(async move {
-                    while let Some(c) = cursor_rx.recv().await {
-                        let msg = cursor_to_control(c);
-                        if let Err(e) = cursor_transport.send_control(msg).await {
-                            tracing::debug!(?e, "cursor send failed; forwarder exiting");
-                            break;
-                        }
-                    }
-                });
-            }
-        }
+        let cursor_rx_opt = factory_arc.take_cursor_rx();
 
         let cancel = CancellationToken::new();
         let last_keepalive = Arc::new(AtomicU64::new(now_monotonic_us()));
@@ -920,6 +906,41 @@ pub async fn run_host(
         // next_frame() and calls producer.set_target_bitrate(). Unbounded
         // because messages are tiny u32s at ~1 Hz, far below memory pressure.
         let (bitrate_tx, mut bitrate_rx) = tokio::sync::mpsc::unbounded_channel::<u32>();
+
+        // P5B-2c (Linux/Wayland): cursor forwarder task — cancellation-aware,
+        // joined at session teardown alongside the other worker tasks.
+        // On X11 or Windows, cursor_rx_opt is not defined; the cfg guard keeps
+        // this block out of non-Linux builds entirely.
+        #[cfg(target_os = "linux")]
+        let cursor_task = {
+            let cancel_cursor = cancel.clone();
+            let cursor_transport = Arc::clone(&transport);
+            tokio::spawn(async move {
+                if let Some(mut cursor_rx) = cursor_rx_opt {
+                    loop {
+                        tokio::select! {
+                            _ = cancel_cursor.cancelled() => break,
+                            msg = cursor_rx.recv() => {
+                                match msg {
+                                    Some(c) => {
+                                        if let Err(e) = cursor_transport
+                                            .send_control(
+                                                prdt_media_linux::policy::cursor_to_control(c),
+                                            )
+                                            .await
+                                        {
+                                            tracing::debug!(?e, "cursor send failed");
+                                            break;
+                                        }
+                                    }
+                                    None => break,
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+        };
 
         // Spawn video loop. `handshake_complete_at` anchors the first-frame-latency
         // measurement (Phase 4 acceptance: ≤ 500ms max-of-20 cold-start).
@@ -1320,6 +1341,8 @@ pub async fn run_host(
                 info!("ctrl-c received; shutting down");
                 cancel.cancel();
                 let _ = tokio::join!(video, input, audio_task, clip_task, outgoing_task, watchdog);
+                #[cfg(target_os = "linux")]
+                let _ = cursor_task.await;
                 return Ok(());
             }
         }
@@ -1328,6 +1351,8 @@ pub async fn run_host(
         // the next handshake (NVENC/MF release GPU resources here).
         cancel.cancel();
         let _ = tokio::join!(video, input, audio_task, clip_task, outgoing_task, watchdog);
+        #[cfg(target_os = "linux")]
+        let _ = cursor_task.await;
         info!("session ended; returning to handshake wait");
     }
 }
