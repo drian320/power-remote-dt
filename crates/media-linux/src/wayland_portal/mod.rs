@@ -13,7 +13,9 @@ pub mod stream;
 pub mod token;
 
 pub use capturer::{WaylandPortalCapturer, WaylandPortalCapturerInitError};
-pub use format::{BuiltParams, DRM_FORMAT_MOD_INVALID, DRM_FORMAT_MOD_LINEAR};
+pub use format::{
+    BuiltParams, NegotiatedFormat, ParseError, DRM_FORMAT_MOD_INVALID, DRM_FORMAT_MOD_LINEAR,
+};
 pub use session::{PortalSession, PortalStartOutput, WaylandPortalError};
 pub use stream::{LoopCommand, PipeWireStream, PipeWireStreamError, PixelFormat, RawFrame};
 pub use token::PortalSessionToken;

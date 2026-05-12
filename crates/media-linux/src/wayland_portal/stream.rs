@@ -146,7 +146,7 @@ impl FramePool {
 }
 
 /// Negotiated pixel format subset that this backend accepts.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PixelFormat {
     BGRA,
     BGRx,
