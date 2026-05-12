@@ -195,23 +195,20 @@ impl ProducerFactory for LinuxSwFactory {
             CaptureBackend::X11Shm => crate::build_video_producer(cfg.initial_bitrate_bps, cfg.fps)
                 .map_err(|e| FactoryError::InvalidConfig(kind, e.to_string()))?,
             CaptureBackend::WaylandPortal => {
-                use std::sync::Once;
-                static WAYLAND_STUB_WARN: Once = Once::new();
-                WAYLAND_STUB_WARN.call_once(|| {
-                    tracing::warn!(
-                        "WaylandPortal capture backend requested but not yet wired (T7); \
-                         falling back to X11. --capture-backend wayland will produce X11 \
-                         frames until P5B-1 T7 lands."
-                    );
-                });
-                crate::build_video_producer(cfg.initial_bitrate_bps, cfg.fps).map_err(|e| {
-                    FactoryError::InvalidConfig(
-                        kind,
-                        format!(
-                        "wayland-portal capturer not wired yet (T7); X11 fallback also failed: {e}"
+                // T5/T6 deferred — pipewire runtime is not built on this branch.
+                // WaylandPortalCapturer::new() returns NotImplemented from T4's
+                // stub; we propagate it as Unavailable so operator gets a clean
+                // error fast instead of a silent X11 substitution.
+                let cap_result = crate::wayland_portal::WaylandPortalCapturer::new();
+                return Err(FactoryError::Unavailable(
+                    kind,
+                    format!(
+                        "WaylandPortal capture backend is in the Foundation-only milestone; \
+                         T5/T6 (PipeWire runtime) deferred — see commit 684f43d. \
+                         Use --capture-backend x11 or omit the flag. Inner: {:?}",
+                        cap_result.err()
                     ),
-                    )
-                })?
+                ));
             }
         };
         Ok(Box::new(producer))
@@ -337,5 +334,45 @@ mod tests {
         );
         let (got, _) = detect_capture_backend(CaptureBackendChoice::Auto);
         assert_eq!(got, CaptureBackend::X11Shm);
+    }
+
+    // ----- T7 factory routing tests -----
+
+    fn make_cfg() -> ProducerConfig {
+        ProducerConfig {
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            initial_bitrate_bps: 4_000_000,
+            codec: Codec::H264,
+        }
+    }
+
+    #[test]
+    fn linux_factory_routes_x11_backend_to_x11_capturer() {
+        let factory = LinuxSwFactory::new(CaptureBackend::X11Shm);
+        assert_eq!(factory.capture_backend(), CaptureBackend::X11Shm);
+    }
+
+    #[test]
+    fn linux_factory_routes_wayland_backend_to_wayland_capturer() {
+        let factory = LinuxSwFactory::new(CaptureBackend::WaylandPortal);
+        assert_eq!(factory.capture_backend(), CaptureBackend::WaylandPortal);
+    }
+
+    #[test]
+    fn linux_factory_forced_wayland_returns_unavailable_in_foundation() {
+        let factory = LinuxSwFactory::new(CaptureBackend::WaylandPortal);
+        let cfg = make_cfg();
+        let result = factory.create(BackendKind::Openh264, &cfg);
+        match result {
+            Err(FactoryError::Unavailable(BackendKind::Openh264, msg)) => {
+                assert!(
+                    msg.contains("Foundation") || msg.contains("T5") || msg.contains("T6"),
+                    "expected Foundation marker in error message, got: {msg}"
+                );
+            }
+            _ => panic!("expected Err(Unavailable(Openh264, _))"),
+        }
     }
 }
