@@ -15,6 +15,13 @@ pub enum LinuxMediaError {
     Openh264(#[from] prdt_media_sw::MediaSwError),
     #[error("invalid frame dimensions: {0}x{1}")]
     InvalidDimensions(u32, u32),
+    /// VAAPI backend error wrapping the original `VaapiError`. The variant
+    /// is kept structured so `VaapiVideoProducer::next_frame` can pattern-match
+    /// on `VaapiError::HardwareBusy` and surface `ProducerError::DeviceLost`
+    /// for the SelectionPolicy fail-over path. All other variants flow through
+    /// as `ProducerError::Encode`.
+    #[error("vaapi backend error: {0}")]
+    Vaapi(#[from] prdt_media_vaapi::VaapiError),
 }
 
 impl From<LinuxMediaError> for prdt_media_core::CaptureError {

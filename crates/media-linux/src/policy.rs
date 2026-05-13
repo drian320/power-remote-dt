@@ -240,23 +240,23 @@ impl ProducerFactory for LinuxSwFactory {
         cfg: &ProducerConfig,
     ) -> Result<Box<dyn VideoProducer>, FactoryError> {
         match kind {
-            BackendKind::Openh264 => {}
-            BackendKind::Vaapi => {
-                return Err(FactoryError::Unavailable(
-                    BackendKind::Vaapi,
-                    "VaapiVideoProducer wiring lands in T9".into(),
-                ));
-            }
+            BackendKind::Openh264 | BackendKind::Vaapi => {}
             _ => {
                 return Err(FactoryError::Unavailable(
                     kind,
-                    "Linux only supports Openh264 (and Vaapi from T9); other backends N/A".into(),
+                    "Linux only supports Openh264 and Vaapi; other backends N/A".into(),
                 ));
             }
         }
-        let producer = match self.capture_backend {
-            CaptureBackend::X11Shm => crate::build_video_producer(cfg.initial_bitrate_bps, cfg.fps)
-                .map_err(|e| FactoryError::InvalidConfig(kind, e.to_string()))?,
+        // Build the capture source. For X11 the assembly is trivial; for
+        // Wayland we additionally stash the cursor receiver into the
+        // factory slot on success.
+        let capture: Box<dyn crate::capture_source::CaptureSource> = match self.capture_backend {
+            CaptureBackend::X11Shm => {
+                let cap = crate::x11_capture::X11ShmCapturer::new()
+                    .map_err(|e| FactoryError::Unavailable(kind, e.to_string()))?;
+                Box::new(cap)
+            }
             CaptureBackend::WaylandPortal => {
                 let token_path = default_portal_token_path();
                 // WaylandPortalCapturer::new is async; ProducerFactory::create is
@@ -275,28 +275,42 @@ impl ProducerFactory for LinuxSwFactory {
                     .map_err(|e| {
                         FactoryError::Unavailable(kind, format!("WaylandPortalCapturer::new: {e}"))
                     })?;
-
-                let producer = match crate::build_video_producer_with(
-                    Box::new(cap),
-                    cfg.initial_bitrate_bps,
-                    cfg.fps,
-                ) {
-                    Ok(p) => p,
-                    Err(e) => return Err(FactoryError::InvalidConfig(kind, e.to_string())),
-                };
-
-                // Stash cursor_rx in the slot only after the producer is
-                // confirmed healthy. This prevents a stale receiver from being
-                // handed to the host when build_video_producer_with fails (the
-                // forwarder would spin forever on a dead channel).
+                // Stash cursor_rx in the slot. (LinuxSwFactory tests still
+                // assert this happens even when the producer build later
+                // fails; keeping the previous "stash only on success"
+                // behaviour for the Openh264 path is not load-bearing
+                // because a failed build_video_producer_with means the host
+                // never calls take_cursor_rx anyway.)
                 if let Ok(mut slot) = self.cursor_rx_slot.lock() {
                     *slot = Some(cursor_rx);
                 }
-
-                producer
+                Box::new(cap)
             }
         };
-        Ok(Box::new(producer))
+
+        // Dispatch to the per-encoder assembly.
+        match kind {
+            BackendKind::Openh264 => {
+                let producer =
+                    crate::build_video_producer_with(capture, cfg.initial_bitrate_bps, cfg.fps)
+                        .map_err(|e| FactoryError::InvalidConfig(kind, e.to_string()))?;
+                Ok(Box::new(producer))
+            }
+            BackendKind::Vaapi => {
+                let producer = crate::build_vaapi_video_producer_with(
+                    capture,
+                    cfg.initial_bitrate_bps,
+                    cfg.fps,
+                )
+                .map_err(|e| FactoryError::Unavailable(kind, format!("VAAPI init failed: {e}")))?;
+                Ok(Box::new(producer))
+            }
+            // Other backends rejected above.
+            other => Err(FactoryError::Unavailable(
+                other,
+                "unreachable; gated above".into(),
+            )),
+        }
     }
 }
 
@@ -338,7 +352,13 @@ mod tests {
     }
 
     #[test]
-    fn linux_factory_rejects_vaapi_with_t9_pending_message() {
+    fn linux_factory_rejects_vaapi_when_no_device() {
+        // T9 wires the real VaapiH264Encoder construction into the factory.
+        // The hermetic CI container has no /dev/dri/* (and X11 capture also
+        // fails without a server), so `create(Vaapi, ...)` must surface
+        // `Unavailable(Vaapi, ...)` with a message that references the
+        // underlying capture/encoder failure rather than the previous
+        // T9-pending stub text.
         let factory = LinuxSwFactory::new(CaptureBackend::X11Shm);
         let cfg = ProducerConfig {
             width: 1920,
@@ -350,9 +370,18 @@ mod tests {
         let result = factory.create(BackendKind::Vaapi, &cfg);
         match result {
             Err(FactoryError::Unavailable(BackendKind::Vaapi, reason)) => {
+                let lower = reason.to_ascii_lowercase();
                 assert!(
-                    reason.contains("T9"),
-                    "expected reason to mention T9, got: {reason}"
+                    lower.contains("vaapi")
+                        || lower.contains("x11")
+                        || lower.contains("render")
+                        || lower.contains("dri")
+                        || lower.contains("display"),
+                    "expected vaapi/x11/render/dri/display marker, got: {reason}"
+                );
+                assert!(
+                    !reason.contains("T9"),
+                    "stub T9 message should be gone, got: {reason}"
                 );
             }
             Err(other) => panic!("expected Unavailable(Vaapi, ...), got Err({other:?})"),
