@@ -195,6 +195,41 @@ impl PodBuilder {
         }
     }
 
+    /// Append a bare `SPA_TYPE_Id` POD.
+    pub fn add_id_primitive(&mut self, id: u32) {
+        // SAFETY: builder is valid; spa_pod_builder_id takes a u32.
+        self.init_if_needed();
+        unsafe {
+            spa_sys::spa_pod_builder_id(&mut self.raw, id);
+        }
+    }
+
+    /// Append a bare `SPA_TYPE_Rectangle` POD.
+    pub fn add_rectangle_primitive(&mut self, width: u32, height: u32) {
+        // SAFETY: builder is valid; spa_pod_builder_rectangle writes
+        // a SPA_TYPE_Rectangle (8 bytes) at the current offset.
+        self.init_if_needed();
+        unsafe {
+            spa_sys::spa_pod_builder_rectangle(&mut self.raw, width, height);
+        }
+    }
+
+    /// Append a bare `SPA_TYPE_Fraction` POD.
+    pub fn add_fraction_primitive(&mut self, num: i32, denom: i32) {
+        // SAFETY: builder is valid; spa_pod_builder_fraction writes
+        // a SPA_TYPE_Fraction (8 bytes) at the current offset. libspa-sys
+        // 0.9.2 bindings type the args as u32 although the SPA POD spec
+        // treats them as signed; cast at the FFI boundary.
+        self.init_if_needed();
+        unsafe {
+            spa_sys::spa_pod_builder_fraction(
+                &mut self.raw,
+                num as u32,
+                denom as u32,
+            );
+        }
+    }
+
     /// Drop the builder and return the serialised POD bytes truncated
     /// to the actual size written (`raw.state.offset`).
     pub fn finish(mut self) -> Vec<u8> {
@@ -253,5 +288,50 @@ mod tests {
         // is not a single valid POD. The size check + non-corruption is
         // what we care about (libspa would have aborted via SIGSEGV if
         // the realloc was wrong).
+    }
+
+    #[test]
+    fn primitive_id_round_trip() {
+        let mut b = PodBuilder::new();
+        b.add_id_primitive(spa_sys::SPA_VIDEO_FORMAT_BGRA);
+        let bytes = b.finish();
+        let (_n, value) =
+            PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
+        match value {
+            Value::Id(id) => assert_eq!(id.0, spa_sys::SPA_VIDEO_FORMAT_BGRA),
+            other => panic!("expected Id, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn primitive_rectangle_round_trip() {
+        let mut b = PodBuilder::new();
+        b.add_rectangle_primitive(1920, 1080);
+        let bytes = b.finish();
+        let (_n, value) =
+            PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
+        match value {
+            Value::Rectangle(r) => {
+                assert_eq!(r.width, 1920);
+                assert_eq!(r.height, 1080);
+            }
+            other => panic!("expected Rectangle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn primitive_fraction_round_trip() {
+        let mut b = PodBuilder::new();
+        b.add_fraction_primitive(60, 1);
+        let bytes = b.finish();
+        let (_n, value) =
+            PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
+        match value {
+            Value::Fraction(f) => {
+                assert_eq!(f.num, 60);
+                assert_eq!(f.denom, 1);
+            }
+            other => panic!("expected Fraction, got {other:?}"),
+        }
     }
 }
