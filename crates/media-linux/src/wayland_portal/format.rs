@@ -10,12 +10,10 @@
 use pipewire::spa::param::{
     format::{FormatProperties, MediaSubtype, MediaType},
     video::VideoFormat,
-    ParamType,
 };
 use pipewire::spa::pod::deserialize::PodDeserializer;
-use pipewire::spa::pod::serialize::PodSerializer;
-use pipewire::spa::pod::{ChoiceValue, Object, Pod, Property, PropertyFlags, Value};
-use pipewire::spa::utils::{Choice, ChoiceEnum, ChoiceFlags, Fraction, Id, Rectangle, SpaTypes};
+use pipewire::spa::pod::{ChoiceValue, Pod, Value};
+use pipewire::spa::utils::{ChoiceEnum, Fraction, Id, Rectangle, SpaTypes};
 use thiserror::Error;
 
 /// DRM modifier: linear (no tiling). Compositors that hand us a DMABUF
@@ -77,87 +75,56 @@ impl BuiltParams {
 /// will reintroduce the modifier property with the correct flags + the
 /// full driver-advertised modifier list.
 pub fn build() -> BuiltParams {
-    // Flag set used on every Choice-typed Property below. See doc comment.
-    let choice_flags = PropertyFlags::MANDATORY | PropertyFlags::DONT_FIXATE;
+    use crate::wayland_portal::pod_builder::PodBuilder;
+    use pipewire::spa::sys as spa_sys;
 
-    let obj = Object {
-        type_: SpaTypes::ObjectParamFormat.as_raw(),
-        id: ParamType::EnumFormat.as_raw(),
-        properties: vec![
-            // MediaType and MediaSubtype are scalar Ids (not Choices). Per
-            // libspa convention they don't need DONT_FIXATE; leave flags
-            // empty (matches Property::new default).
-            Property::new(
-                FormatProperties::MediaType.as_raw(),
-                Value::Id(Id(MediaType::Video.as_raw())),
-            ),
-            Property::new(
-                FormatProperties::MediaSubtype.as_raw(),
-                Value::Id(Id(MediaSubtype::Raw.as_raw())),
-            ),
-            Property {
-                key: FormatProperties::VideoFormat.as_raw(),
-                flags: choice_flags,
-                value: Value::Choice(ChoiceValue::Id(Choice(
-                    ChoiceFlags::empty(),
-                    ChoiceEnum::Enum {
-                        default: Id(VideoFormat::BGRA.as_raw()),
-                        alternatives: vec![
-                            Id(VideoFormat::BGRA.as_raw()),
-                            Id(VideoFormat::BGRx.as_raw()),
-                            Id(VideoFormat::RGBA.as_raw()),
-                            Id(VideoFormat::RGBx.as_raw()),
-                            Id(VideoFormat::ARGB.as_raw()),
-                            Id(VideoFormat::ABGR.as_raw()),
-                            Id(VideoFormat::xRGB.as_raw()),
-                            Id(VideoFormat::xBGR.as_raw()),
-                        ],
-                    },
-                ))),
-            },
-            Property {
-                key: FormatProperties::VideoSize.as_raw(),
-                flags: choice_flags,
-                value: Value::Choice(ChoiceValue::Rectangle(Choice(
-                    ChoiceFlags::empty(),
-                    ChoiceEnum::Range {
-                        default: Rectangle {
-                            width: 1920,
-                            height: 1080,
-                        },
-                        min: Rectangle {
-                            width: 320,
-                            height: 240,
-                        },
-                        max: Rectangle {
-                            width: 7680,
-                            height: 4320,
-                        },
-                    },
-                ))),
-            },
-            Property {
-                key: FormatProperties::VideoFramerate.as_raw(),
-                flags: choice_flags,
-                value: Value::Choice(ChoiceValue::Fraction(Choice(
-                    ChoiceFlags::empty(),
-                    ChoiceEnum::Range {
-                        default: Fraction { num: 60, denom: 1 },
-                        min: Fraction { num: 15, denom: 1 },
-                        max: Fraction { num: 60, denom: 1 },
-                    },
-                ))),
-            },
-        ],
-    };
+    let mut b = PodBuilder::new();
+    {
+        let mut o = b.push_object(
+            spa_sys::SPA_TYPE_OBJECT_Format,
+            spa_sys::SPA_PARAM_EnumFormat,
+        );
 
-    let bytes =
-        PodSerializer::serialize(std::io::Cursor::new(Vec::<u8>::new()), &Value::Object(obj))
-            .expect("PodSerializer::serialize(EnumFormat) — only fails on OOM")
-            .0
-            .into_inner();
+        // MediaType / MediaSubtype: scalar Id properties, no Choice.
+        o.add_id_property(spa_sys::SPA_FORMAT_mediaType, spa_sys::SPA_MEDIA_TYPE_video);
+        o.add_id_property(spa_sys::SPA_FORMAT_mediaSubtype, spa_sys::SPA_MEDIA_SUBTYPE_raw);
 
-    BuiltParams { bytes: vec![bytes] }
+        // VideoFormat: Choice<Id> Enum over the full 32-bit BGRA/RGBA
+        // family so compositors with iHD-style framebuffer ordering can
+        // match without falling back to "no more input formats".
+        o.add_choice_id_enum(
+            spa_sys::SPA_FORMAT_VIDEO_format,
+            spa_sys::SPA_VIDEO_FORMAT_BGRA,
+            &[
+                spa_sys::SPA_VIDEO_FORMAT_BGRA,
+                spa_sys::SPA_VIDEO_FORMAT_BGRx,
+                spa_sys::SPA_VIDEO_FORMAT_RGBA,
+                spa_sys::SPA_VIDEO_FORMAT_RGBx,
+                spa_sys::SPA_VIDEO_FORMAT_ARGB,
+                spa_sys::SPA_VIDEO_FORMAT_ABGR,
+                spa_sys::SPA_VIDEO_FORMAT_xRGB,
+                spa_sys::SPA_VIDEO_FORMAT_xBGR,
+            ],
+        );
+
+        // VideoSize: Choice<Rectangle> Range, default 1920x1080.
+        o.add_choice_rectangle_range(
+            spa_sys::SPA_FORMAT_VIDEO_size,
+            (1920, 1080),
+            (320, 240),
+            (7680, 4320),
+        );
+
+        // VideoFramerate: Choice<Fraction> Range, default 60/1.
+        o.add_choice_fraction_range(
+            spa_sys::SPA_FORMAT_VIDEO_framerate,
+            (60, 1),
+            (15, 1),
+            (60, 1),
+        );
+    } // ObjectScope drop -> pop
+
+    BuiltParams { bytes: vec![b.finish()] }
 }
 
 /// Re-export of `stream::PixelFormat` so callers don't need two imports.
@@ -329,6 +296,10 @@ fn unwrap_choice_default(v: &Value) -> &Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pipewire::spa::param::ParamType;
+    use pipewire::spa::pod::serialize::PodSerializer;
+    use pipewire::spa::pod::{Object, Property, PropertyFlags};
+    use pipewire::spa::utils::Choice;
 
     /// Helper: serialise a hand-built Object to bytes so tests can feed
     /// it back into `parse()`. Mirrors `build()`'s serialisation step.
