@@ -560,4 +560,82 @@ behaviour); no `CursorUpdate` messages on the wire.
 
 - **VBR mode**: only CBR is supported in P5C-1. CBR↔VBR switching via dynamic reconfigure is driver-fragile (spec §2); add a `--vaapi-rc-mode {cbr,vbr}` CLI knob in a follow-up.
 
+- **Wayland portal capture on GNOME 46 (mutter) — frame ingestion blocked, encoder path verified**
+  (real-device smoke 2026-05-13, N100 Intel Alder Lake-N iGPU, Ubuntu 24.04 Wayland session)
+
+  P5C-1 host side reaches `encoder ready backend="linux-vaapi-h264"` and
+  `vaCreateContext` succeeds on the iHD driver — the VAAPI encoder, P5A
+  policy ranking (`priority=90`), `LinuxSwFactory::create` Vaapi arm, and
+  `LinuxVaapiEncoder` Send/Sync bridge are all confirmed working
+  end-to-end up to encoder construction. However the pipewire screencast
+  stream rejects our `EnumFormat` POD on GNOME 46 mutter with:
+
+  ```
+  pipewire stream: error invalid message received 0 for 2: Invalid argument
+  state=Error: no more input formats
+  ```
+
+  Root cause is that the `EnumFormat` SPA POD produced by pipewire-rs
+  0.9.2's `Object` serializer does not exactly match what GNOME 46
+  mutter expects on the wire. Five iterations attempted on this branch
+  did not resolve it:
+  1. `f86ed1a` — omit `VideoModifier` from EnumFormat for CPU consumers
+  2. `e5515b5` — set `MANDATORY | DONT_FIXATE` on Choice props
+  3. expanding `VideoFormat` alternatives from 2 (BGRA/BGRx) to 8
+  4. `bf2f30a` — filter `param_changed` by `id` so non-Format params don't
+     mis-parse as Format
+  5. `29a7afc` — add `state_changed` listener for diagnosis visibility
+
+  Adjacent fixes that DID land on this branch and ARE keepers (carried
+  forward into P5C-1 because they're regressions in the existing path,
+  not new code):
+  - `df49812` — `portal_runtime_available_blocking` and the
+    `LinuxSwFactory::create` WaylandPortal arm both built a fresh tokio
+    runtime + `block_on` inside an outer tokio runtime (latent P5B-1
+    bug, never previously exercised from async context). Rewritten to
+    spawn a dedicated OS thread (`portal-probe` / portal capturer init)
+    that owns a current-thread runtime, results bridged via
+    `std::sync::mpsc::channel`. Includes regression test
+    `portal_probe_does_not_panic_when_called_from_async_context`.
+  - `c7c9487` — `WaylandPortalCapturer::geometry()` returns `(0, 0)`
+    until pipewire format negotiation completes, but
+    `LinuxVaapiEncoder::new(0, 0, …)` rejects that. `LinuxSwFactory`
+    now passes `cfg.width, cfg.height` from `ProducerConfig` to
+    `build_vaapi_video_producer_with`; the surface pool sizes off the
+    handshake-negotiated resolution. Error wrapping switched from
+    `{e}` to `{e:#}` so the anyhow context chain surfaces in logs.
+  - `65bec41` — `.github/workflows/release.yml` now installs
+    `libva-dev` / `libva-drm2` / `libva-x11-2` so the release build
+    can link cros-libva. Required for any downstream P5C-1 CI artifact.
+
+  Verified-working session log fragment (encoder reaches steady state
+  before the pipewire stream errors out):
+
+  ```
+  policy: backend selected backend=Vaapi priority=90
+  vaapi encoder initialized: driver=intel-iHD profile=ConstrainedBaseline
+  encoder ready backend="linux-vaapi-h264"
+  portal session: started has_token=true
+  pipewire stream: state Unconnected → Connecting → Paused → Error
+  ```
+
+  **Workaround for VAAPI HW encode verification today**: log out and
+  pick the "Ubuntu on Xorg" session from the gear menu on the GDM
+  login screen. The P5B-1 X11ShmCapturer path is unaffected and feeds
+  the VAAPI encoder normally. Expected CPU under XShm + VAAPI 1080p:
+  significantly below the OpenH264 SW baseline (≪25–40 %; Intel N100
+  iGPU typically lands < 10 %). Wayland users stay on the OpenH264 SW
+  path until the follow-up below ships.
+
+  **Follow-up (separate branch, not part of P5C-1)**: rewrite the
+  `EnumFormat` and `Buffers` POD construction in
+  `crates/media-linux/src/wayland_portal/format.rs` against `libspa-sys`
+  C helpers via `unsafe` FFI (the same `spa_pod_builder_*` /
+  `spa_format_video_raw_init` calls that `gnome-remote-desktop`,
+  `obs-pipewire-screencast`, and `xdg-desktop-portal-wlr` use). This is
+  the only known reference-implementation-compatible path; the
+  pipewire-rs 0.9.2 Rust `Object` builder is documented as
+  experimental for non-trivial pod trees. Filed as the P5B-2a-successor
+  spec, will land alongside `FrameInput::Dmabuf` integration in P5C-2.
+
 - **BGRA buffer clone**: each encode submission copies the BGRA scratch into the per-call command sent to the dedicated encoder thread. P5C-2 (DMABUF zero-copy) removes this copy together with the producer-side `bgra_to_i420` step.

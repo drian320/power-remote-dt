@@ -498,6 +498,27 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
     FFI path (manual SPS/PPS prepend is sufficient for P5C-1), VBR mode.
   - **Smoke walkthrough**: `docs/superpowers/p5b1-smoke-walkthrough.md`
     §P5C-1 Section K (real-device VAAPI verification).
+  - **Real-device smoke (2026-05-13, N100 Intel Alder Lake-N iGPU,
+    Ubuntu 24.04)**: VAAPI encoder construction + P5A policy wiring
+    verified end-to-end — host reaches
+    `encoder ready backend="linux-vaapi-h264"` on iHD driver, policy
+    selects Vaapi at priority 90, factory builds `LinuxVaapiEncoder`
+    successfully, Send/Sync bridge to the `vaapi-encoder` thread fires.
+    Frame ingestion verification on Wayland (GNOME 46 mutter) is
+    **blocked by a libspa POD wire-format mismatch in the screencast
+    portal path** (pipewire-rs 0.9.2 `Object` serializer vs mutter
+    expectations) and tracked as the P5B-2a-successor follow-up; see
+    walkthrough §K "Known issues / follow-ups" for the diagnosis,
+    5 failed iterations, and 3 keeper fixes that landed on this branch
+    (`df49812`, `c7c9487`, `65bec41`). Workaround for HW-encode CPU
+    verification today: log into a GNOME-on-Xorg session — the
+    X11ShmCapturer path feeds VAAPI normally and is unaffected.
+  - **P5B-2a-successor (next branch, not P5C-1)**: rewrite
+    `wayland_portal/format.rs` POD construction via `libspa-sys` FFI
+    helpers (`spa_pod_builder_*` / `spa_format_video_raw_init`) to
+    match `gnome-remote-desktop` / `obs-pipewire-screencast` /
+    `xdg-desktop-portal-wlr` reference implementations. Lands
+    alongside `FrameInput::Dmabuf` in P5C-2.
 
 ### **C. 計測 / 観測 系(blocker 解消用)**
 
