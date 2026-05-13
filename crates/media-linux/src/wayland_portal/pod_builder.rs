@@ -265,6 +265,124 @@ impl<'a> ObjectScope<'a> {
         }
         self.builder.add_id_primitive(id);
     }
+
+    /// Append a `Choice<Id>` property (Enum form) carrying the
+    /// `MANDATORY | DONT_FIXATE` flag pair. This is the contract
+    /// libspa expects for "pick one of these alternatives".
+    pub fn add_choice_id_enum(
+        &mut self,
+        key: u32,
+        default: u32,
+        alternatives: &[u32],
+    ) {
+        let flags = spa_sys::SPA_POD_PROP_FLAG_MANDATORY
+            | spa_sys::SPA_POD_PROP_FLAG_DONT_FIXATE;
+        // SAFETY: same as add_id_property; builder is inside an object frame.
+        unsafe {
+            spa_sys::spa_pod_builder_prop(&mut self.builder.raw, key, flags);
+        }
+        let mut choice_frame: spa_sys::spa_pod_frame =
+            unsafe { std::mem::zeroed() };
+        // SAFETY: push_choice opens a SPA_TYPE_Choice subframe. Pop
+        // matches via the local frame variable below.
+        unsafe {
+            spa_sys::spa_pod_builder_push_choice(
+                &mut self.builder.raw,
+                &mut choice_frame as *mut _,
+                spa_sys::SPA_CHOICE_Enum,
+                0, // flags on the Choice header itself
+            );
+        }
+        // Default first, then each alternative. libspa stores them
+        // back-to-back as the child pods of the Choice.
+        self.builder.add_id_primitive(default);
+        for &alt in alternatives {
+            self.builder.add_id_primitive(alt);
+        }
+        // SAFETY: pop matches the push_choice above.
+        unsafe {
+            let _ = spa_sys::spa_pod_builder_pop(
+                &mut self.builder.raw,
+                &mut choice_frame as *mut _,
+            );
+        }
+    }
+
+    /// Append a `Choice<Rectangle>` property (Range form) carrying the
+    /// `MANDATORY | DONT_FIXATE` flag pair.
+    pub fn add_choice_rectangle_range(
+        &mut self,
+        key: u32,
+        default: (u32, u32),
+        min: (u32, u32),
+        max: (u32, u32),
+    ) {
+        let flags = spa_sys::SPA_POD_PROP_FLAG_MANDATORY
+            | spa_sys::SPA_POD_PROP_FLAG_DONT_FIXATE;
+        // SAFETY: same as add_id_property; builder is inside an object frame.
+        unsafe {
+            spa_sys::spa_pod_builder_prop(&mut self.builder.raw, key, flags);
+        }
+        let mut frame: spa_sys::spa_pod_frame = unsafe { std::mem::zeroed() };
+        // SAFETY: push_choice opens a SPA_TYPE_Choice subframe. Pop
+        // matches via the local frame variable below.
+        unsafe {
+            spa_sys::spa_pod_builder_push_choice(
+                &mut self.builder.raw,
+                &mut frame as *mut _,
+                spa_sys::SPA_CHOICE_Range,
+                0,
+            );
+        }
+        self.builder.add_rectangle_primitive(default.0, default.1);
+        self.builder.add_rectangle_primitive(min.0, min.1);
+        self.builder.add_rectangle_primitive(max.0, max.1);
+        // SAFETY: pop matches the push_choice above.
+        unsafe {
+            let _ = spa_sys::spa_pod_builder_pop(
+                &mut self.builder.raw,
+                &mut frame as *mut _,
+            );
+        }
+    }
+
+    /// Append a `Choice<Fraction>` property (Range form) carrying the
+    /// `MANDATORY | DONT_FIXATE` flag pair.
+    pub fn add_choice_fraction_range(
+        &mut self,
+        key: u32,
+        default: (i32, i32),
+        min: (i32, i32),
+        max: (i32, i32),
+    ) {
+        let flags = spa_sys::SPA_POD_PROP_FLAG_MANDATORY
+            | spa_sys::SPA_POD_PROP_FLAG_DONT_FIXATE;
+        // SAFETY: same as add_id_property; builder is inside an object frame.
+        unsafe {
+            spa_sys::spa_pod_builder_prop(&mut self.builder.raw, key, flags);
+        }
+        let mut frame: spa_sys::spa_pod_frame = unsafe { std::mem::zeroed() };
+        // SAFETY: push_choice opens a SPA_TYPE_Choice subframe. Pop
+        // matches via the local frame variable below.
+        unsafe {
+            spa_sys::spa_pod_builder_push_choice(
+                &mut self.builder.raw,
+                &mut frame as *mut _,
+                spa_sys::SPA_CHOICE_Range,
+                0,
+            );
+        }
+        self.builder.add_fraction_primitive(default.0, default.1);
+        self.builder.add_fraction_primitive(min.0, min.1);
+        self.builder.add_fraction_primitive(max.0, max.1);
+        // SAFETY: pop matches the push_choice above.
+        unsafe {
+            let _ = spa_sys::spa_pod_builder_pop(
+                &mut self.builder.raw,
+                &mut frame as *mut _,
+            );
+        }
+    }
 }
 
 impl<'a> Drop for ObjectScope<'a> {
@@ -338,8 +456,8 @@ impl PodBuilder {
 mod tests {
     use super::*;
     use pipewire::spa::pod::deserialize::PodDeserializer;
-    use pipewire::spa::pod::Value;
-    use pipewire::spa::utils::Id;
+    use pipewire::spa::pod::{ChoiceValue, Value};
+    use pipewire::spa::utils::{ChoiceEnum, Id};
 
     #[test]
     fn primitive_int_round_trip() {
@@ -471,6 +589,139 @@ mod tests {
         match &p.value {
             Value::Id(Id(v)) => assert_eq!(*v, spa_sys::SPA_MEDIA_TYPE_video),
             other => panic!("expected Id, got {other:?}"),
+        }
+    }
+
+    /// The Choice property must serialise with flags MANDATORY|DONT_FIXATE
+    /// AND with the listed default + alternatives in the Enum body. This
+    /// is the contract GNOME 46 mutter rejected when our previous build
+    /// used pipewire-rs's high-level Object serializer (spec §2).
+    #[test]
+    fn choice_id_enum_round_trip_with_mandatory_dont_fixate() {
+        let mut b = PodBuilder::new();
+        {
+            let mut o = b.push_object(
+                spa_sys::SPA_TYPE_OBJECT_Format,
+                spa_sys::SPA_PARAM_EnumFormat,
+            );
+            o.add_choice_id_enum(
+                spa_sys::SPA_FORMAT_VIDEO_format,
+                spa_sys::SPA_VIDEO_FORMAT_BGRA,
+                &[
+                    spa_sys::SPA_VIDEO_FORMAT_BGRA,
+                    spa_sys::SPA_VIDEO_FORMAT_BGRx,
+                ],
+            );
+        }
+        let bytes = b.finish();
+        let (_n, value) =
+            PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
+        let obj = match value {
+            Value::Object(o) => o,
+            other => panic!("expected Object, got {other:?}"),
+        };
+        assert_eq!(obj.properties.len(), 1);
+        let p = &obj.properties[0];
+        assert_eq!(p.key, spa_sys::SPA_FORMAT_VIDEO_format);
+        // pipewire::spa::pod::PropertyFlags::MANDATORY = 8,
+        // ::DONT_FIXATE = 16 (matches SPA_POD_PROP_FLAG_*).
+        let expected_flags: u32 = 8 | 16;
+        assert_eq!(
+            p.flags.bits(),
+            expected_flags,
+            "MANDATORY|DONT_FIXATE flags missing on Choice property"
+        );
+        match &p.value {
+            Value::Choice(ChoiceValue::Id(c)) => match &c.1 {
+                ChoiceEnum::Enum { default, alternatives } => {
+                    assert_eq!(default.0, spa_sys::SPA_VIDEO_FORMAT_BGRA);
+                    let alt_vals: Vec<u32> = alternatives.iter().map(|id| id.0).collect();
+                    assert_eq!(
+                        alt_vals,
+                        vec![
+                            spa_sys::SPA_VIDEO_FORMAT_BGRA,
+                            spa_sys::SPA_VIDEO_FORMAT_BGRx,
+                        ]
+                    );
+                }
+                other => panic!("expected ChoiceEnum::Enum, got {other:?}"),
+            },
+            other => panic!("expected Choice<Id>, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn choice_rectangle_range_round_trip() {
+        let mut b = PodBuilder::new();
+        {
+            let mut o = b.push_object(
+                spa_sys::SPA_TYPE_OBJECT_Format,
+                spa_sys::SPA_PARAM_EnumFormat,
+            );
+            o.add_choice_rectangle_range(
+                spa_sys::SPA_FORMAT_VIDEO_size,
+                (1920, 1080),
+                (320, 240),
+                (7680, 4320),
+            );
+        }
+        let bytes = b.finish();
+        let (_n, value) =
+            PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
+        let obj = match value {
+            Value::Object(o) => o,
+            _ => panic!(),
+        };
+        let p = &obj.properties[0];
+        assert_eq!(p.flags.bits(), 8 | 16);
+        match &p.value {
+            Value::Choice(ChoiceValue::Rectangle(c)) => match &c.1 {
+                ChoiceEnum::Range { default, min, max } => {
+                    assert_eq!(default.width, 1920);
+                    assert_eq!(default.height, 1080);
+                    assert_eq!(min.width, 320);
+                    assert_eq!(max.width, 7680);
+                }
+                _ => panic!(),
+            },
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn choice_fraction_range_round_trip() {
+        let mut b = PodBuilder::new();
+        {
+            let mut o = b.push_object(
+                spa_sys::SPA_TYPE_OBJECT_Format,
+                spa_sys::SPA_PARAM_EnumFormat,
+            );
+            o.add_choice_fraction_range(
+                spa_sys::SPA_FORMAT_VIDEO_framerate,
+                (60, 1),
+                (15, 1),
+                (60, 1),
+            );
+        }
+        let bytes = b.finish();
+        let (_n, value) =
+            PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
+        let obj = match value {
+            Value::Object(o) => o,
+            _ => panic!(),
+        };
+        let p = &obj.properties[0];
+        assert_eq!(p.flags.bits(), 8 | 16);
+        match &p.value {
+            Value::Choice(ChoiceValue::Fraction(c)) => match &c.1 {
+                ChoiceEnum::Range { default, min, max } => {
+                    assert_eq!((default.num, default.denom), (60, 1));
+                    assert_eq!((min.num, min.denom), (15, 1));
+                    assert_eq!((max.num, max.denom), (60, 1));
+                }
+                _ => panic!(),
+            },
+            _ => panic!(),
         }
     }
 }
