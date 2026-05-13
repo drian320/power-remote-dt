@@ -1,13 +1,28 @@
 FROM rust:1-bookworm
 
-# System libs required to build pipewire-rs 0.9 + ashpd 0.12 on this branch.
-# libpipewire-0.3-dev pulls libspa-0.2-dev transitively but pin it explicitly
-# so a future apt change can't strip it.
+# System libs required to build the full workspace including prdt-client
+# (the unified host+viewer binary released via release.yml).
+#
+# Categorization:
+# - PipeWire 0.9: libpipewire-0.3-dev pulls libspa-0.2-dev transitively
+#   but pin it explicitly so a future apt change can't strip it.
+# - GUI host (tray-icon -> muda -> libxdo, plus gtk/atk/pango/etc.):
+#   gui-host became an unconditional dep of prdt-host in commit fb8519f
+#   (P5B-1 successor "unify consent types"), so Linux release builds
+#   now need the full GTK3 stack + libxdo. Keep this list in sync with
+#   .github/workflows/release.yml's apt list.
+# - Audio (cpal/audiopus): libasound2-dev + cmake.
 RUN apt-get update -qq && \
     apt-get install -y -qq --no-install-recommends \
         libpipewire-0.3-dev \
         libspa-0.2-dev \
         libasound2-dev \
+        libgtk-3-dev libpango1.0-dev libcairo2-dev \
+        libgdk-pixbuf-2.0-dev libatk1.0-dev libayatana-appindicator3-dev \
+        libxdo-dev \
+        libglib2.0-dev libdbus-1-dev \
+        libxcb-shm0-dev libxcb-randr0-dev libxcb-xfixes0-dev \
+        libxkbcommon-dev libwayland-dev libssl-dev \
         cmake \
         pkg-config \
         build-essential \
