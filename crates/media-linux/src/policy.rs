@@ -138,33 +138,51 @@ pub fn detect_capture_backend(choice: CaptureBackendChoice) -> (CaptureBackend, 
 /// startup; if the timeout proves too tight in smoke (spec §11), bump to 3s
 /// as a follow-up commit — do not bump pre-emptively.
 pub fn portal_runtime_available_blocking(timeout: Duration) -> Result<bool, anyhow::Error> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| anyhow::anyhow!("portal probe tokio runtime: {e}"))?;
-    rt.block_on(async move {
-        let fut = async {
-            let conn = zbus::Connection::session().await?;
-            let proxy = zbus::fdo::DBusProxy::new(&conn).await?;
-            let has = proxy
-                .name_has_owner(zbus::names::BusName::WellKnown(
-                    zbus::names::WellKnownName::try_from("org.freedesktop.portal.Desktop")?,
-                ))
-                .await?;
-            Ok::<bool, anyhow::Error>(has)
-        };
-        match tokio::time::timeout(timeout, fut).await {
-            Ok(Ok(b)) => Ok(b),
-            Ok(Err(e)) => {
-                tracing::warn!(error = %e, "portal probe: NameHasOwner returned err");
-                Ok(false)
-            }
-            Err(_elapsed) => {
-                tracing::warn!(?timeout, "portal probe: timed out");
-                Ok(false)
-            }
-        }
-    })
+    // Run on a dedicated OS thread so a fresh current_thread runtime can
+    // block_on safely even when our caller already lives inside an outer
+    // Tokio runtime (host's tokio::main). Without this, calling block_on
+    // on a freshly-built runtime from within another runtime panics with
+    // "Cannot start a runtime from within a runtime".
+    let (tx, rx) = std::sync::mpsc::channel::<Result<bool, anyhow::Error>>();
+    std::thread::Builder::new()
+        .name("portal-probe".into())
+        .spawn(move || {
+            let result: Result<bool, anyhow::Error> = (|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("portal probe tokio runtime: {e}"))?;
+                rt.block_on(async move {
+                    let fut = async {
+                        let conn = zbus::Connection::session().await?;
+                        let proxy = zbus::fdo::DBusProxy::new(&conn).await?;
+                        let has = proxy
+                            .name_has_owner(zbus::names::BusName::WellKnown(
+                                zbus::names::WellKnownName::try_from(
+                                    "org.freedesktop.portal.Desktop",
+                                )?,
+                            ))
+                            .await?;
+                        Ok::<bool, anyhow::Error>(has)
+                    };
+                    match tokio::time::timeout(timeout, fut).await {
+                        Ok(Ok(b)) => Ok(b),
+                        Ok(Err(e)) => {
+                            tracing::warn!(error = %e, "portal probe: NameHasOwner returned err");
+                            Ok(false)
+                        }
+                        Err(_elapsed) => {
+                            tracing::warn!(?timeout, "portal probe: timed out");
+                            Ok(false)
+                        }
+                    }
+                })
+            })();
+            let _ = tx.send(result);
+        })
+        .map_err(|e| anyhow::anyhow!("portal-probe thread spawn: {e}"))?;
+    rx.recv()
+        .map_err(|e| anyhow::anyhow!("portal-probe thread recv: {e}"))?
 }
 
 // ---------------------------------------------------------------------------
@@ -260,21 +278,52 @@ impl ProducerFactory for LinuxSwFactory {
             CaptureBackend::WaylandPortal => {
                 let token_path = default_portal_token_path();
                 // WaylandPortalCapturer::new is async; ProducerFactory::create is
-                // sync. Spin up a tiny current_thread runtime to drive the portal
-                // session establishment. (The capturer itself takes care of its
-                // own internal threading once running — the producer's per-frame
-                // capture_into is sync and uses blocking_recv.)
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|e| FactoryError::Unavailable(kind, format!("portal runtime: {e}")))?;
-                let (cap, cursor_rx) = rt
-                    .block_on(crate::wayland_portal::WaylandPortalCapturer::new(
-                        token_path,
-                    ))
+                // sync but is itself called from inside the host's outer tokio
+                // runtime. Spinning a current_thread runtime + block_on inline
+                // panics with "Cannot start a runtime from within a runtime".
+                // Run the capturer ctor on a dedicated OS thread so its fresh
+                // runtime is isolated from the outer one. The capturer's own
+                // internal pipewire mainloop thread is unaffected — once the
+                // ctor returns, capture_into runs synchronously via the
+                // captured channel.
+                let (tx, rx) = std::sync::mpsc::channel::<
+                    Result<
+                        (
+                            crate::wayland_portal::WaylandPortalCapturer,
+                            tokio::sync::mpsc::Receiver<
+                                crate::wayland_portal::cursor::CursorUpdate,
+                            >,
+                        ),
+                        String,
+                    >,
+                >();
+                std::thread::Builder::new()
+                    .name("portal-capturer-init".into())
+                    .spawn(move || {
+                        let rt = match tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                        {
+                            Ok(r) => r,
+                            Err(e) => {
+                                let _ = tx.send(Err(format!("portal runtime: {e}")));
+                                return;
+                            }
+                        };
+                        let result = rt
+                            .block_on(crate::wayland_portal::WaylandPortalCapturer::new(
+                                token_path,
+                            ))
+                            .map_err(|e| format!("WaylandPortalCapturer::new: {e}"));
+                        let _ = tx.send(result);
+                    })
                     .map_err(|e| {
-                        FactoryError::Unavailable(kind, format!("WaylandPortalCapturer::new: {e}"))
+                        FactoryError::Unavailable(kind, format!("portal init thread: {e}"))
                     })?;
+                let (cap, cursor_rx) = rx
+                    .recv()
+                    .map_err(|e| FactoryError::Unavailable(kind, format!("portal init recv: {e}")))?
+                    .map_err(|e| FactoryError::Unavailable(kind, e))?;
                 // Stash cursor_rx in the slot. (LinuxSwFactory tests still
                 // assert this happens even when the producer build later
                 // fails; keeping the previous "stash only on success"
@@ -527,5 +576,30 @@ mod tests {
             }
             _ => panic!("expected Err(Unavailable(Openh264, _))"),
         }
+    }
+
+    /// Regression: `portal_runtime_available_blocking` is called from
+    /// `host::platform::linux::factory`, which itself runs inside the host's
+    /// outer `tokio::main` runtime. Calling it from within an async context
+    /// previously panicked with "Cannot start a runtime from within a runtime"
+    /// because the function built a fresh `current_thread` runtime and ran
+    /// `block_on` on it inline. After the OS-thread-isolation fix, this test
+    /// invokes the probe from inside a real tokio runtime and asserts it
+    /// returns a `Result` without panicking.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn portal_probe_does_not_panic_when_called_from_async_context() {
+        // Wrap in spawn_blocking so the function runs on a tokio blocking
+        // worker, mirroring what `host::factory()` looks like in practice
+        // (sync function called from within an async context).
+        let result = tokio::task::spawn_blocking(|| {
+            portal_runtime_available_blocking(Duration::from_millis(200))
+        })
+        .await;
+        assert!(
+            result.is_ok(),
+            "portal probe must not panic inside tokio runtime; got {result:?}"
+        );
+        // Inner result may be Ok(true) or Ok(false) depending on whether the
+        // test runner has a session bus + portal — we only assert no panic.
     }
 }
