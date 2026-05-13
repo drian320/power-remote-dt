@@ -32,7 +32,15 @@ dirs = { workspace = true }
 # bookworm ships 0.3.65, Ubuntu 24.04+ ships 1.0+). Older systems
 # (Ubuntu 22.04 jammy = 0.3.48) cannot build this; see scripts/dev-container.sh
 # for the Debian bookworm Docker image used to build this branch.
-pipewire = "0.9"
+#
+# Feature `v0_3_33` is enabled to expose `PropertyFlags::DONT_FIXATE` (the
+# libspa-rs binding gates that flag constant behind v0_3_33). GNOME 46
+# mutter rejects our EnumFormat POD with "no more input formats" unless
+# the Choice-typed properties carry `MANDATORY | DONT_FIXATE` — i.e.
+# "these are alternatives, the compositor picks one". The system libspa
+# on Debian bookworm (0.3.65) and Ubuntu 24.04+ (1.0+) supports this far
+# below the v0_3_33 floor.
+pipewire = { version = "0.9", features = ["v0_3_33"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "time", "rt", "macros"] }
