@@ -504,3 +504,60 @@ behaviour); no `CursorUpdate` messages on the wire.
 ### Known issues / follow-ups (P5B-2c)
 
 - **Modal dialog cursor restore race**: opening a modal dialog (e.g. a permissions prompt) within the viewer may briefly re-show the OS cursor. The visibility helper re-asserts on the next `CursorMoved` event, so the flash is bounded to one frame. Tracked but not pre-emptively gated.
+
+---
+
+## P5C-1 — VAAPI H.264 encoder (Linux HW codec)
+
+### Section K — VAAPI encoder real-device smoke
+
+**Pre-conditions:**
+- Linux host with Intel iGPU (Tigerlake+) OR AMD APU (Renoir+).
+- Mesa libva ≥ 23.x (intel-media-driver for Intel; radeonsi for AMD).
+- User in the `render` (or `video`) group so `/dev/dri/renderD128` is RW-accessible.
+- `prdt host` + `prdt connect` binaries from this branch.
+
+**Steps:**
+
+1. Verify VAAPI driver: `vainfo | grep H264ConstrainedBaseline`. Expect at least one matching `VAEntrypointEncSlice` line.
+
+2. Start host with explicit Vaapi backend:
+   ```bash
+   ./prdt host --encoder vaapi --bitrate-mbps 5 --silent-allow 2>&1 | tee p5c1.log
+   ```
+
+3. Expect log: `vaapi encoder initialized: driver=intel-iHD profile=ConstrainedBaseline` (exact driver name varies by GPU + Mesa version).
+
+4. Connect viewer:
+   ```bash
+   ./prdt connect --host <ip>:9000 --decoder openh264 --codec h264
+   ```
+
+5. Confirm frame flow at ≥ 30 fps in viewer.
+
+6. **CPU usage check** (the HW codec payoff):
+   ```bash
+   pidstat -p $(pgrep -f prdt) 1 30
+   ```
+   Expected: host %CPU significantly below the OpenH264 SW baseline. Intel iGPU 1080p60 typically lands < 5% CPU vs OpenH264 SW ~25-40%.
+
+7. **Bitrate update**: from viewer adjust the bitrate slider; expect host log line `set_target_bitrate 8000000 → 8 Mbps`.
+
+8. **Failure fallback** (DeviceLost path): `sudo chmod 000 /dev/dri/renderD128` while a session is running. Within ~5 seconds the host should:
+   - Emit `vaapi encode failed: HardwareBusy → falling back to OpenH264` (or similar; depends on whether the driver returns HW_BUSY vs a permission error wrapped as DriverError).
+   - Continue the session with the SW encoder (frames may briefly stutter through the SelectionPolicy cooldown window).
+   - Restore the device with `sudo chmod 0666 /dev/dri/renderD128` for next session.
+
+9. **AMD APU verification** (separate run): repeat steps 1–7 on a Kubuntu/Fedora system with Ryzen Renoir+ APU. Confirm `vainfo` shows `radeonsi`-prefixed driver names; the encoder priority + Annex-B output should be identical to Intel.
+
+### Known issues / follow-ups (P5C-1)
+
+- **NVIDIA hosts**: `nvidia-vaapi-driver` is decode-only — `vainfo` may list NVENC profiles but `VAEntrypointEncSlice` will be absent and the probe correctly excludes the device. NVENC-Linux ships in P5C-3.
+
+- **WSL2**: VAAPI via `mesa-d3d12` works on recent WSL2 kernels but is functionally a Mesa software path for now (no actual GPU acceleration). Useful for dev smoke but expect SW-comparable CPU usage.
+
+- **`/dev/dri/renderD*` permission**: if the user isn't in `render`/`video`, the probe fails silently and OpenH264 SW is selected. Document for downstream operators.
+
+- **VBR mode**: only CBR is supported in P5C-1. CBR↔VBR switching via dynamic reconfigure is driver-fragile (spec §2); add a `--vaapi-rc-mode {cbr,vbr}` CLI knob in a follow-up.
+
+- **BGRA buffer clone**: each encode submission copies the BGRA scratch into the per-call command sent to the dedicated encoder thread. P5C-2 (DMABUF zero-copy) removes this copy together with the producer-side `bgra_to_i420` step.
