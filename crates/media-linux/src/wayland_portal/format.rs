@@ -224,36 +224,20 @@ pub fn parse(p: &Pod) -> Result<NegotiatedFormat, ParseError> {
 
     for prop in &obj.properties {
         let key = prop.key;
-        // Each Choice arm (Enum/Range/etc) carries a default; we always
-        // pick the default because the *negotiated* POD usually carries
-        // a plain Value (the compositor has already picked one). Choice
-        // unwrapping is defensive for compositors that re-emit a Choice.
-        let v = unwrap_choice_default(&prop.value);
+        let v = &prop.value;
 
         if key == FormatProperties::MediaType.as_raw() {
-            if let Value::Id(Id(id)) = v {
-                media_type = Some(*id);
-            }
+            media_type = extract_id_value(v);
         } else if key == FormatProperties::MediaSubtype.as_raw() {
-            if let Value::Id(Id(id)) = v {
-                media_subtype = Some(*id);
-            }
+            media_subtype = extract_id_value(v);
         } else if key == FormatProperties::VideoFormat.as_raw() {
-            if let Value::Id(Id(id)) = v {
-                video_format = Some(*id);
-            }
+            video_format = extract_id_value(v);
         } else if key == FormatProperties::VideoSize.as_raw() {
-            if let Value::Rectangle(r) = v {
-                size = Some(*r);
-            }
+            size = extract_rectangle_value(v);
         } else if key == FormatProperties::VideoFramerate.as_raw() {
-            if let Value::Fraction(f) = v {
-                framerate = Some(*f);
-            }
+            framerate = extract_fraction_value(v);
         } else if key == FormatProperties::VideoModifier.as_raw() {
-            if let Value::Long(m) = v {
-                modifier = Some(*m);
-            }
+            modifier = extract_long_value(v);
         }
     }
 
@@ -300,28 +284,66 @@ pub fn parse(p: &Pod) -> Result<NegotiatedFormat, ParseError> {
     })
 }
 
-/// If `v` is a `Value::Choice`, return the default-branch inner value.
-/// Otherwise return `v` unchanged. Centralises the "compositor sometimes
-/// re-emits a Choice on negotiated Format POD" defence.
-fn unwrap_choice_default(v: &Value) -> &Value {
-    // pipewire-rs's ChoiceValue arms each carry the choice in a Choice<T>
-    // wrapper whose Enum default / Range default is the value we want.
-    // We only need to peel one level — nested Choices are not used by
-    // any compositor we care about.
+/// Extract a `u32` Id from a property value, handling both scalar
+/// `Value::Id(Id)` and Choice-wrapped variants. Returns `None` if the
+/// value isn't an Id-typed value.
+///
+/// mutter sends negotiated Format POD with EVERY property still wrapped
+/// in a `Choice` (SPA_CHOICE_None convention: a degenerate 1-alternative
+/// Choice indicates the picked value). Our parser must unwrap.
+fn extract_id_value(v: &Value) -> Option<u32> {
     match v {
+        Value::Id(Id(id)) => Some(*id),
         Value::Choice(ChoiceValue::Id(c)) => match &c.1 {
-            ChoiceEnum::Enum { default, .. } => {
-                // Inner Id<u32> — must be promoted to a Value::Id. We
-                // can't return a borrow to a temporary, so for the
-                // Choice case parse() reads `prop.value` directly and
-                // matches the Choice arm. Keep this helper for the
-                // simple pass-through case below.
-                let _ = default;
-                v
-            }
-            _ => v,
+            ChoiceEnum::None(Id(id)) => Some(*id),
+            ChoiceEnum::Enum { default, .. } => Some(default.0),
+            ChoiceEnum::Range { default, .. } => Some(default.0),
+            ChoiceEnum::Step { default, .. } => Some(default.0),
+            ChoiceEnum::Flags { default, .. } => Some(default.0),
         },
-        _ => v,
+        _ => None,
+    }
+}
+
+fn extract_rectangle_value(v: &Value) -> Option<Rectangle> {
+    match v {
+        Value::Rectangle(r) => Some(*r),
+        Value::Choice(ChoiceValue::Rectangle(c)) => match &c.1 {
+            ChoiceEnum::None(r) => Some(*r),
+            ChoiceEnum::Enum { default, .. } => Some(*default),
+            ChoiceEnum::Range { default, .. } => Some(*default),
+            ChoiceEnum::Step { default, .. } => Some(*default),
+            ChoiceEnum::Flags { default, .. } => Some(*default),
+        },
+        _ => None,
+    }
+}
+
+fn extract_fraction_value(v: &Value) -> Option<Fraction> {
+    match v {
+        Value::Fraction(f) => Some(*f),
+        Value::Choice(ChoiceValue::Fraction(c)) => match &c.1 {
+            ChoiceEnum::None(f) => Some(*f),
+            ChoiceEnum::Enum { default, .. } => Some(*default),
+            ChoiceEnum::Range { default, .. } => Some(*default),
+            ChoiceEnum::Step { default, .. } => Some(*default),
+            ChoiceEnum::Flags { default, .. } => Some(*default),
+        },
+        _ => None,
+    }
+}
+
+fn extract_long_value(v: &Value) -> Option<i64> {
+    match v {
+        Value::Long(n) => Some(*n),
+        Value::Choice(ChoiceValue::Long(c)) => match &c.1 {
+            ChoiceEnum::None(n) => Some(*n),
+            ChoiceEnum::Enum { default, .. } => Some(*default),
+            ChoiceEnum::Range { default, .. } => Some(*default),
+            ChoiceEnum::Step { default, .. } => Some(*default),
+            ChoiceEnum::Flags { default, .. } => Some(*default),
+        },
+        _ => None,
     }
 }
 
@@ -332,7 +354,7 @@ mod tests {
     use pipewire::spa::pod::serialize::PodSerializer;
     use pipewire::spa::pod::{Object, Property, PropertyFlags};
     use pipewire::spa::sys as spa_sys;
-    use pipewire::spa::utils::Choice;
+    use pipewire::spa::utils::{Choice, ChoiceFlags};
 
     /// Helper: serialise a hand-built Object to bytes so tests can feed
     /// it back into `parse()`. Mirrors `build()`'s serialisation step.
@@ -642,5 +664,66 @@ mod tests {
         let pod = Pod::from_bytes(&bytes).expect("Pod::from_bytes ok");
         let neg = parse(pod).expect("parse ok");
         assert_eq!(neg.modifier, Some(DRM_FORMAT_MOD_LINEAR));
+    }
+
+    /// Regression: GNOME 46 mutter sends the negotiated `SPA_PARAM_Format`
+    /// POD with EVERY property wrapped in a Choice (SPA_CHOICE_None
+    /// convention — a degenerate 1-alternative Choice indicates the
+    /// picked value). parse() must unwrap properly. Smoke 2026-05-13 §K2
+    /// captured the exact pattern; failure mode was
+    /// `ParseError::NotVideo(None)`.
+    #[test]
+    fn parse_handles_choice_wrapped_negotiated_format() {
+        let obj = Object {
+            type_: SpaTypes::ObjectParamFormat.as_raw(),
+            id: ParamType::Format.as_raw(),
+            properties: vec![
+                Property::new(
+                    FormatProperties::MediaType.as_raw(),
+                    Value::Choice(ChoiceValue::Id(Choice(
+                        ChoiceFlags::empty(),
+                        ChoiceEnum::None(Id(MediaType::Video.as_raw())),
+                    ))),
+                ),
+                Property::new(
+                    FormatProperties::MediaSubtype.as_raw(),
+                    Value::Choice(ChoiceValue::Id(Choice(
+                        ChoiceFlags::empty(),
+                        ChoiceEnum::None(Id(MediaSubtype::Raw.as_raw())),
+                    ))),
+                ),
+                Property::new(
+                    FormatProperties::VideoFormat.as_raw(),
+                    Value::Choice(ChoiceValue::Id(Choice(
+                        ChoiceFlags::empty(),
+                        ChoiceEnum::None(Id(VideoFormat::BGRA.as_raw())),
+                    ))),
+                ),
+                Property::new(
+                    FormatProperties::VideoSize.as_raw(),
+                    Value::Choice(ChoiceValue::Rectangle(Choice(
+                        ChoiceFlags::empty(),
+                        ChoiceEnum::None(Rectangle {
+                            width: 1920,
+                            height: 1080,
+                        }),
+                    ))),
+                ),
+                Property::new(
+                    FormatProperties::VideoFramerate.as_raw(),
+                    Value::Choice(ChoiceValue::Fraction(Choice(
+                        ChoiceFlags::empty(),
+                        ChoiceEnum::None(Fraction { num: 60, denom: 1 }),
+                    ))),
+                ),
+            ],
+        };
+        let bytes = serialise_object(obj);
+        let pod = Pod::from_bytes(&bytes).expect("Pod::from_bytes ok");
+        let neg = parse(pod).expect("parse Choice-wrapped Format ok");
+        assert_eq!(neg.width, 1920);
+        assert_eq!(neg.height, 1080);
+        assert_eq!(neg.format, PixelFormat::BGRA);
+        assert_eq!(neg.framerate, Some(Fraction { num: 60, denom: 1 }));
     }
 }
