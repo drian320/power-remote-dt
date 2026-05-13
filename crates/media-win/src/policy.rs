@@ -114,6 +114,14 @@ impl ProducerFactory for WindowsFactory {
                      when ProducerConfig gains Option<D3D11SetupContext>"
                 );
             }
+            BackendKind::Vaapi => {
+                tracing::warn!(
+                    backend = ?kind,
+                    "WindowsFactory: Vaapi is Linux-only; should never be \
+                     requested on Windows (policy ranking is per-platform). \
+                     Returning Unavailable."
+                );
+            }
         }
         Err(FactoryError::Unavailable(
             kind,
@@ -171,6 +179,9 @@ mod tests {
                 BackendKind::Openh264 => {
                     assert_eq!(cap.codec, Codec::H264);
                     assert!(!cap.zero_copy);
+                }
+                BackendKind::Vaapi => {
+                    panic!("WindowsProbe must not emit Vaapi (Linux-only backend)");
                 }
             }
         }
