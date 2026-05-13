@@ -15,6 +15,7 @@ prdt-media-policy = { path = "../media-policy" }
 prdt-protocol = { path = "../protocol" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+prdt-media-vaapi = { path = "../media-vaapi" }
 x11rb = { workspace = true, features = ["shm"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }

@@ -12,7 +12,8 @@ pub enum BackendKind {
     Nvenc,
     MfHevc,
     Openh264,
-    // future: Vaapi, V4L2M2M, VideoToolbox, MediaCodec
+    Vaapi,
+    // future: V4L2M2M, VideoToolbox, MediaCodec
 }
 
 impl BackendKind {
@@ -23,6 +24,7 @@ impl BackendKind {
             Self::Nvenc => "nvenc",
             Self::MfHevc => "mf-hevc",
             Self::Openh264 => "openh264",
+            Self::Vaapi => "vaapi",
         }
     }
 }
@@ -36,6 +38,7 @@ impl FromStr for BackendKind {
             "nvenc" => Ok(Self::Nvenc),
             "mf" | "mf-hevc" => Ok(Self::MfHevc),
             "openh264" => Ok(Self::Openh264),
+            "vaapi" => Ok(Self::Vaapi),
             other => Err(format!("unknown BackendKind: {other:?}")),
         }
     }
@@ -81,6 +84,7 @@ mod tests {
         assert_eq!(BackendKind::Nvenc.as_str(), "nvenc");
         assert_eq!(BackendKind::MfHevc.as_str(), "mf-hevc");
         assert_eq!(BackendKind::Openh264.as_str(), "openh264");
+        assert_eq!(BackendKind::Vaapi.as_str(), "vaapi");
     }
 
     #[test]
@@ -90,6 +94,7 @@ mod tests {
             BackendKind::Nvenc,
             BackendKind::MfHevc,
             BackendKind::Openh264,
+            BackendKind::Vaapi,
         ] {
             let s = k.as_str();
             assert_eq!(

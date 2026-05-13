@@ -23,14 +23,25 @@ pub struct LinuxSwProbe;
 
 impl CapabilityProbe for LinuxSwProbe {
     fn list_encoders(&self) -> Vec<EncoderCapability> {
-        vec![EncoderCapability {
+        let mut out = vec![EncoderCapability {
             backend: BackendKind::Openh264,
             codec: Codec::H264,
             max_resolution: (3840, 2160),
             max_fps: 60,
             zero_copy: false,
             priority: 10,
-        }]
+        }];
+        if prdt_media_vaapi::display::vaapi_runtime_present() {
+            out.push(EncoderCapability {
+                backend: BackendKind::Vaapi,
+                codec: Codec::H264,
+                max_resolution: (3840, 2160),
+                max_fps: 60,
+                zero_copy: false,
+                priority: 90,
+            });
+        }
+        out
     }
 }
 
@@ -228,11 +239,20 @@ impl ProducerFactory for LinuxSwFactory {
         kind: BackendKind,
         cfg: &ProducerConfig,
     ) -> Result<Box<dyn VideoProducer>, FactoryError> {
-        if !matches!(kind, BackendKind::Openh264) {
-            return Err(FactoryError::Unavailable(
-                kind,
-                "Linux P5A only supports Openh264; VAAPI/V4L2/NVENC-Linux deferred to P5C".into(),
-            ));
+        match kind {
+            BackendKind::Openh264 => {}
+            BackendKind::Vaapi => {
+                return Err(FactoryError::Unavailable(
+                    BackendKind::Vaapi,
+                    "VaapiVideoProducer wiring lands in T9".into(),
+                ));
+            }
+            _ => {
+                return Err(FactoryError::Unavailable(
+                    kind,
+                    "Linux only supports Openh264 (and Vaapi from T9); other backends N/A".into(),
+                ));
+            }
         }
         let producer = match self.capture_backend {
             CaptureBackend::X11Shm => crate::build_video_producer(cfg.initial_bitrate_bps, cfg.fps)
@@ -315,6 +335,29 @@ mod tests {
             result,
             Err(FactoryError::Unavailable(BackendKind::Nvenc, _))
         ));
+    }
+
+    #[test]
+    fn linux_factory_rejects_vaapi_with_t9_pending_message() {
+        let factory = LinuxSwFactory::new(CaptureBackend::X11Shm);
+        let cfg = ProducerConfig {
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            initial_bitrate_bps: 8_000_000,
+            codec: Codec::H264,
+        };
+        let result = factory.create(BackendKind::Vaapi, &cfg);
+        match result {
+            Err(FactoryError::Unavailable(BackendKind::Vaapi, reason)) => {
+                assert!(
+                    reason.contains("T9"),
+                    "expected reason to mention T9, got: {reason}"
+                );
+            }
+            Err(other) => panic!("expected Unavailable(Vaapi, ...), got Err({other:?})"),
+            Ok(_) => panic!("expected Unavailable(Vaapi, ...), got Ok"),
+        }
     }
 
     #[test]
