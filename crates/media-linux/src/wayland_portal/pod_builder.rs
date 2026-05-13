@@ -73,8 +73,7 @@ impl PodBuilder {
     pub fn new() -> Self {
         let buf = Vec::<u8>::with_capacity(Self::INITIAL_CAPACITY);
         let raw: spa_sys::spa_pod_builder = unsafe { std::mem::zeroed() };
-        let callbacks: spa_sys::spa_pod_builder_callbacks =
-            unsafe { std::mem::zeroed() };
+        let callbacks: spa_sys::spa_pod_builder_callbacks = unsafe { std::mem::zeroed() };
         // NOTE: We do NOT call spa_pod_builder_init or set_callbacks here.
         // `self` is stack-allocated and will be moved on return; storing
         // `&self as *mut _` as the callback data would produce a dangling
@@ -229,11 +228,7 @@ impl PodBuilder {
         // treats them as signed; cast at the FFI boundary.
         self.init_if_needed();
         unsafe {
-            spa_sys::spa_pod_builder_fraction(
-                &mut self.raw,
-                num as u32,
-                denom as u32,
-            );
+            spa_sys::spa_pod_builder_fraction(&mut self.raw, num as u32, denom as u32);
         }
     }
 
@@ -278,19 +273,12 @@ impl<'a> ObjectScope<'a> {
     /// Append a `Choice<Id>` property (Enum form). The caller supplies
     /// `flags` explicitly (e.g. `MANDATORY | DONT_FIXATE` for VideoFormat/
     /// VideoModifier, or `0` for size/framerate using the OBS pattern).
-    pub fn add_choice_id_enum(
-        &mut self,
-        key: u32,
-        flags: u32,
-        default: u32,
-        alternatives: &[u32],
-    ) {
+    pub fn add_choice_id_enum(&mut self, key: u32, flags: u32, default: u32, alternatives: &[u32]) {
         // SAFETY: same as add_id_property; builder is inside an object frame.
         unsafe {
             spa_sys::spa_pod_builder_prop(&mut self.builder.raw, key, flags);
         }
-        let mut choice_frame: spa_sys::spa_pod_frame =
-            unsafe { std::mem::zeroed() };
+        let mut choice_frame: spa_sys::spa_pod_frame = unsafe { std::mem::zeroed() };
         // SAFETY: push_choice opens a SPA_TYPE_Choice subframe. Pop
         // matches via the local frame variable below.
         unsafe {
@@ -309,10 +297,8 @@ impl<'a> ObjectScope<'a> {
         }
         // SAFETY: pop matches the push_choice above.
         unsafe {
-            let _ = spa_sys::spa_pod_builder_pop(
-                &mut self.builder.raw,
-                &mut choice_frame as *mut _,
-            );
+            let _ =
+                spa_sys::spa_pod_builder_pop(&mut self.builder.raw, &mut choice_frame as *mut _);
         }
     }
 
@@ -346,10 +332,7 @@ impl<'a> ObjectScope<'a> {
         self.builder.add_rectangle_primitive(max.0, max.1);
         // SAFETY: pop matches the push_choice above.
         unsafe {
-            let _ = spa_sys::spa_pod_builder_pop(
-                &mut self.builder.raw,
-                &mut frame as *mut _,
-            );
+            let _ = spa_sys::spa_pod_builder_pop(&mut self.builder.raw, &mut frame as *mut _);
         }
     }
 
@@ -367,8 +350,7 @@ impl<'a> ObjectScope<'a> {
         unsafe {
             spa_sys::spa_pod_builder_prop(&mut self.builder.raw, key, flags);
         }
-        let mut choice_frame: spa_sys::spa_pod_frame =
-            unsafe { std::mem::zeroed() };
+        let mut choice_frame: spa_sys::spa_pod_frame = unsafe { std::mem::zeroed() };
         // SAFETY: push_choice opens a SPA_TYPE_Choice subframe. Pop
         // matches via the local frame variable below.
         unsafe {
@@ -385,10 +367,8 @@ impl<'a> ObjectScope<'a> {
         }
         // SAFETY: pop matches the push_choice above.
         unsafe {
-            let _ = spa_sys::spa_pod_builder_pop(
-                &mut self.builder.raw,
-                &mut choice_frame as *mut _,
-            );
+            let _ =
+                spa_sys::spa_pod_builder_pop(&mut self.builder.raw, &mut choice_frame as *mut _);
         }
     }
 
@@ -436,10 +416,7 @@ impl<'a> ObjectScope<'a> {
         self.builder.add_fraction_primitive(max.0, max.1);
         // SAFETY: pop matches the push_choice above.
         unsafe {
-            let _ = spa_sys::spa_pod_builder_pop(
-                &mut self.builder.raw,
-                &mut frame as *mut _,
-            );
+            let _ = spa_sys::spa_pod_builder_pop(&mut self.builder.raw, &mut frame as *mut _);
         }
     }
 }
@@ -456,10 +433,7 @@ impl<'a> Drop for ObjectScope<'a> {
         // SAFETY: frame was produced by spa_pod_builder_push_object on
         // the same builder; pop matches.
         unsafe {
-            let pod = spa_sys::spa_pod_builder_pop(
-                &mut self.builder.raw,
-                &mut frame as *mut _,
-            );
+            let pod = spa_sys::spa_pod_builder_pop(&mut self.builder.raw, &mut frame as *mut _);
             debug_assert!(!pod.is_null(), "spa_pod_builder_pop returned null");
         }
     }
@@ -469,11 +443,7 @@ impl PodBuilder {
     /// Open a `SPA_TYPE_Object` (or any object subtype). Returns an
     /// `ObjectScope` whose `Drop` impl pops the frame. Property keys
     /// added during the scope's lifetime are appended to this object.
-    pub fn push_object(
-        &mut self,
-        type_id: u32,
-        prop_key: u32,
-    ) -> ObjectScope<'_> {
+    pub fn push_object(&mut self, type_id: u32, prop_key: u32) -> ObjectScope<'_> {
         // Ensure the builder is initialized (lazy-init pattern).
         self.init_if_needed();
         // Reserve a fresh spa_pod_frame inside our Vec so libspa can
@@ -495,17 +465,11 @@ impl PodBuilder {
             self.frames.capacity()
         );
         self.frames.push(frame);
-        let frame_ptr =
-            self.frames.last_mut().unwrap() as *mut spa_sys::spa_pod_frame;
+        let frame_ptr = self.frames.last_mut().unwrap() as *mut spa_sys::spa_pod_frame;
         // SAFETY: builder is valid; frame_ptr is valid (just pushed);
         // type_id + prop_key are u32 enum values produced by libspa-sys.
         unsafe {
-            spa_sys::spa_pod_builder_push_object(
-                &mut self.raw,
-                frame_ptr,
-                type_id,
-                prop_key,
-            );
+            spa_sys::spa_pod_builder_push_object(&mut self.raw, frame_ptr, type_id, prop_key);
         }
         ObjectScope { builder: self }
     }
@@ -559,8 +523,7 @@ mod tests {
         let mut b = PodBuilder::new();
         b.add_id_primitive(spa_sys::SPA_VIDEO_FORMAT_BGRA);
         let bytes = b.finish();
-        let (_n, value) =
-            PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
+        let (_n, value) = PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
         match value {
             Value::Id(id) => assert_eq!(id.0, spa_sys::SPA_VIDEO_FORMAT_BGRA),
             other => panic!("expected Id, got {other:?}"),
@@ -572,8 +535,7 @@ mod tests {
         let mut b = PodBuilder::new();
         b.add_rectangle_primitive(1920, 1080);
         let bytes = b.finish();
-        let (_n, value) =
-            PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
+        let (_n, value) = PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
         match value {
             Value::Rectangle(r) => {
                 assert_eq!(r.width, 1920);
@@ -588,8 +550,7 @@ mod tests {
         let mut b = PodBuilder::new();
         b.add_fraction_primitive(60, 1);
         let bytes = b.finish();
-        let (_n, value) =
-            PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
+        let (_n, value) = PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
         match value {
             Value::Fraction(f) => {
                 assert_eq!(f.num, 60);
@@ -612,8 +573,7 @@ mod tests {
             );
         } // scope drop -> pop
         let bytes = b.finish();
-        let (_n, value) =
-            PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
+        let (_n, value) = PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
         let obj = match value {
             Value::Object(o) => o,
             other => panic!("expected Object, got {other:?}"),
@@ -636,8 +596,7 @@ mod tests {
             o.add_id_property(spa_sys::SPA_FORMAT_mediaType, spa_sys::SPA_MEDIA_TYPE_video);
         }
         let bytes = b.finish();
-        let (_n, value) =
-            PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
+        let (_n, value) = PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
         let obj = match value {
             Value::Object(o) => o,
             other => panic!("expected Object, got {other:?}"),
@@ -674,8 +633,7 @@ mod tests {
             );
         }
         let bytes = b.finish();
-        let (_n, value) =
-            PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
+        let (_n, value) = PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
         let obj = match value {
             Value::Object(o) => o,
             other => panic!("expected Object, got {other:?}"),
@@ -693,7 +651,10 @@ mod tests {
         );
         match &p.value {
             Value::Choice(ChoiceValue::Id(c)) => match &c.1 {
-                ChoiceEnum::Enum { default, alternatives } => {
+                ChoiceEnum::Enum {
+                    default,
+                    alternatives,
+                } => {
                     assert_eq!(default.0, spa_sys::SPA_VIDEO_FORMAT_BGRA);
                     let alt_vals: Vec<u32> = alternatives.iter().map(|id| id.0).collect();
                     assert_eq!(
@@ -727,8 +688,7 @@ mod tests {
             );
         }
         let bytes = b.finish();
-        let (_n, value) =
-            PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
+        let (_n, value) = PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
         let obj = match value {
             Value::Object(o) => o,
             _ => panic!(),
@@ -765,13 +725,12 @@ mod tests {
             o.add_choice_long_enum(
                 spa_sys::SPA_FORMAT_VIDEO_modifier,
                 spa_sys::SPA_POD_PROP_FLAG_MANDATORY | spa_sys::SPA_POD_PROP_FLAG_DONT_FIXATE,
-                0i64,                  // DRM_FORMAT_MOD_LINEAR
-                &[0i64, -1i64],        // LINEAR + INVALID
+                0i64,           // DRM_FORMAT_MOD_LINEAR
+                &[0i64, -1i64], // LINEAR + INVALID
             );
         }
         let bytes = b.finish();
-        let (_n, value) =
-            PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
+        let (_n, value) = PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
         let obj = match value {
             Value::Object(o) => o,
             other => panic!("expected Object, got {other:?}"),
@@ -780,12 +739,23 @@ mod tests {
         let p = &obj.properties[0];
         assert_eq!(p.key, spa_sys::SPA_FORMAT_VIDEO_modifier);
         // MANDATORY|DONT_FIXATE = 8|16 = 24
-        assert_eq!(p.flags.bits(), 8 | 16, "MANDATORY|DONT_FIXATE flags missing on Modifier Choice");
+        assert_eq!(
+            p.flags.bits(),
+            8 | 16,
+            "MANDATORY|DONT_FIXATE flags missing on Modifier Choice"
+        );
         match &p.value {
             Value::Choice(ChoiceValue::Long(c)) => match &c.1 {
-                ChoiceEnum::Enum { default, alternatives } => {
+                ChoiceEnum::Enum {
+                    default,
+                    alternatives,
+                } => {
                     assert_eq!(*default, 0i64, "default must be LINEAR (0)");
-                    assert_eq!(alternatives.as_slice(), &[0i64, -1i64], "alternatives must be [LINEAR, INVALID]");
+                    assert_eq!(
+                        alternatives.as_slice(),
+                        &[0i64, -1i64],
+                        "alternatives must be [LINEAR, INVALID]"
+                    );
                 }
                 other => panic!("expected ChoiceEnum::Enum, got {other:?}"),
             },
@@ -810,8 +780,7 @@ mod tests {
             );
         }
         let bytes = b.finish();
-        let (_n, value) =
-            PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
+        let (_n, value) = PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
         let obj = match value {
             Value::Object(o) => o,
             _ => panic!(),
@@ -844,8 +813,7 @@ mod tests {
             o.add_fraction_property(spa_sys::SPA_FORMAT_VIDEO_framerate, 0, 1);
         }
         let bytes = b.finish();
-        let (_n, value) =
-            PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
+        let (_n, value) = PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
         let obj = match value {
             Value::Object(o) => o,
             other => panic!("expected Object, got {other:?}"),
@@ -876,7 +844,7 @@ mod tests {
             );
             o.add_choice_rectangle_range(
                 spa_sys::SPA_FORMAT_VIDEO_size,
-                0,  // no MANDATORY, no DONT_FIXATE
+                0, // no MANDATORY, no DONT_FIXATE
                 (1920, 1080),
                 (320, 240),
                 (7680, 4320),
@@ -889,6 +857,10 @@ mod tests {
             _ => panic!(),
         };
         let p = &obj.properties[0];
-        assert_eq!(p.flags.bits(), 0, "flags should be 0 when explicitly passed 0");
+        assert_eq!(
+            p.flags.bits(),
+            0,
+            "flags should be 0 when explicitly passed 0"
+        );
     }
 }

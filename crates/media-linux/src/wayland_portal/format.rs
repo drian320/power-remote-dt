@@ -90,10 +90,13 @@ pub fn build() -> BuiltParams {
 
         // MediaType / MediaSubtype: scalar Id properties, no Choice.
         o.add_id_property(spa_sys::SPA_FORMAT_mediaType, spa_sys::SPA_MEDIA_TYPE_video);
-        o.add_id_property(spa_sys::SPA_FORMAT_mediaSubtype, spa_sys::SPA_MEDIA_SUBTYPE_raw);
+        o.add_id_property(
+            spa_sys::SPA_FORMAT_mediaSubtype,
+            spa_sys::SPA_MEDIA_SUBTYPE_raw,
+        );
 
-        let f_choice = spa_sys::SPA_POD_PROP_FLAG_MANDATORY
-            | spa_sys::SPA_POD_PROP_FLAG_DONT_FIXATE;
+        let f_choice =
+            spa_sys::SPA_POD_PROP_FLAG_MANDATORY | spa_sys::SPA_POD_PROP_FLAG_DONT_FIXATE;
         let f_negotiable = 0u32; // size/framerate: producer picks freely
 
         // VideoFormat: producer picks one of the alternatives (DONT_FIXATE).
@@ -151,12 +154,14 @@ pub fn build() -> BuiltParams {
         o.add_choice_long_enum(
             spa_sys::SPA_FORMAT_VIDEO_modifier,
             f_choice,
-            0i64,                                  // DRM_FORMAT_MOD_LINEAR
+            0i64, // DRM_FORMAT_MOD_LINEAR
             &[0i64, DRM_FORMAT_MOD_INVALID],
         );
     } // ObjectScope drop -> pop
 
-    BuiltParams { bytes: vec![b.finish()] }
+    BuiltParams {
+        bytes: vec![b.finish()],
+    }
 }
 
 /// Re-export of `stream::PixelFormat` so callers don't need two imports.

@@ -25,8 +25,8 @@ const FIXTURE_PATH: &str = "tests/fixtures/enum_format_golden.bin";
 #[test]
 fn enum_format_matches_golden_fixture() {
     let actual = prdt_media_linux::wayland_portal::format::build().bytes[0].clone();
-    let fixture = std::fs::read(FIXTURE_PATH)
-        .unwrap_or_else(|e| panic!("read fixture {FIXTURE_PATH}: {e}"));
+    let fixture =
+        std::fs::read(FIXTURE_PATH).unwrap_or_else(|e| panic!("read fixture {FIXTURE_PATH}: {e}"));
     if actual != fixture {
         // Surface a helpful diff hint — length first, then first
         // diverging offset.
@@ -44,8 +44,10 @@ fn enum_format_matches_golden_fixture() {
             }
         }
         if let Some(off) = first_diff {
-            eprintln!("first divergence at byte {off}: actual=0x{:02x} fixture=0x{:02x}",
-                      actual[off], fixture[off]);
+            eprintln!(
+                "first divergence at byte {off}: actual=0x{:02x} fixture=0x{:02x}",
+                actual[off], fixture[off]
+            );
         } else {
             eprintln!("prefix matches; lengths differ at offset {n}");
         }
