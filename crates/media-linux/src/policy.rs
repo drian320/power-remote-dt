@@ -348,10 +348,17 @@ impl ProducerFactory for LinuxSwFactory {
             BackendKind::Vaapi => {
                 let producer = crate::build_vaapi_video_producer_with(
                     capture,
+                    cfg.width,
+                    cfg.height,
                     cfg.initial_bitrate_bps,
                     cfg.fps,
                 )
-                .map_err(|e| FactoryError::Unavailable(kind, format!("VAAPI init failed: {e}")))?;
+                .map_err(|e| {
+                    // `{:#}` prints the anyhow context chain so the root
+                    // VaapiError surfaces (e.g. NotSupported / DriverError)
+                    // instead of just the topmost "LinuxVaapiEncoder::new".
+                    FactoryError::Unavailable(kind, format!("VAAPI init failed: {e:#}"))
+                })?;
                 Ok(Box::new(producer))
             }
             // Other backends rejected above.

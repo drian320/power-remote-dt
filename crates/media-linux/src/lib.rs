@@ -56,19 +56,28 @@ pub fn build_video_producer(
 }
 
 /// VAAPI counterpart to `build_video_producer_with`. Constructs a
-/// `LinuxVaapiEncoder` from the capture's geometry + the given bitrate/fps
-/// and returns a `VaapiVideoProducer`. The encoder ctor (cros-libva
-/// `Display::open_drm_display` + cap probe) is what fails in a container
-/// without `/dev/dri/*` — the factory propagates that as `Unavailable`.
+/// `LinuxVaapiEncoder` from the given (width, height, bitrate, fps) and
+/// returns a `VaapiVideoProducer`.
+///
+/// Unlike the SW path which can rely on `capture.geometry()` (the
+/// X11ShmCapturer knows its size at construction time), the WaylandPortal
+/// capturer reports `(0, 0)` until the pipewire stream completes format
+/// negotiation — which happens AFTER the encoder needs to allocate its
+/// fixed-size surface pool. We therefore pass the explicit dimensions
+/// from the handshake-negotiated `ProducerConfig` (i.e. the resolution
+/// the viewer requested). If the compositor later negotiates a different
+/// frame size, the producer's `resize_warned` path logs it; full
+/// renegotiation lands in a follow-up.
 #[cfg(target_os = "linux")]
 pub fn build_vaapi_video_producer_with(
     capture: Box<dyn CaptureSource>,
+    width: u32,
+    height: u32,
     bitrate_bps: u32,
     fps: u32,
 ) -> anyhow::Result<vaapi_pipeline::VaapiVideoProducer> {
     use anyhow::Context as _;
-    let (w, h) = capture.geometry();
-    let enc = vaapi_pipeline::LinuxVaapiEncoder::new(w, h, bitrate_bps, fps)
+    let enc = vaapi_pipeline::LinuxVaapiEncoder::new(width, height, bitrate_bps, fps)
         .context("LinuxVaapiEncoder::new")?;
     vaapi_pipeline::VaapiVideoProducer::new(capture, enc, fps).context("VaapiVideoProducer::new")
 }
