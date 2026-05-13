@@ -846,9 +846,16 @@ pub async fn run_host(
         };
         // Coerce concrete LinuxSwFactory → trait object for bootstrap (Linux);
         // on Windows factory_arc is already Arc<dyn ProducerFactory>.
+        //
+        // NOTE: must use the `.clone()` method form, not `Arc::clone(&factory_arc)`,
+        // because the function-call form forces rustc to pick the generic
+        // `T = dyn ProducerFactory` from the LHS annotation and then the
+        // argument `&Arc<LinuxSwFactory>` fails to coerce to `&Arc<dyn …>`.
+        // The method form `.clone()` returns `Arc<Self>` first, then the
+        // unsize coercion fires at let-binding to satisfy the LHS type.
         #[cfg(target_os = "linux")]
         let factory_trait_arc: std::sync::Arc<dyn prdt_media_policy::ProducerFactory> =
-            std::sync::Arc::clone(&factory_arc);
+            factory_arc.clone();
         #[cfg(windows)]
         let factory_trait_arc = std::sync::Arc::clone(&factory_arc);
         let policy_producer = prdt_media_policy::PolicyDriven::bootstrap(
