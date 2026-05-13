@@ -40,6 +40,7 @@ jobs:
             libgdk-pixbuf-2.0-dev libatk1.0-dev libayatana-appindicator3-dev \
             libasound2-dev \
             libpipewire-0.3-dev libspa-0.2-dev \
+            libva-dev libva-drm2 libva-x11-2 \
             libxdo-dev
 
       - name: Install Rust toolchain (stable)
