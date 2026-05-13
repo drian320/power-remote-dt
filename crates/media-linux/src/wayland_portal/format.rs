@@ -51,10 +51,20 @@ impl BuiltParams {
 
 /// Build a single `SPA_PARAM_EnumFormat` POD advertising BGRA/BGRx + size
 /// (320×240..7680×4320, default 1920×1080) + framerate (15/1..60/1, default
-/// 60/1) + modifier (LINEAR | INVALID, default LINEAR).
+/// 60/1).
+///
+/// **VideoModifier is intentionally omitted.** P5B-2a originally advertised
+/// a `Choice<Long>` over `[LINEAR, INVALID]`, but GNOME 46 mutter rejects
+/// the negotiation with "no more input formats" because (a) the `Choice` is
+/// not flagged `MANDATORY | DON'T_FIXATE`, so libspa treats it as a hard
+/// requirement (compositor must satisfy *all* advertised modifiers), and
+/// (b) mutter's preferred modifier for screencast is a tile-specific Intel
+/// iHD value that isn't in our list. Omitting the property entirely lets
+/// mutter pick its default modifier (typically LINEAR for CPU consumers)
+/// which we can mmap directly. DMABUF zero-copy (P5C-2) will reintroduce
+/// the modifier property with the correct flags + the full
+/// driver-advertised modifier list.
 pub fn build() -> BuiltParams {
-    let modifiers = vec![DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_MOD_INVALID];
-
     let obj = Object {
         type_: SpaTypes::ObjectParamFormat.as_raw(),
         id: ParamType::EnumFormat.as_raw(),
@@ -108,16 +118,6 @@ pub fn build() -> BuiltParams {
                         default: Fraction { num: 60, denom: 1 },
                         min: Fraction { num: 15, denom: 1 },
                         max: Fraction { num: 60, denom: 1 },
-                    },
-                ))),
-            ),
-            Property::new(
-                FormatProperties::VideoModifier.as_raw(),
-                Value::Choice(ChoiceValue::Long(Choice(
-                    ChoiceFlags::empty(),
-                    ChoiceEnum::Enum {
-                        default: DRM_FORMAT_MOD_LINEAR,
-                        alternatives: modifiers,
                     },
                 ))),
             ),
