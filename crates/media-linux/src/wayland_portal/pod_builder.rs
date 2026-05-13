@@ -56,9 +56,7 @@ pub struct PodBuilder {
     buf: Vec<u8>,
     raw: spa_sys::spa_pod_builder,
     // Frame stack is small (≤ 2 in practice: object + choice). Vec is
-    // fine here.
-    // Used by `push_object` / `ObjectScope` in T4.
-    #[allow(dead_code)]
+    // fine here. Used by `push_object` / `ObjectScope`.
     frames: Vec<spa_sys::spa_pod_frame>,
     // Callbacks block must outlive `raw.callbacks` pointer; kept as a
     // field so its address is stable across calls.
@@ -248,11 +246,100 @@ impl Default for PodBuilder {
     }
 }
 
+/// RAII guard returned by `PodBuilder::push_object`. Drop pops the
+/// libspa frame and decrements the builder's frame stack, structurally
+/// preventing imbalanced push/pop on every caller path (including
+/// panics).
+pub struct ObjectScope<'a> {
+    builder: &'a mut PodBuilder,
+}
+
+impl<'a> ObjectScope<'a> {
+    /// Add a `SPA_TYPE_Id` property to the current object.
+    pub fn add_id_property(&mut self, key: u32, id: u32) {
+        // SAFETY: builder is inside an object frame (push_object set up
+        // the libspa state); spa_pod_builder_prop takes (key, flags).
+        // Flags=0 means a plain (non-Choice) property.
+        unsafe {
+            spa_sys::spa_pod_builder_prop(&mut self.builder.raw, key, 0);
+        }
+        self.builder.add_id_primitive(id);
+    }
+}
+
+impl<'a> Drop for ObjectScope<'a> {
+    fn drop(&mut self) {
+        // Pop the last frame we pushed. The libspa pop returns the
+        // address of the closed pod inside `buf`; null indicates frame
+        // stack underflow which would be an FFI bug on our side.
+        let Some(mut frame) = self.builder.frames.pop() else {
+            debug_assert!(false, "ObjectScope::drop with empty frame stack");
+            return;
+        };
+        // SAFETY: frame was produced by spa_pod_builder_push_object on
+        // the same builder; pop matches.
+        unsafe {
+            let pod = spa_sys::spa_pod_builder_pop(
+                &mut self.builder.raw,
+                &mut frame as *mut _,
+            );
+            debug_assert!(!pod.is_null(), "spa_pod_builder_pop returned null");
+        }
+    }
+}
+
+impl PodBuilder {
+    /// Open a `SPA_TYPE_Object` (or any object subtype). Returns an
+    /// `ObjectScope` whose `Drop` impl pops the frame. Property keys
+    /// added during the scope's lifetime are appended to this object.
+    pub fn push_object(
+        &mut self,
+        type_id: u32,
+        prop_key: u32,
+    ) -> ObjectScope<'_> {
+        // Ensure the builder is initialized (lazy-init pattern).
+        self.init_if_needed();
+        // Reserve a fresh spa_pod_frame inside our Vec so libspa can
+        // write into it. Push a zero-initialised frame, then take a
+        // raw pointer to the just-pushed slot.
+        // SAFETY: frame layout is plain POD; zeroing is valid.
+        let frame: spa_sys::spa_pod_frame = unsafe { std::mem::zeroed() };
+        // Pre-condition: capacity must be sufficient to push without reallocating.
+        // If frames reallocates between push and pop, the raw `*mut spa_pod_frame`
+        // libspa retains (via `raw.state`) becomes a dangling pointer into the
+        // moved-from buffer. The Vec is pre-allocated with `with_capacity(2)` in
+        // `new()`; deeper nesting requires bumping that capacity (or rewriting
+        // the frame stack to use a stable-address container).
+        debug_assert!(
+            self.frames.len() < self.frames.capacity(),
+            "PodBuilder frame stack would reallocate (len={}, cap={}); \
+             increase `Vec::with_capacity(N)` in `PodBuilder::new` for deeper nesting",
+            self.frames.len(),
+            self.frames.capacity()
+        );
+        self.frames.push(frame);
+        let frame_ptr =
+            self.frames.last_mut().unwrap() as *mut spa_sys::spa_pod_frame;
+        // SAFETY: builder is valid; frame_ptr is valid (just pushed);
+        // type_id + prop_key are u32 enum values produced by libspa-sys.
+        unsafe {
+            spa_sys::spa_pod_builder_push_object(
+                &mut self.raw,
+                frame_ptr,
+                type_id,
+                prop_key,
+            );
+        }
+        ObjectScope { builder: self }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use pipewire::spa::pod::deserialize::PodDeserializer;
     use pipewire::spa::pod::Value;
+    use pipewire::spa::utils::Id;
 
     #[test]
     fn primitive_int_round_trip() {
@@ -332,6 +419,58 @@ mod tests {
                 assert_eq!(f.denom, 1);
             }
             other => panic!("expected Fraction, got {other:?}"),
+        }
+    }
+
+    /// Build an empty `SPA_TYPE_OBJECT_Format` (no properties), confirm
+    /// the resulting POD deserialises to `Value::Object` with the right
+    /// type/id and an empty properties vec.
+    #[test]
+    fn empty_object_round_trip() {
+        let mut b = PodBuilder::new();
+        {
+            let _scope = b.push_object(
+                spa_sys::SPA_TYPE_OBJECT_Format,
+                spa_sys::SPA_PARAM_EnumFormat,
+            );
+        } // scope drop -> pop
+        let bytes = b.finish();
+        let (_n, value) =
+            PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
+        let obj = match value {
+            Value::Object(o) => o,
+            other => panic!("expected Object, got {other:?}"),
+        };
+        assert_eq!(obj.type_, spa_sys::SPA_TYPE_OBJECT_Format);
+        assert_eq!(obj.id, spa_sys::SPA_PARAM_EnumFormat);
+        assert!(obj.properties.is_empty());
+    }
+
+    /// One scalar Id property inside an object — proves `add_prop` +
+    /// primitive composition works.
+    #[test]
+    fn object_with_single_id_property_round_trip() {
+        let mut b = PodBuilder::new();
+        {
+            let mut o = b.push_object(
+                spa_sys::SPA_TYPE_OBJECT_Format,
+                spa_sys::SPA_PARAM_EnumFormat,
+            );
+            o.add_id_property(spa_sys::SPA_FORMAT_mediaType, spa_sys::SPA_MEDIA_TYPE_video);
+        }
+        let bytes = b.finish();
+        let (_n, value) =
+            PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
+        let obj = match value {
+            Value::Object(o) => o,
+            other => panic!("expected Object, got {other:?}"),
+        };
+        assert_eq!(obj.properties.len(), 1);
+        let p = &obj.properties[0];
+        assert_eq!(p.key, spa_sys::SPA_FORMAT_mediaType);
+        match &p.value {
+            Value::Id(Id(v)) => assert_eq!(*v, spa_sys::SPA_MEDIA_TYPE_video),
+            other => panic!("expected Id, got {other:?}"),
         }
     }
 }
