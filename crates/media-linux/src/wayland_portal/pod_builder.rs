@@ -212,6 +212,15 @@ impl PodBuilder {
         }
     }
 
+    /// Append a bare `SPA_TYPE_Long` POD.
+    pub fn add_long_primitive(&mut self, val: i64) {
+        // SAFETY: builder is valid (init'd via init_if_needed); val is plain i64.
+        self.init_if_needed();
+        unsafe {
+            spa_sys::spa_pod_builder_long(&mut self.raw, val);
+        }
+    }
+
     /// Append a bare `SPA_TYPE_Fraction` POD.
     pub fn add_fraction_primitive(&mut self, num: i32, denom: i32) {
         // SAFETY: builder is valid; spa_pod_builder_fraction writes
@@ -342,6 +351,46 @@ impl<'a> ObjectScope<'a> {
             let _ = spa_sys::spa_pod_builder_pop(
                 &mut self.builder.raw,
                 &mut frame as *mut _,
+            );
+        }
+    }
+
+    /// Append a `Choice<Long>` property (Enum form) carrying the
+    /// `MANDATORY | DONT_FIXATE` flag pair. Used for `VideoModifier`
+    /// where the value type is signed i64 (DRM modifiers).
+    pub fn add_choice_long_enum(
+        &mut self,
+        key: u32,
+        default: i64,
+        alternatives: &[i64],
+    ) {
+        let flags = spa_sys::SPA_POD_PROP_FLAG_MANDATORY
+            | spa_sys::SPA_POD_PROP_FLAG_DONT_FIXATE;
+        // SAFETY: same as add_id_property; builder is inside an object frame.
+        unsafe {
+            spa_sys::spa_pod_builder_prop(&mut self.builder.raw, key, flags);
+        }
+        let mut choice_frame: spa_sys::spa_pod_frame =
+            unsafe { std::mem::zeroed() };
+        // SAFETY: push_choice opens a SPA_TYPE_Choice subframe. Pop
+        // matches via the local frame variable below.
+        unsafe {
+            spa_sys::spa_pod_builder_push_choice(
+                &mut self.builder.raw,
+                &mut choice_frame as *mut _,
+                spa_sys::SPA_CHOICE_Enum,
+                0,
+            );
+        }
+        self.builder.add_long_primitive(default);
+        for &alt in alternatives {
+            self.builder.add_long_primitive(alt);
+        }
+        // SAFETY: pop matches the push_choice above.
+        unsafe {
+            let _ = spa_sys::spa_pod_builder_pop(
+                &mut self.builder.raw,
+                &mut choice_frame as *mut _,
             );
         }
     }
@@ -685,6 +734,49 @@ mod tests {
                 _ => panic!(),
             },
             _ => panic!(),
+        }
+    }
+
+    /// Regression test for VideoModifier negotiation: GNOME 46 mutter on
+    /// Intel iHD rejects EnumFormat with "no more input formats" if the
+    /// consumer doesn't declare a Modifier Choice. We need to emit
+    /// Choice<Long> Enum with MANDATORY|DONT_FIXATE, default LINEAR (0),
+    /// alternatives [LINEAR, INVALID] per OBS / gnome-remote-desktop.
+    #[test]
+    fn choice_long_enum_round_trip_with_mandatory_dont_fixate() {
+        let mut b = PodBuilder::new();
+        {
+            let mut o = b.push_object(
+                spa_sys::SPA_TYPE_OBJECT_Format,
+                spa_sys::SPA_PARAM_EnumFormat,
+            );
+            o.add_choice_long_enum(
+                spa_sys::SPA_FORMAT_VIDEO_modifier,
+                0i64,                  // DRM_FORMAT_MOD_LINEAR
+                &[0i64, -1i64],        // LINEAR + INVALID
+            );
+        }
+        let bytes = b.finish();
+        let (_n, value) =
+            PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
+        let obj = match value {
+            Value::Object(o) => o,
+            other => panic!("expected Object, got {other:?}"),
+        };
+        assert_eq!(obj.properties.len(), 1);
+        let p = &obj.properties[0];
+        assert_eq!(p.key, spa_sys::SPA_FORMAT_VIDEO_modifier);
+        // MANDATORY|DONT_FIXATE = 8|16 = 24
+        assert_eq!(p.flags.bits(), 8 | 16, "MANDATORY|DONT_FIXATE flags missing on Modifier Choice");
+        match &p.value {
+            Value::Choice(ChoiceValue::Long(c)) => match &c.1 {
+                ChoiceEnum::Enum { default, alternatives } => {
+                    assert_eq!(*default, 0i64, "default must be LINEAR (0)");
+                    assert_eq!(alternatives.as_slice(), &[0i64, -1i64], "alternatives must be [LINEAR, INVALID]");
+                }
+                other => panic!("expected ChoiceEnum::Enum, got {other:?}"),
+            },
+            other => panic!("expected Choice<Long>, got {other:?}"),
         }
     }
 

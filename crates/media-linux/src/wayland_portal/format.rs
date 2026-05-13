@@ -68,12 +68,15 @@ impl BuiltParams {
 /// them to a small set of `PixelFormat` variants the encoder pipeline
 /// already handles (or BGRA-equivalent for the alpha-channel variants).
 ///
-/// **VideoModifier is intentionally omitted.** P5B-2a originally advertised
-/// a `Choice<Long>` over `[LINEAR, INVALID]`, but omitting the property
-/// entirely lets mutter pick its default modifier (typically LINEAR for
-/// CPU consumers) which we can mmap directly. DMABUF zero-copy (P5C-2)
-/// will reintroduce the modifier property with the correct flags + the
-/// full driver-advertised modifier list.
+/// **VideoModifier: `Choice<Long>` Enum `[LINEAR (0), INVALID (-1)]`.**
+/// GNOME 46 mutter on Intel iHD holds frames as GPU-side DMABUF. Without
+/// a `VideoModifier` Choice property mutter concludes we can't accept
+/// DMABUF and offers no MemFd fallback for this hardware, producing "no
+/// more input formats" (smoke 2026-05-13). We advertise `LINEAR` as the
+/// preferred default with `INVALID` as the modifier-agnostic fallback,
+/// matching OBS / gnome-remote-desktop. Both `MANDATORY` and `DONT_FIXATE`
+/// are required so mutter treats the list as "pick one" rather than
+/// "must be exactly this value".
 pub fn build() -> BuiltParams {
     use crate::wayland_portal::pod_builder::PodBuilder;
     use pipewire::spa::sys as spa_sys;
@@ -121,6 +124,18 @@ pub fn build() -> BuiltParams {
             (60, 1),
             (15, 1),
             (60, 1),
+        );
+
+        // VideoModifier: Choice<Long> Enum over [LINEAR, INVALID].
+        // Required for GNOME 46 mutter on Intel iHD which holds frames
+        // as GPU-side DMABUF — without this property mutter rejects with
+        // "no more input formats" (smoke 2026-05-13). LINEAR (=0) is the
+        // CPU-consumer preferred default; INVALID (=-1) is the
+        // modifier-agnostic fallback per OBS / gnome-remote-desktop.
+        o.add_choice_long_enum(
+            spa_sys::SPA_FORMAT_VIDEO_modifier,
+            0i64,                   // DRM_FORMAT_MOD_LINEAR
+            &[0i64, -1i64],         // LINEAR + INVALID
         );
     } // ObjectScope drop -> pop
 
@@ -343,6 +358,7 @@ mod tests {
             (FormatProperties::VideoFormat.as_raw(), "VideoFormat"),
             (FormatProperties::VideoSize.as_raw(), "VideoSize"),
             (FormatProperties::VideoFramerate.as_raw(), "VideoFramerate"),
+            (FormatProperties::VideoModifier.as_raw(), "VideoModifier"),
         ];
 
         for (key, name) in choice_keys {
