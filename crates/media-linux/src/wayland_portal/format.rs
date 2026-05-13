@@ -20,11 +20,11 @@ use thiserror::Error;
 /// with this modifier produce CPU-readable BGRA.
 pub const DRM_FORMAT_MOD_LINEAR: i64 = 0;
 
-/// DRM modifier: "unspecified". Compositors use this when they don't want
-/// to commit to a specific tiling layout. NOT linear-guaranteed; if the
-/// negotiated modifier is this value we disconnect rather than mmap tiled
-/// data (would be `unsafe`-but-broken). See spec §4.3.
-pub const DRM_FORMAT_MOD_INVALID: i64 = -1;
+/// DRM modifier: "invalid / no preference".
+/// Value is `(1u64 << 56) - 1 = 0x00FFFFFFFFFFFFFF` per drm_fourcc.h —
+/// NOT `-1` (which is a different bit pattern). The previous value of -1
+/// was wrong; this is the canonical value mutter's screencast catalog uses.
+pub const DRM_FORMAT_MOD_INVALID: i64 = 72057594037927935;
 
 /// Owned byte storage for the serialised POD(s) handed to `stream.connect`.
 ///
@@ -125,12 +125,19 @@ pub fn build() -> BuiltParams {
             (7680, 4320),
         );
 
-        // VideoFramerate: producer picks freely (same reasoning as size).
+        // VideoFramerate: scalar Fraction 0/1 ("no fixed rate") per OBS
+        // and mutter convention. The upper bound is declared via the
+        // separate VideoMaxFramerate property below.
+        o.add_fraction_property(spa_sys::SPA_FORMAT_VIDEO_framerate, 0, 1);
+
+        // VideoMaxFramerate: Choice<Fraction> Range with the actual cap.
+        // Mutter on N100 advertises ~60.029 Hz here; we offer 60/1..60/1
+        // (default + clamp), which intersects with mutter's range.
         o.add_choice_fraction_range(
-            spa_sys::SPA_FORMAT_VIDEO_framerate,
+            spa_sys::SPA_FORMAT_VIDEO_maxFramerate,
             f_negotiable,
             (60, 1),
-            (15, 1),
+            (1, 1),
             (60, 1),
         );
 
@@ -138,13 +145,14 @@ pub fn build() -> BuiltParams {
         // Required for GNOME 46 mutter on Intel iHD which holds frames
         // as GPU-side DMABUF — without this property mutter rejects with
         // "no more input formats" (smoke 2026-05-13). LINEAR (=0) is the
-        // CPU-consumer preferred default; INVALID (=-1) is the
-        // modifier-agnostic fallback per OBS / gnome-remote-desktop.
+        // CPU-consumer preferred default; INVALID (=72057594037927935) is
+        // the canonical DRM_FORMAT_MOD_INVALID sentinel per drm_fourcc.h
+        // and matches what mutter's modifier list contains.
         o.add_choice_long_enum(
             spa_sys::SPA_FORMAT_VIDEO_modifier,
             f_choice,
-            0i64,                   // DRM_FORMAT_MOD_LINEAR
-            &[0i64, -1i64],         // LINEAR + INVALID
+            0i64,                                  // DRM_FORMAT_MOD_LINEAR
+            &[0i64, DRM_FORMAT_MOD_INVALID],
         );
     } // ObjectScope drop -> pop
 
@@ -323,6 +331,7 @@ mod tests {
     use pipewire::spa::param::ParamType;
     use pipewire::spa::pod::serialize::PodSerializer;
     use pipewire::spa::pod::{Object, Property, PropertyFlags};
+    use pipewire::spa::sys as spa_sys;
     use pipewire::spa::utils::Choice;
 
     /// Helper: serialise a hand-built Object to bytes so tests can feed
@@ -376,10 +385,16 @@ mod tests {
                 0, // OBS pattern: flag=0
                 "VideoSize",
             ),
+            // VideoFramerate is now a scalar property (not Choice), flags=0.
             (
                 FormatProperties::VideoFramerate.as_raw(),
+                0,
+                "VideoFramerate (scalar)",
+            ),
+            (
+                spa_sys::SPA_FORMAT_VIDEO_maxFramerate,
                 0, // OBS pattern: flag=0
-                "VideoFramerate",
+                "VideoMaxFramerate",
             ),
             (
                 FormatProperties::VideoModifier.as_raw(),

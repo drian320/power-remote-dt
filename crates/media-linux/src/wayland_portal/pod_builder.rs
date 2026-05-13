@@ -392,6 +392,20 @@ impl<'a> ObjectScope<'a> {
         }
     }
 
+    /// Add a scalar `SPA_TYPE_Fraction` property to the current object
+    /// (no Choice wrapper). Used for `VideoFramerate` where mutter
+    /// expects a scalar `0/1` ("no fixed rate") rather than a Choice
+    /// Range. The actual rate range is then declared via a separate
+    /// `VideoMaxFramerate` property as a Choice<Fraction> Range.
+    pub fn add_fraction_property(&mut self, key: u32, num: i32, denom: i32) {
+        // SAFETY: builder is inside an object frame; spa_pod_builder_prop
+        // with flags=0 emits a non-Choice property.
+        unsafe {
+            spa_sys::spa_pod_builder_prop(&mut self.builder.raw, key, 0);
+        }
+        self.builder.add_fraction_primitive(num, denom);
+    }
+
     /// Append a `Choice<Fraction>` property (Range form). The caller
     /// supplies `flags` explicitly (e.g. `MANDATORY | DONT_FIXATE` or `0`).
     pub fn add_choice_fraction_range(
@@ -814,6 +828,38 @@ mod tests {
                 _ => panic!(),
             },
             _ => panic!(),
+        }
+    }
+
+    /// Scalar Fraction property (not Choice). Used for VideoFramerate=0/1
+    /// in the EnumFormat where mutter expects "no fixed rate" semantics.
+    #[test]
+    fn scalar_fraction_property_round_trip() {
+        let mut b = PodBuilder::new();
+        {
+            let mut o = b.push_object(
+                spa_sys::SPA_TYPE_OBJECT_Format,
+                spa_sys::SPA_PARAM_EnumFormat,
+            );
+            o.add_fraction_property(spa_sys::SPA_FORMAT_VIDEO_framerate, 0, 1);
+        }
+        let bytes = b.finish();
+        let (_n, value) =
+            PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
+        let obj = match value {
+            Value::Object(o) => o,
+            other => panic!("expected Object, got {other:?}"),
+        };
+        assert_eq!(obj.properties.len(), 1);
+        let p = &obj.properties[0];
+        assert_eq!(p.key, spa_sys::SPA_FORMAT_VIDEO_framerate);
+        assert_eq!(p.flags.bits(), 0, "scalar property must have flags=0");
+        match &p.value {
+            Value::Fraction(f) => {
+                assert_eq!(f.num, 0);
+                assert_eq!(f.denom, 1);
+            }
+            other => panic!("expected scalar Fraction, got {other:?}"),
         }
     }
 
