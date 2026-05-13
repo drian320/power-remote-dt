@@ -39,7 +39,8 @@ jobs:
             libgtk-3-dev libpango1.0-dev libcairo2-dev \
             libgdk-pixbuf-2.0-dev libatk1.0-dev libayatana-appindicator3-dev \
             libasound2-dev \
-            libpipewire-0.3-dev libspa-0.2-dev
+            libpipewire-0.3-dev libspa-0.2-dev \
+            libxdo-dev
 
       - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
@@ -74,17 +75,30 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-      - name: Create / update GitHub Release (only on tag push)
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Create / update GitHub Release (tag push OR workflow_dispatch with tag ref)
+        # Fires on:
+        #   1. push event with refs/tags/* (normal tag-driven release)
+        #   2. workflow_dispatch where the `ref` input names a tag (phase-* / v*)
+        #      — used for backfilling releases after a CI hotfix without
+        #      having to re-tag the historical commit
+        if: |
+          startsWith(github.ref, 'refs/tags/') ||
+          (github.event_name == 'workflow_dispatch' && (
+            startsWith(github.event.inputs.ref, 'phase-') ||
+            startsWith(github.event.inputs.ref, 'v')
+          ))
         uses: softprops/action-gh-release@v2
         with:
+          # Override the default (= github.ref_name, which is "master" on
+          # workflow_dispatch) so the Release attaches to the historical tag.
+          tag_name: ${{ github.event.inputs.ref || github.ref_name }}
           files: |
             artifacts/prdt-linux-x86_64
             artifacts/prdt-linux-x86_64.sha256
           generate_release_notes: true
           fail_on_unmatched_files: true
           body: |
-            Linux x86_64 build of `prdt` (the unified host+viewer client) for tag `${{ github.ref_name }}`.
+            Linux x86_64 build of `prdt` (the unified host+viewer client) for tag `${{ github.event.inputs.ref || github.ref_name }}`.
 
             **Install on a Linux box:**
             ```bash
