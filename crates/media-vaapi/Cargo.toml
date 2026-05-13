@@ -1,0 +1,23 @@
+[package]
+name = "prdt-media-vaapi"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+prdt-media-sw = { path = "../media-sw" }
+prdt-protocol = { path = "../protocol" }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# cros-libva 0.0.13 is the safe RAII wrapper over libva. Pinned tight
+# until the next audit; the crate's `0.0.*` versioning means each minor
+# bump can break source compat.
+cros-libva = "=0.0.13"
+libc = "0.2"

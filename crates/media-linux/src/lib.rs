@@ -14,12 +14,14 @@ pub mod i420_to_bgra;
 pub mod linux_sw_producer;
 pub mod policy;
 pub mod sw_pipeline;
+pub mod vaapi_pipeline;
 pub mod wayland_portal;
 pub mod x11_capture;
 
 pub use capture_source::{CaptureSource, CaptureSourceError};
 pub use error::LinuxMediaError;
 pub use frame::BgraFrame;
+pub use vaapi_pipeline::{LinuxVaapiEncoder, VaapiVideoProducer};
 
 /// Production wiring entry point — host calls this to obtain a boxed
 /// `VideoProducer` for the Linux SW path. The capture source is injected
@@ -51,6 +53,33 @@ pub fn build_video_producer(
     use anyhow::Context as _;
     let cap = x11_capture::X11ShmCapturer::new().context("X11ShmCapturer::new")?;
     build_video_producer_with(Box::new(cap), bitrate_bps, fps)
+}
+
+/// VAAPI counterpart to `build_video_producer_with`. Constructs a
+/// `LinuxVaapiEncoder` from the given (width, height, bitrate, fps) and
+/// returns a `VaapiVideoProducer`.
+///
+/// Unlike the SW path which can rely on `capture.geometry()` (the
+/// X11ShmCapturer knows its size at construction time), the WaylandPortal
+/// capturer reports `(0, 0)` until the pipewire stream completes format
+/// negotiation — which happens AFTER the encoder needs to allocate its
+/// fixed-size surface pool. We therefore pass the explicit dimensions
+/// from the handshake-negotiated `ProducerConfig` (i.e. the resolution
+/// the viewer requested). If the compositor later negotiates a different
+/// frame size, the producer's `resize_warned` path logs it; full
+/// renegotiation lands in a follow-up.
+#[cfg(target_os = "linux")]
+pub fn build_vaapi_video_producer_with(
+    capture: Box<dyn CaptureSource>,
+    width: u32,
+    height: u32,
+    bitrate_bps: u32,
+    fps: u32,
+) -> anyhow::Result<vaapi_pipeline::VaapiVideoProducer> {
+    use anyhow::Context as _;
+    let enc = vaapi_pipeline::LinuxVaapiEncoder::new(width, height, bitrate_bps, fps)
+        .context("LinuxVaapiEncoder::new")?;
+    vaapi_pipeline::VaapiVideoProducer::new(capture, enc, fps).context("VaapiVideoProducer::new")
 }
 
 /// Production wiring entry point — viewer calls this to obtain a SW decoder.

@@ -85,6 +85,7 @@ mod tests {
                 BackendKind::Nvenc => "nvenc-mock",
                 BackendKind::MfHevc => "mf-mock",
                 BackendKind::Openh264 => "openh264-mock",
+                BackendKind::Vaapi => "vaapi-mock",
             };
             Ok(Box::new(ScriptedProducer { name }))
         }

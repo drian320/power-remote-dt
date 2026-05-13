@@ -504,3 +504,138 @@ behaviour); no `CursorUpdate` messages on the wire.
 ### Known issues / follow-ups (P5B-2c)
 
 - **Modal dialog cursor restore race**: opening a modal dialog (e.g. a permissions prompt) within the viewer may briefly re-show the OS cursor. The visibility helper re-asserts on the next `CursorMoved` event, so the flash is bounded to one frame. Tracked but not pre-emptively gated.
+
+---
+
+## P5C-1 — VAAPI H.264 encoder (Linux HW codec)
+
+### Section K — VAAPI encoder real-device smoke
+
+**Pre-conditions:**
+- Linux host with Intel iGPU (Tigerlake+) OR AMD APU (Renoir+).
+- Mesa libva ≥ 23.x (intel-media-driver for Intel; radeonsi for AMD).
+- User in the `render` (or `video`) group so `/dev/dri/renderD128` is RW-accessible.
+- `prdt host` + `prdt connect` binaries from this branch.
+
+**Steps:**
+
+1. Verify VAAPI driver: `vainfo | grep H264ConstrainedBaseline`. Expect at least one matching `VAEntrypointEncSlice` line.
+
+2. Start host with explicit Vaapi backend:
+   ```bash
+   ./prdt host --encoder vaapi --bitrate-mbps 5 --silent-allow 2>&1 | tee p5c1.log
+   ```
+
+3. Expect log: `vaapi encoder initialized: driver=intel-iHD profile=ConstrainedBaseline` (exact driver name varies by GPU + Mesa version).
+
+4. Connect viewer:
+   ```bash
+   ./prdt connect --host <ip>:9000 --decoder openh264 --codec h264
+   ```
+
+5. Confirm frame flow at ≥ 30 fps in viewer.
+
+6. **CPU usage check** (the HW codec payoff):
+   ```bash
+   pidstat -p $(pgrep -f prdt) 1 30
+   ```
+   Expected: host %CPU significantly below the OpenH264 SW baseline. Intel iGPU 1080p60 typically lands < 5% CPU vs OpenH264 SW ~25-40%.
+
+7. **Bitrate update**: from viewer adjust the bitrate slider; expect host log line `set_target_bitrate 8000000 → 8 Mbps`.
+
+8. **Failure fallback** (DeviceLost path): `sudo chmod 000 /dev/dri/renderD128` while a session is running. Within ~5 seconds the host should:
+   - Emit `vaapi encode failed: HardwareBusy → falling back to OpenH264` (or similar; depends on whether the driver returns HW_BUSY vs a permission error wrapped as DriverError).
+   - Continue the session with the SW encoder (frames may briefly stutter through the SelectionPolicy cooldown window).
+   - Restore the device with `sudo chmod 0666 /dev/dri/renderD128` for next session.
+
+9. **AMD APU verification** (separate run): repeat steps 1–7 on a Kubuntu/Fedora system with Ryzen Renoir+ APU. Confirm `vainfo` shows `radeonsi`-prefixed driver names; the encoder priority + Annex-B output should be identical to Intel.
+
+### Known issues / follow-ups (P5C-1)
+
+- **NVIDIA hosts**: `nvidia-vaapi-driver` is decode-only — `vainfo` may list NVENC profiles but `VAEntrypointEncSlice` will be absent and the probe correctly excludes the device. NVENC-Linux ships in P5C-3.
+
+- **WSL2**: VAAPI via `mesa-d3d12` works on recent WSL2 kernels but is functionally a Mesa software path for now (no actual GPU acceleration). Useful for dev smoke but expect SW-comparable CPU usage.
+
+- **`/dev/dri/renderD*` permission**: if the user isn't in `render`/`video`, the probe fails silently and OpenH264 SW is selected. Document for downstream operators.
+
+- **VBR mode**: only CBR is supported in P5C-1. CBR↔VBR switching via dynamic reconfigure is driver-fragile (spec §2); add a `--vaapi-rc-mode {cbr,vbr}` CLI knob in a follow-up.
+
+- **Wayland portal capture on GNOME 46 (mutter) — frame ingestion blocked, encoder path verified**
+  (real-device smoke 2026-05-13, N100 Intel Alder Lake-N iGPU, Ubuntu 24.04 Wayland session)
+
+  P5C-1 host side reaches `encoder ready backend="linux-vaapi-h264"` and
+  `vaCreateContext` succeeds on the iHD driver — the VAAPI encoder, P5A
+  policy ranking (`priority=90`), `LinuxSwFactory::create` Vaapi arm, and
+  `LinuxVaapiEncoder` Send/Sync bridge are all confirmed working
+  end-to-end up to encoder construction. However the pipewire screencast
+  stream rejects our `EnumFormat` POD on GNOME 46 mutter with:
+
+  ```
+  pipewire stream: error invalid message received 0 for 2: Invalid argument
+  state=Error: no more input formats
+  ```
+
+  Root cause is that the `EnumFormat` SPA POD produced by pipewire-rs
+  0.9.2's `Object` serializer does not exactly match what GNOME 46
+  mutter expects on the wire. Five iterations attempted on this branch
+  did not resolve it:
+  1. `f86ed1a` — omit `VideoModifier` from EnumFormat for CPU consumers
+  2. `e5515b5` — set `MANDATORY | DONT_FIXATE` on Choice props
+  3. expanding `VideoFormat` alternatives from 2 (BGRA/BGRx) to 8
+  4. `bf2f30a` — filter `param_changed` by `id` so non-Format params don't
+     mis-parse as Format
+  5. `29a7afc` — add `state_changed` listener for diagnosis visibility
+
+  Adjacent fixes that DID land on this branch and ARE keepers (carried
+  forward into P5C-1 because they're regressions in the existing path,
+  not new code):
+  - `df49812` — `portal_runtime_available_blocking` and the
+    `LinuxSwFactory::create` WaylandPortal arm both built a fresh tokio
+    runtime + `block_on` inside an outer tokio runtime (latent P5B-1
+    bug, never previously exercised from async context). Rewritten to
+    spawn a dedicated OS thread (`portal-probe` / portal capturer init)
+    that owns a current-thread runtime, results bridged via
+    `std::sync::mpsc::channel`. Includes regression test
+    `portal_probe_does_not_panic_when_called_from_async_context`.
+  - `c7c9487` — `WaylandPortalCapturer::geometry()` returns `(0, 0)`
+    until pipewire format negotiation completes, but
+    `LinuxVaapiEncoder::new(0, 0, …)` rejects that. `LinuxSwFactory`
+    now passes `cfg.width, cfg.height` from `ProducerConfig` to
+    `build_vaapi_video_producer_with`; the surface pool sizes off the
+    handshake-negotiated resolution. Error wrapping switched from
+    `{e}` to `{e:#}` so the anyhow context chain surfaces in logs.
+  - `65bec41` — `.github/workflows/release.yml` now installs
+    `libva-dev` / `libva-drm2` / `libva-x11-2` so the release build
+    can link cros-libva. Required for any downstream P5C-1 CI artifact.
+
+  Verified-working session log fragment (encoder reaches steady state
+  before the pipewire stream errors out):
+
+  ```
+  policy: backend selected backend=Vaapi priority=90
+  vaapi encoder initialized: driver=intel-iHD profile=ConstrainedBaseline
+  encoder ready backend="linux-vaapi-h264"
+  portal session: started has_token=true
+  pipewire stream: state Unconnected → Connecting → Paused → Error
+  ```
+
+  **Workaround for VAAPI HW encode verification today**: log out and
+  pick the "Ubuntu on Xorg" session from the gear menu on the GDM
+  login screen. The P5B-1 X11ShmCapturer path is unaffected and feeds
+  the VAAPI encoder normally. Expected CPU under XShm + VAAPI 1080p:
+  significantly below the OpenH264 SW baseline (≪25–40 %; Intel N100
+  iGPU typically lands < 10 %). Wayland users stay on the OpenH264 SW
+  path until the follow-up below ships.
+
+  **Follow-up (separate branch, not part of P5C-1)**: rewrite the
+  `EnumFormat` and `Buffers` POD construction in
+  `crates/media-linux/src/wayland_portal/format.rs` against `libspa-sys`
+  C helpers via `unsafe` FFI (the same `spa_pod_builder_*` /
+  `spa_format_video_raw_init` calls that `gnome-remote-desktop`,
+  `obs-pipewire-screencast`, and `xdg-desktop-portal-wlr` use). This is
+  the only known reference-implementation-compatible path; the
+  pipewire-rs 0.9.2 Rust `Object` builder is documented as
+  experimental for non-trivial pod trees. Filed as the P5B-2a-successor
+  spec, will land alongside `FrameInput::Dmabuf` integration in P5C-2.
+
+- **BGRA buffer clone**: each encode submission copies the BGRA scratch into the per-call command sent to the dedicated encoder thread. P5C-2 (DMABUF zero-copy) removes this copy together with the producer-side `bgra_to_i420` step.

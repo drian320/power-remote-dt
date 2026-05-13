@@ -172,7 +172,8 @@ fn backend_discriminant(b: BackendKind) -> u8 {
     match b {
         BackendKind::Nvenc => 0,
         BackendKind::MfHevc => 1,
-        BackendKind::Openh264 => 2,
+        BackendKind::Vaapi => 2,
+        BackendKind::Openh264 => 3,
     }
 }
 

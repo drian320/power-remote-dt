@@ -1,7 +1,7 @@
 # power-remote-dt — Project Status & Roadmap
 
-**Last updated:** 2026-05-12
-**Latest tag:** `phase-p5b2c-cursor-hide-polish-complete`
+**Last updated:** 2026-05-13
+**Latest tag:** `phase-p5c1-vaapi-h264-encoder-complete`
 **Branch state:** `phase0-sw-codec-wire` (post-tag) — **Phase 4 + Plan 4 B1 + B4 + B6 + B7 + B8 完了 + MF エンコーダ fallback 完了 + host session liveness 完了 + NVDEC arc-swap 化 完了 + ソフトウェアコーデック OpenH264 完了 (B3 のみ HW ブロック保留)**
 **Test count:** 348+ automated Rust tests + 11 Python tests; new crate `prdt-media-sw` 6 tests (Phase 1) + Phase 0 protocol/transport new tests + Phase 5 latency-bench new test (≥10 new tests per plan §8 acceptance)
 
@@ -435,6 +435,90 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
     needed first); HiDPI cursor scaling refinement.
   - **Smoke walkthrough**: `docs/superpowers/p5b1-smoke-walkthrough.md`
     §P5B-2c Section J (OS cursor hide verification).
+
+- **P5C-1 (`phase-p5c1-vaapi-h264-encoder-complete`, 2026-05-13)**:
+  Linux HW codec — VAAPI H.264 encoder (Intel iHD + AMD radeonsi via
+  Mesa libva). First subphase of P5C; NVENC-Linux / DMABUF zero-copy /
+  V4L2 M2M / VAAPI decode deferred to subsequent subphases.
+  - New `crates/media-vaapi/` workspace crate (cros-libva 0.0.13 RAII
+    bindings). Modules: display (render-node enumerate + capability
+    probe via `query_config_profiles` + `query_config_entrypoints`),
+    encoder (`VaapiH264Encoder` with manual SPS/PPS bit-builder),
+    frame_input (CpuI420 / VaSurface / Dmabuf enum seam for P5C-2),
+    annexb (3byte→4byte start-code normalize + SPS/PPS prepend on IDR),
+    error (`VaapiError` + `classify_va_status` mapping), rc
+    (`RateControlParams` CBR builder).
+  - `VaapiH264Encoder` API: `new(VaapiH264EncoderConfig)` /
+    `encode(&I420Frame, force_idr, ts_us) -> Result<EncodedFrame>` /
+    `set_target_bitrate(bps)` / `backend_name() = "vaapi-h264-cbr-baseline"`.
+    Profile: H264ConstrainedBaseline. RC: CBR only. Output: Annex-B
+    with manual SPS/PPS prepend. Upload: `vaCreateImage` + `vaPutImage`
+    (NV12) on every encode — matches cros-libva's own `enc_h264_demo`
+    reference.
+  - HardwareBusy retry: 0.5→1→2→4→8 ms via `std::thread::sleep`, max 5
+    attempts. After exhaustion surfaces `VaapiError::HardwareBusy` →
+    `ProducerError::DeviceLost{backend, reason}` → P5A SelectionPolicy
+    auto-falls-back to OpenH264.
+  - `BackendKind::Vaapi` added; Linux probe lists it at priority 90
+    when `/dev/dri/renderD*` + H264ConstrainedBaseline + EncSlice
+    detected. `LinuxSwFactory::create` gains a Vaapi arm wiring
+    `VaapiVideoProducer` (capture chain unchanged; encoder swap only).
+  - **Send/Sync bridge**: `VaapiH264Encoder` owns `Rc<libva::Display>`
+    (`!Send`), so `VaapiVideoProducer` holds a `LinuxVaapiEncoder`
+    handle which is a `Send`-able channel pair to a dedicated OS
+    thread (`std::thread::Builder::new().name("vaapi-encoder")`) that
+    owns the encoder for its lifetime. `mpsc::sync_channel(1)` for
+    backpressure, init synchronized via separate `sync_channel(0)` so
+    encoder open-failures surface synchronously on the calling thread.
+  - Drop order policy (load-bearing per spec §3.4): manual `impl Drop`
+    on `VaapiH264Encoder` with `Option::take()` ensures images → coded
+    buffers → surfaces → context → config → display teardown sequence
+    regardless of cros-libva `Rc` cycles.
+  - **Tests**: 4 error + 5 annexb + 2 frame_input/rc + 3 display + 5
+    encoder (3 plan-listed + 2 SPS/PPS builder smoke from T7) + 5
+    media-linux vaapi_pipeline (4 classify-error variants + IDR
+    re-arm) + 1 policy (rejects-when-no-device) = **25 new unit
+    tests**. Container clippy clean across the full P5C-1 affected
+    slice (`prdt-media-vaapi` + `prdt-media-policy` + `prdt-media-linux`).
+    Workspace `cargo check` clean. Real-device VAAPI runtime
+    verification = walkthrough §K (vainfo + host run + pidstat CPU
+    check + bitrate update + DRI permission failure fallback).
+  - **Build env**: `scripts/Dockerfile.dev` gains `libva-dev` /
+    `libva-drm2` / `libva-x11-2` (Debian bookworm). Container can
+    compile `prdt-client` with the VAAPI backend, but the encode loop
+    requires `/dev/dri/*` which the container intentionally lacks.
+    Smoke walkthrough = user host.
+  - **Known follow-up (P5C-2)**: BGRA buffer is cloned once per encode
+    submission for the producer-encoder handoff. The zero-copy DMABUF
+    path lands together with the `FrameInput::Dmabuf` arm in P5C-2 and
+    removes the clone.
+  - **Out of scope (deferred)**: DMABUF zero-copy (P5C-2), NVENC-Linux
+    (P5C-3), V4L2 M2M (P5C-4), VAAPI decode (separate subphase),
+    AMD-specific tuning, AVCC output, multi-slice encoding, packed-header
+    FFI path (manual SPS/PPS prepend is sufficient for P5C-1), VBR mode.
+  - **Smoke walkthrough**: `docs/superpowers/p5b1-smoke-walkthrough.md`
+    §P5C-1 Section K (real-device VAAPI verification).
+  - **Real-device smoke (2026-05-13, N100 Intel Alder Lake-N iGPU,
+    Ubuntu 24.04)**: VAAPI encoder construction + P5A policy wiring
+    verified end-to-end — host reaches
+    `encoder ready backend="linux-vaapi-h264"` on iHD driver, policy
+    selects Vaapi at priority 90, factory builds `LinuxVaapiEncoder`
+    successfully, Send/Sync bridge to the `vaapi-encoder` thread fires.
+    Frame ingestion verification on Wayland (GNOME 46 mutter) is
+    **blocked by a libspa POD wire-format mismatch in the screencast
+    portal path** (pipewire-rs 0.9.2 `Object` serializer vs mutter
+    expectations) and tracked as the P5B-2a-successor follow-up; see
+    walkthrough §K "Known issues / follow-ups" for the diagnosis,
+    5 failed iterations, and 3 keeper fixes that landed on this branch
+    (`df49812`, `c7c9487`, `65bec41`). Workaround for HW-encode CPU
+    verification today: log into a GNOME-on-Xorg session — the
+    X11ShmCapturer path feeds VAAPI normally and is unaffected.
+  - **P5B-2a-successor (next branch, not P5C-1)**: rewrite
+    `wayland_portal/format.rs` POD construction via `libspa-sys` FFI
+    helpers (`spa_pod_builder_*` / `spa_format_video_raw_init`) to
+    match `gnome-remote-desktop` / `obs-pipewire-screencast` /
+    `xdg-desktop-portal-wlr` reference implementations. Lands
+    alongside `FrameInput::Dmabuf` in P5C-2.
 
 ### **C. 計測 / 観測 系(blocker 解消用)**
 

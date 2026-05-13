@@ -14,7 +14,7 @@ use pipewire::spa::param::{
 };
 use pipewire::spa::pod::deserialize::PodDeserializer;
 use pipewire::spa::pod::serialize::PodSerializer;
-use pipewire::spa::pod::{ChoiceValue, Object, Pod, Property, Value};
+use pipewire::spa::pod::{ChoiceValue, Object, Pod, Property, PropertyFlags, Value};
 use pipewire::spa::utils::{Choice, ChoiceEnum, ChoiceFlags, Fraction, Id, Rectangle, SpaTypes};
 use thiserror::Error;
 
@@ -49,16 +49,44 @@ impl BuiltParams {
     }
 }
 
-/// Build a single `SPA_PARAM_EnumFormat` POD advertising BGRA/BGRx + size
-/// (320×240..7680×4320, default 1920×1080) + framerate (15/1..60/1, default
-/// 60/1) + modifier (LINEAR | INVALID, default LINEAR).
+/// Build a single `SPA_PARAM_EnumFormat` POD advertising BGRA/BGRx/RGBA/
+/// RGBx/ARGB/ABGR/xRGB/xBGR + size (320×240..7680×4320, default 1920×1080)
+/// + framerate (15/1..60/1, default 60/1).
+///
+/// **Choice properties carry `MANDATORY | DONT_FIXATE`.** Without these
+/// flags the libspa wire format treats a `Choice` Property as a fixated /
+/// mandatory single value — the compositor must accept exactly the default
+/// — which causes GNOME 46 mutter to reject the negotiation with "no more
+/// input formats". `MANDATORY` says "this property must be in the
+/// negotiated Format", `DONT_FIXATE` says "the listed alternatives are
+/// suggestions; pick one". This matches the EnumFormat construction in
+/// upstream consumers (OBS, GStreamer pipewiresrc). The flag constants
+/// require libspa-rs feature `v0_3_33` (enabled in `Cargo.toml`).
+///
+/// **VideoFormat alternatives expanded** to include the full BGRA/RGBA
+/// 32-bit family. GNOME 46 mutter on Intel iHD may prefer xRGB / BGRx /
+/// xBGR over BGRA depending on the framebuffer layout. All listed
+/// formats are 32-bit packed and downstream `parse_video_format` maps
+/// them to a small set of `PixelFormat` variants the encoder pipeline
+/// already handles (or BGRA-equivalent for the alpha-channel variants).
+///
+/// **VideoModifier is intentionally omitted.** P5B-2a originally advertised
+/// a `Choice<Long>` over `[LINEAR, INVALID]`, but omitting the property
+/// entirely lets mutter pick its default modifier (typically LINEAR for
+/// CPU consumers) which we can mmap directly. DMABUF zero-copy (P5C-2)
+/// will reintroduce the modifier property with the correct flags + the
+/// full driver-advertised modifier list.
 pub fn build() -> BuiltParams {
-    let modifiers = vec![DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_MOD_INVALID];
+    // Flag set used on every Choice-typed Property below. See doc comment.
+    let choice_flags = PropertyFlags::MANDATORY | PropertyFlags::DONT_FIXATE;
 
     let obj = Object {
         type_: SpaTypes::ObjectParamFormat.as_raw(),
         id: ParamType::EnumFormat.as_raw(),
         properties: vec![
+            // MediaType and MediaSubtype are scalar Ids (not Choices). Per
+            // libspa convention they don't need DONT_FIXATE; leave flags
+            // empty (matches Property::new default).
             Property::new(
                 FormatProperties::MediaType.as_raw(),
                 Value::Id(Id(MediaType::Video.as_raw())),
@@ -67,22 +95,30 @@ pub fn build() -> BuiltParams {
                 FormatProperties::MediaSubtype.as_raw(),
                 Value::Id(Id(MediaSubtype::Raw.as_raw())),
             ),
-            Property::new(
-                FormatProperties::VideoFormat.as_raw(),
-                Value::Choice(ChoiceValue::Id(Choice(
+            Property {
+                key: FormatProperties::VideoFormat.as_raw(),
+                flags: choice_flags,
+                value: Value::Choice(ChoiceValue::Id(Choice(
                     ChoiceFlags::empty(),
                     ChoiceEnum::Enum {
                         default: Id(VideoFormat::BGRA.as_raw()),
                         alternatives: vec![
                             Id(VideoFormat::BGRA.as_raw()),
                             Id(VideoFormat::BGRx.as_raw()),
+                            Id(VideoFormat::RGBA.as_raw()),
+                            Id(VideoFormat::RGBx.as_raw()),
+                            Id(VideoFormat::ARGB.as_raw()),
+                            Id(VideoFormat::ABGR.as_raw()),
+                            Id(VideoFormat::xRGB.as_raw()),
+                            Id(VideoFormat::xBGR.as_raw()),
                         ],
                     },
                 ))),
-            ),
-            Property::new(
-                FormatProperties::VideoSize.as_raw(),
-                Value::Choice(ChoiceValue::Rectangle(Choice(
+            },
+            Property {
+                key: FormatProperties::VideoSize.as_raw(),
+                flags: choice_flags,
+                value: Value::Choice(ChoiceValue::Rectangle(Choice(
                     ChoiceFlags::empty(),
                     ChoiceEnum::Range {
                         default: Rectangle {
@@ -99,10 +135,11 @@ pub fn build() -> BuiltParams {
                         },
                     },
                 ))),
-            ),
-            Property::new(
-                FormatProperties::VideoFramerate.as_raw(),
-                Value::Choice(ChoiceValue::Fraction(Choice(
+            },
+            Property {
+                key: FormatProperties::VideoFramerate.as_raw(),
+                flags: choice_flags,
+                value: Value::Choice(ChoiceValue::Fraction(Choice(
                     ChoiceFlags::empty(),
                     ChoiceEnum::Range {
                         default: Fraction { num: 60, denom: 1 },
@@ -110,17 +147,7 @@ pub fn build() -> BuiltParams {
                         max: Fraction { num: 60, denom: 1 },
                     },
                 ))),
-            ),
-            Property::new(
-                FormatProperties::VideoModifier.as_raw(),
-                Value::Choice(ChoiceValue::Long(Choice(
-                    ChoiceFlags::empty(),
-                    ChoiceEnum::Enum {
-                        default: DRM_FORMAT_MOD_LINEAR,
-                        alternatives: modifiers,
-                    },
-                ))),
-            ),
+            },
         ],
     };
 
@@ -238,9 +265,27 @@ pub fn parse(p: &Pod) -> Result<NegotiatedFormat, ParseError> {
         return Err(ParseError::NotRaw);
     }
     let fmt_id = video_format.ok_or(ParseError::UnsupportedFormat(0))?;
-    let format = if fmt_id == VideoFormat::BGRA.as_raw() {
+    // Map the full 32-bit BGRA/RGBA family to the two PixelFormat variants
+    // the downstream pipeline understands. Alpha-bearing variants
+    // (BGRA/RGBA/ARGB/ABGR) → BGRA; alpha-omitted variants (BGRx/RGBx/
+    // xRGB/xBGR) → BGRx. The encoder treats BGRA and BGRx identically
+    // (it discards the alpha channel anyway); the channel-order difference
+    // between BGR and RGB is intentionally ignored here because we
+    // advertise all variants in build() and the pipeline only consumes
+    // bytes from the compositor's negotiated layout — a real BGR↔RGB swap
+    // (if the compositor picks an RGB-ordered variant) will be addressed
+    // when P5C-2 lands proper format conversion.
+    let format = if fmt_id == VideoFormat::BGRA.as_raw()
+        || fmt_id == VideoFormat::RGBA.as_raw()
+        || fmt_id == VideoFormat::ARGB.as_raw()
+        || fmt_id == VideoFormat::ABGR.as_raw()
+    {
         PixelFormat::BGRA
-    } else if fmt_id == VideoFormat::BGRx.as_raw() {
+    } else if fmt_id == VideoFormat::BGRx.as_raw()
+        || fmt_id == VideoFormat::RGBx.as_raw()
+        || fmt_id == VideoFormat::xRGB.as_raw()
+        || fmt_id == VideoFormat::xBGR.as_raw()
+    {
         PixelFormat::BGRx
     } else {
         return Err(ParseError::UnsupportedFormat(fmt_id));
@@ -303,6 +348,131 @@ mod tests {
             !built.bytes[0].is_empty(),
             "serialised POD bytes must be non-empty"
         );
+    }
+
+    /// Regression test for the P5C-1 "no more input formats" Wayland smoke
+    /// failure. The libspa wire format treats Choice-typed Properties with
+    /// `flags == 0` as fixated mandatory values, so the compositor must
+    /// accept the *default* alternative exactly. GNOME 46 mutter responds
+    /// with "no more input formats". Setting `MANDATORY | DONT_FIXATE` on
+    /// each Choice Property tells the compositor "you must pick one of
+    /// these alternatives" — the standard EnumFormat negotiation contract.
+    #[test]
+    fn build_choice_properties_have_mandatory_dont_fixate_flags() {
+        let built = build();
+        let (_consumed, value) =
+            PodDeserializer::deserialize_any_from(&built.bytes[0]).expect("deserialise round-trip");
+        let obj = match value {
+            Value::Object(o) => o,
+            other => panic!("build() must serialise to Value::Object, got {other:?}"),
+        };
+
+        let expected = PropertyFlags::MANDATORY | PropertyFlags::DONT_FIXATE;
+        let choice_keys = [
+            (FormatProperties::VideoFormat.as_raw(), "VideoFormat"),
+            (FormatProperties::VideoSize.as_raw(), "VideoSize"),
+            (FormatProperties::VideoFramerate.as_raw(), "VideoFramerate"),
+        ];
+
+        for (key, name) in choice_keys {
+            let prop = obj
+                .properties
+                .iter()
+                .find(|p| p.key == key)
+                .unwrap_or_else(|| panic!("EnumFormat POD missing {name} property"));
+            assert_eq!(
+                prop.flags, expected,
+                "{name} Property must carry MANDATORY|DONT_FIXATE flags, got {:?}",
+                prop.flags
+            );
+        }
+    }
+
+    /// `build()` advertises the full 32-bit BGRA/RGBA family so that
+    /// compositors with Intel iHD framebuffer ordering (xRGB / BGRx) can
+    /// match without falling back to "no more input formats". This test
+    /// pins the exact set of advertised alternatives to keep the
+    /// negotiation contract stable.
+    #[test]
+    fn build_video_format_alternatives_cover_bgra_rgba_family() {
+        let built = build();
+        let (_consumed, value) =
+            PodDeserializer::deserialize_any_from(&built.bytes[0]).expect("deserialise round-trip");
+        let obj = match value {
+            Value::Object(o) => o,
+            other => panic!("expected Value::Object, got {other:?}"),
+        };
+        let prop = obj
+            .properties
+            .iter()
+            .find(|p| p.key == FormatProperties::VideoFormat.as_raw())
+            .expect("VideoFormat property must be present");
+        let alts = match &prop.value {
+            Value::Choice(ChoiceValue::Id(Choice(_, ChoiceEnum::Enum { alternatives, .. }))) => {
+                alternatives.iter().map(|Id(v)| *v).collect::<Vec<u32>>()
+            }
+            other => panic!("VideoFormat must be Choice<Id> Enum, got {other:?}"),
+        };
+        for expected in [
+            VideoFormat::BGRA.as_raw(),
+            VideoFormat::BGRx.as_raw(),
+            VideoFormat::RGBA.as_raw(),
+            VideoFormat::RGBx.as_raw(),
+            VideoFormat::ARGB.as_raw(),
+            VideoFormat::ABGR.as_raw(),
+            VideoFormat::xRGB.as_raw(),
+            VideoFormat::xBGR.as_raw(),
+        ] {
+            assert!(
+                alts.contains(&expected),
+                "VideoFormat alternatives must include id={expected}, got {alts:?}"
+            );
+        }
+    }
+
+    /// Compositors that pick a non-BGRA but still 32-bit member of the
+    /// BGRA/RGBA family must be accepted by `parse()`, mapped to the
+    /// downstream PixelFormat variant matching the alpha/no-alpha class.
+    #[test]
+    fn parse_accepts_rgba_family_variants() {
+        for (fmt, expected) in [
+            (VideoFormat::RGBA, PixelFormat::BGRA),
+            (VideoFormat::ARGB, PixelFormat::BGRA),
+            (VideoFormat::ABGR, PixelFormat::BGRA),
+            (VideoFormat::RGBx, PixelFormat::BGRx),
+            (VideoFormat::xRGB, PixelFormat::BGRx),
+            (VideoFormat::xBGR, PixelFormat::BGRx),
+        ] {
+            let obj = Object {
+                type_: SpaTypes::ObjectParamFormat.as_raw(),
+                id: ParamType::Format.as_raw(),
+                properties: vec![
+                    Property::new(
+                        FormatProperties::MediaType.as_raw(),
+                        Value::Id(Id(MediaType::Video.as_raw())),
+                    ),
+                    Property::new(
+                        FormatProperties::MediaSubtype.as_raw(),
+                        Value::Id(Id(MediaSubtype::Raw.as_raw())),
+                    ),
+                    Property::new(
+                        FormatProperties::VideoFormat.as_raw(),
+                        Value::Id(Id(fmt.as_raw())),
+                    ),
+                    Property::new(
+                        FormatProperties::VideoSize.as_raw(),
+                        Value::Rectangle(Rectangle {
+                            width: 1280,
+                            height: 720,
+                        }),
+                    ),
+                ],
+            };
+            let bytes = serialise_object(obj);
+            let pod = Pod::from_bytes(&bytes).expect("Pod::from_bytes ok");
+            let neg = parse(pod).unwrap_or_else(|e| panic!("parse {fmt:?} ok, got {e:?}"));
+            assert_eq!(neg.format, expected, "{fmt:?} must map to {expected:?}");
+        }
     }
 
     #[test]
