@@ -1,6 +1,7 @@
 //! VAAPI display open + capability probe.
 
 use crate::error::VaapiError;
+use cros_libva as libva;
 use std::path::{Path, PathBuf};
 
 /// Scan `/dev/dri/renderD*` and return all candidate render nodes in
@@ -50,23 +51,30 @@ pub fn probe_first_capable_node() -> Result<PathBuf, VaapiError> {
     ))
 }
 
+/// Real cros-libva probe: open a Display on `node`, query profiles for
+/// VAProfileH264ConstrainedBaseline, then query entrypoints for
+/// VAEntrypointEncSlice. Any open/query error is treated as
+/// "not capable" (Ok(false)) so the caller can move on to the next
+/// render node rather than aborting the whole probe.
 fn node_supports_h264_baseline_encode(node: &Path) -> Result<bool, VaapiError> {
-    // TODO(T5 implementer): use cros-libva's Display + query_config_profiles +
-    // query_config_entrypoints to confirm the node supports
-    // VAProfileH264ConstrainedBaseline + VAEntrypointEncSlice.
-    //
-    // The exact cros-libva API to invoke depends on what Step 1 probe
-    // reveals; pseudocode:
-    //
-    //   let display = libva::Display::open(Some(node))?;
-    //   let profiles = display.query_config_profiles()?;
-    //   if !profiles.contains(&VAProfileH264ConstrainedBaseline) {
-    //       return Ok(false);
-    //   }
-    //   let entrypoints = display.query_config_entrypoints(VAProfile...)?;
-    //   Ok(entrypoints.contains(&VAEntrypointEncSlice))
-    let _ = node;
-    Ok(false) // P5C-1: be conservative; T7 wires the real probe.
+    let display = match libva::Display::open_drm_display(node) {
+        Ok(d) => d,
+        Err(_) => return Ok(false),
+    };
+    let profiles = match display.query_config_profiles() {
+        Ok(p) => p,
+        Err(_) => return Ok(false),
+    };
+    if !profiles.contains(&libva::VAProfile::VAProfileH264ConstrainedBaseline) {
+        return Ok(false);
+    }
+    let entrypoints = match display
+        .query_config_entrypoints(libva::VAProfile::VAProfileH264ConstrainedBaseline)
+    {
+        Ok(e) => e,
+        Err(_) => return Ok(false),
+    };
+    Ok(entrypoints.contains(&libva::VAEntrypoint::VAEntrypointEncSlice))
 }
 
 #[cfg(test)]
