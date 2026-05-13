@@ -1,15 +1,13 @@
 //! Golden-file regression test for `wayland_portal::format::build()`.
 //!
-//! The fixture `tests/fixtures/enum_format_golden.bin` is captured
-//! immediately after the N100 GNOME 46 Wayland smoke confirms
-//! `pipewire stream: state Streaming` and BGRA frames flowing through
-//! to the P5C-1 VAAPI encoder. Until that fixture exists in the repo
-//! this test is marked `#[ignore]` (T7 commit only ships the test
-//! scaffold; fixture capture + un-ignore land together in T9 after
-//! T8 reports success).
+//! The fixture `tests/fixtures/enum_format_golden.bin` was captured after the
+//! N100 GNOME 46 Wayland smoke confirmed `pipewire stream: state Streaming`
+//! and BGRA frames flowing through to the P5C-1 VAAPI encoder (2026-05-13).
+//! The fixture is committed in T9 and this test runs unconditionally.
 //!
-//! To run after the fixture lands:
-//!   cargo test -p prdt-media-linux --test format_golden -- --ignored
+//! To refresh the fixture after a verified end-to-end smoke:
+//!   cargo run -p prdt-media-linux --example dump_enum_format -- \
+//!       crates/media-linux/tests/fixtures/enum_format_golden.bin
 
 #![cfg(target_os = "linux")]
 
@@ -17,18 +15,14 @@ const FIXTURE_PATH: &str = "tests/fixtures/enum_format_golden.bin";
 
 /// Byte-for-byte regression test for `wayland_portal::format::build()`.
 ///
-/// The fixture `tests/fixtures/enum_format_golden.bin` is captured
-/// immediately after the N100 GNOME 46 Wayland smoke confirms
-/// `pipewire stream: state Streaming` and BGRA frames flowing through
-/// to the P5C-1 VAAPI encoder. Until that fixture exists in the repo
-/// this test is marked `#[ignore]` (T7 commit only ships the test
-/// scaffold; fixture capture + un-ignore land together in T9 after
-/// T8 reports success).
+/// The fixture `tests/fixtures/enum_format_golden.bin` was captured after the
+/// N100 GNOME 46 Wayland smoke confirmed `pipewire stream: state Streaming`
+/// and BGRA frames flowing through to the P5C-1 VAAPI encoder (2026-05-13).
 ///
-/// To run after the fixture lands:
-///   cargo test -p prdt-media-linux --test format_golden -- --ignored
+/// To refresh the fixture after a verified end-to-end smoke:
+///   cargo run -p prdt-media-linux --example dump_enum_format -- \
+///       crates/media-linux/tests/fixtures/enum_format_golden.bin
 #[test]
-#[ignore = "fixture is captured in T9 after the T8 N100 smoke; un-ignore then"]
 fn enum_format_matches_golden_fixture() {
     let actual = prdt_media_linux::wayland_portal::format::build().bytes[0].clone();
     let fixture = std::fs::read(FIXTURE_PATH)
