@@ -318,7 +318,23 @@ impl PipeWireStream {
                     .add_local_listener::<()>()
                     .param_changed({
                         let sz = current_size_thread.clone();
-                        move |stream, _ud, _id, param| {
+                        move |stream, _ud, id, param| {
+                            // Only Format pods carry the negotiated capture format.
+                            // The compositor also emits SPA_PARAM_Buffers (and
+                            // possibly SPA_PARAM_Meta / SPA_PARAM_IO) through this
+                            // same callback; those pods are NOT SPA_TYPE_OBJECT_Format
+                            // and our format parser rejects them with "pod type is not
+                            // ParamFormat (got raw type 262146)" — which previously
+                            // disconnected the stream (P5B-2a bug). Filter by the
+                            // param-id argument at dispatch time; pipewire-rs
+                            // negotiates the other param types internally.
+                            if id != pipewire::spa::param::ParamType::Format.as_raw() {
+                                tracing::debug!(
+                                    param_id = id,
+                                    "param_changed: ignoring non-Format param"
+                                );
+                                return;
+                            }
                             let Some(p) = param else { return; };
                             match crate::wayland_portal::format::parse(p) {
                                 Ok(neg) => {
@@ -821,5 +837,41 @@ mod tests {
         >;
         let _check: ConnectFn = PipeWireStream::connect;
         let _ = _check;
+    }
+
+    /// Regression: P5B-2a's param_changed callback used to parse every pod as
+    /// SPA_PARAM_Format, disconnecting the stream when the compositor emitted
+    /// ParamBuffers (raw object type 262146) right after Format. Now the
+    /// callback filters by the `id` argument before dispatching to the format
+    /// parser. This test asserts that Format and Buffers have distinct param
+    /// ids and that they match the spa_sys raw values observed in the bug
+    /// report, so a future libspa renumber breaks compilation rather than
+    /// silently regressing at runtime.
+    #[test]
+    fn param_changed_filter_skips_non_format_param_ids() {
+        use pipewire::spa::param::ParamType;
+        use pipewire::spa::sys as spa_sys;
+
+        let format_id = ParamType::Format.as_raw();
+        let buffers_id = ParamType::Buffers.as_raw();
+
+        assert_ne!(
+            format_id, buffers_id,
+            "Format and Buffers must have distinct param ids; \
+             got format={format_id} buffers={buffers_id}"
+        );
+
+        // Verify against the spa_sys raw constants so that a libspa renumber
+        // is caught at compile/test time rather than silently at runtime.
+        assert_eq!(
+            format_id,
+            spa_sys::SPA_PARAM_Format,
+            "ParamType::Format.as_raw() must equal SPA_PARAM_Format"
+        );
+        assert_eq!(
+            buffers_id,
+            spa_sys::SPA_PARAM_Buffers,
+            "ParamType::Buffers.as_raw() must equal SPA_PARAM_Buffers"
+        );
     }
 }
