@@ -10,6 +10,7 @@ pub mod capturer;
 pub mod cursor;
 pub mod dmabuf;
 pub mod format;
+pub mod pod_builder;
 pub mod session;
 pub mod stream;
 pub mod token;

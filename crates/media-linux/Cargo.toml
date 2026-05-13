@@ -41,6 +41,11 @@ dirs = { workspace = true }
 # on Debian bookworm (0.3.65) and Ubuntu 24.04+ (1.0+) supports this far
 # below the v0_3_33 floor.
 pipewire = { version = "0.9", features = ["v0_3_33"] }
+# Raw libspa FFI for outbound POD construction (EnumFormat). Currently
+# pulled transitively by pipewire 0.9; promoted to a direct dep so the
+# Cargo.toml documents the dependency clearly and so a future pipewire
+# bump cannot silently drop the symbols pod_builder.rs depends on.
+libspa-sys = "0.9"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "time", "rt", "macros"] }
