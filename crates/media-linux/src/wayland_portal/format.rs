@@ -92,11 +92,14 @@ pub fn build() -> BuiltParams {
         o.add_id_property(spa_sys::SPA_FORMAT_mediaType, spa_sys::SPA_MEDIA_TYPE_video);
         o.add_id_property(spa_sys::SPA_FORMAT_mediaSubtype, spa_sys::SPA_MEDIA_SUBTYPE_raw);
 
-        // VideoFormat: Choice<Id> Enum over the full 32-bit BGRA/RGBA
-        // family so compositors with iHD-style framebuffer ordering can
-        // match without falling back to "no more input formats".
+        let f_choice = spa_sys::SPA_POD_PROP_FLAG_MANDATORY
+            | spa_sys::SPA_POD_PROP_FLAG_DONT_FIXATE;
+        let f_negotiable = 0u32; // size/framerate: producer picks freely
+
+        // VideoFormat: producer picks one of the alternatives (DONT_FIXATE).
         o.add_choice_id_enum(
             spa_sys::SPA_FORMAT_VIDEO_format,
+            f_choice,
             spa_sys::SPA_VIDEO_FORMAT_BGRA,
             &[
                 spa_sys::SPA_VIDEO_FORMAT_BGRA,
@@ -110,23 +113,28 @@ pub fn build() -> BuiltParams {
             ],
         );
 
-        // VideoSize: Choice<Rectangle> Range, default 1920x1080.
+        // VideoSize: producer picks freely (flag=0 matches OBS pattern;
+        // DONT_FIXATE on size confuses mutter which has a fixed display
+        // size — observed in N100 smoke 2026-05-13 as "no more input
+        // formats").
         o.add_choice_rectangle_range(
             spa_sys::SPA_FORMAT_VIDEO_size,
+            f_negotiable,
             (1920, 1080),
             (320, 240),
             (7680, 4320),
         );
 
-        // VideoFramerate: Choice<Fraction> Range, default 60/1.
+        // VideoFramerate: producer picks freely (same reasoning as size).
         o.add_choice_fraction_range(
             spa_sys::SPA_FORMAT_VIDEO_framerate,
+            f_negotiable,
             (60, 1),
             (15, 1),
             (60, 1),
         );
 
-        // VideoModifier: Choice<Long> Enum over [LINEAR, INVALID].
+        // VideoModifier: producer picks one of [LINEAR, INVALID] (DONT_FIXATE).
         // Required for GNOME 46 mutter on Intel iHD which holds frames
         // as GPU-side DMABUF — without this property mutter rejects with
         // "no more input formats" (smoke 2026-05-13). LINEAR (=0) is the
@@ -134,6 +142,7 @@ pub fn build() -> BuiltParams {
         // modifier-agnostic fallback per OBS / gnome-remote-desktop.
         o.add_choice_long_enum(
             spa_sys::SPA_FORMAT_VIDEO_modifier,
+            f_choice,
             0i64,                   // DRM_FORMAT_MOD_LINEAR
             &[0i64, -1i64],         // LINEAR + INVALID
         );
@@ -336,15 +345,17 @@ mod tests {
         );
     }
 
-    /// Regression test for the P5C-1 "no more input formats" Wayland smoke
-    /// failure. The libspa wire format treats Choice-typed Properties with
-    /// `flags == 0` as fixated mandatory values, so the compositor must
-    /// accept the *default* alternative exactly. GNOME 46 mutter responds
-    /// with "no more input formats". Setting `MANDATORY | DONT_FIXATE` on
-    /// each Choice Property tells the compositor "you must pick one of
-    /// these alternatives" — the standard EnumFormat negotiation contract.
+    /// Verifies the OBS-pattern per-property flag convention:
+    /// - VideoFormat + VideoModifier: MANDATORY | DONT_FIXATE
+    /// - VideoSize + VideoFramerate: 0 (producer picks freely)
+    ///
+    /// GNOME 46 mutter on N100 still rejected EnumFormat with "no more
+    /// input formats" after the VideoModifier addition. Comparing to OBS
+    /// obs-pipewire-screencast, DONT_FIXATE on size/framerate caused mutter
+    /// to interpret them as "consumer wants negotiation" but its display
+    /// size + rate are fixed, hence no match.
     #[test]
-    fn build_choice_properties_have_mandatory_dont_fixate_flags() {
+    fn build_choice_properties_have_obs_flag_pattern() {
         let built = build();
         let (_consumed, value) =
             PodDeserializer::deserialize_any_from(&built.bytes[0]).expect("deserialise round-trip");
@@ -353,24 +364,41 @@ mod tests {
             other => panic!("build() must serialise to Value::Object, got {other:?}"),
         };
 
-        let expected = PropertyFlags::MANDATORY | PropertyFlags::DONT_FIXATE;
-        let choice_keys = [
-            (FormatProperties::VideoFormat.as_raw(), "VideoFormat"),
-            (FormatProperties::VideoSize.as_raw(), "VideoSize"),
-            (FormatProperties::VideoFramerate.as_raw(), "VideoFramerate"),
-            (FormatProperties::VideoModifier.as_raw(), "VideoModifier"),
+        let expected_per_key: &[(u32, u32, &str)] = &[
+            // (key, expected_flags, name)
+            (
+                FormatProperties::VideoFormat.as_raw(),
+                (PropertyFlags::MANDATORY | PropertyFlags::DONT_FIXATE).bits(),
+                "VideoFormat",
+            ),
+            (
+                FormatProperties::VideoSize.as_raw(),
+                0, // OBS pattern: flag=0
+                "VideoSize",
+            ),
+            (
+                FormatProperties::VideoFramerate.as_raw(),
+                0, // OBS pattern: flag=0
+                "VideoFramerate",
+            ),
+            (
+                FormatProperties::VideoModifier.as_raw(),
+                (PropertyFlags::MANDATORY | PropertyFlags::DONT_FIXATE).bits(),
+                "VideoModifier",
+            ),
         ];
 
-        for (key, name) in choice_keys {
+        for &(key, expected, name) in expected_per_key {
             let prop = obj
                 .properties
                 .iter()
                 .find(|p| p.key == key)
                 .unwrap_or_else(|| panic!("EnumFormat POD missing {name} property"));
             assert_eq!(
-                prop.flags, expected,
-                "{name} Property must carry MANDATORY|DONT_FIXATE flags, got {:?}",
-                prop.flags
+                prop.flags.bits(),
+                expected,
+                "{name} Property flags expected {expected:#b}, got {:#b}",
+                prop.flags.bits()
             );
         }
     }

@@ -275,17 +275,16 @@ impl<'a> ObjectScope<'a> {
         self.builder.add_id_primitive(id);
     }
 
-    /// Append a `Choice<Id>` property (Enum form) carrying the
-    /// `MANDATORY | DONT_FIXATE` flag pair. This is the contract
-    /// libspa expects for "pick one of these alternatives".
+    /// Append a `Choice<Id>` property (Enum form). The caller supplies
+    /// `flags` explicitly (e.g. `MANDATORY | DONT_FIXATE` for VideoFormat/
+    /// VideoModifier, or `0` for size/framerate using the OBS pattern).
     pub fn add_choice_id_enum(
         &mut self,
         key: u32,
+        flags: u32,
         default: u32,
         alternatives: &[u32],
     ) {
-        let flags = spa_sys::SPA_POD_PROP_FLAG_MANDATORY
-            | spa_sys::SPA_POD_PROP_FLAG_DONT_FIXATE;
         // SAFETY: same as add_id_property; builder is inside an object frame.
         unsafe {
             spa_sys::spa_pod_builder_prop(&mut self.builder.raw, key, flags);
@@ -317,17 +316,16 @@ impl<'a> ObjectScope<'a> {
         }
     }
 
-    /// Append a `Choice<Rectangle>` property (Range form) carrying the
-    /// `MANDATORY | DONT_FIXATE` flag pair.
+    /// Append a `Choice<Rectangle>` property (Range form). The caller
+    /// supplies `flags` explicitly (e.g. `MANDATORY | DONT_FIXATE` or `0`).
     pub fn add_choice_rectangle_range(
         &mut self,
         key: u32,
+        flags: u32,
         default: (u32, u32),
         min: (u32, u32),
         max: (u32, u32),
     ) {
-        let flags = spa_sys::SPA_POD_PROP_FLAG_MANDATORY
-            | spa_sys::SPA_POD_PROP_FLAG_DONT_FIXATE;
         // SAFETY: same as add_id_property; builder is inside an object frame.
         unsafe {
             spa_sys::spa_pod_builder_prop(&mut self.builder.raw, key, flags);
@@ -355,17 +353,16 @@ impl<'a> ObjectScope<'a> {
         }
     }
 
-    /// Append a `Choice<Long>` property (Enum form) carrying the
-    /// `MANDATORY | DONT_FIXATE` flag pair. Used for `VideoModifier`
-    /// where the value type is signed i64 (DRM modifiers).
+    /// Append a `Choice<Long>` property (Enum form). The caller supplies
+    /// `flags` explicitly. Used for `VideoModifier` where the value type
+    /// is signed i64 (DRM modifiers).
     pub fn add_choice_long_enum(
         &mut self,
         key: u32,
+        flags: u32,
         default: i64,
         alternatives: &[i64],
     ) {
-        let flags = spa_sys::SPA_POD_PROP_FLAG_MANDATORY
-            | spa_sys::SPA_POD_PROP_FLAG_DONT_FIXATE;
         // SAFETY: same as add_id_property; builder is inside an object frame.
         unsafe {
             spa_sys::spa_pod_builder_prop(&mut self.builder.raw, key, flags);
@@ -395,17 +392,16 @@ impl<'a> ObjectScope<'a> {
         }
     }
 
-    /// Append a `Choice<Fraction>` property (Range form) carrying the
-    /// `MANDATORY | DONT_FIXATE` flag pair.
+    /// Append a `Choice<Fraction>` property (Range form). The caller
+    /// supplies `flags` explicitly (e.g. `MANDATORY | DONT_FIXATE` or `0`).
     pub fn add_choice_fraction_range(
         &mut self,
         key: u32,
+        flags: u32,
         default: (i32, i32),
         min: (i32, i32),
         max: (i32, i32),
     ) {
-        let flags = spa_sys::SPA_POD_PROP_FLAG_MANDATORY
-            | spa_sys::SPA_POD_PROP_FLAG_DONT_FIXATE;
         // SAFETY: same as add_id_property; builder is inside an object frame.
         unsafe {
             spa_sys::spa_pod_builder_prop(&mut self.builder.raw, key, flags);
@@ -655,6 +651,7 @@ mod tests {
             );
             o.add_choice_id_enum(
                 spa_sys::SPA_FORMAT_VIDEO_format,
+                spa_sys::SPA_POD_PROP_FLAG_MANDATORY | spa_sys::SPA_POD_PROP_FLAG_DONT_FIXATE,
                 spa_sys::SPA_VIDEO_FORMAT_BGRA,
                 &[
                     spa_sys::SPA_VIDEO_FORMAT_BGRA,
@@ -709,6 +706,7 @@ mod tests {
             );
             o.add_choice_rectangle_range(
                 spa_sys::SPA_FORMAT_VIDEO_size,
+                spa_sys::SPA_POD_PROP_FLAG_MANDATORY | spa_sys::SPA_POD_PROP_FLAG_DONT_FIXATE,
                 (1920, 1080),
                 (320, 240),
                 (7680, 4320),
@@ -752,6 +750,7 @@ mod tests {
             );
             o.add_choice_long_enum(
                 spa_sys::SPA_FORMAT_VIDEO_modifier,
+                spa_sys::SPA_POD_PROP_FLAG_MANDATORY | spa_sys::SPA_POD_PROP_FLAG_DONT_FIXATE,
                 0i64,                  // DRM_FORMAT_MOD_LINEAR
                 &[0i64, -1i64],        // LINEAR + INVALID
             );
@@ -790,6 +789,7 @@ mod tests {
             );
             o.add_choice_fraction_range(
                 spa_sys::SPA_FORMAT_VIDEO_framerate,
+                spa_sys::SPA_POD_PROP_FLAG_MANDATORY | spa_sys::SPA_POD_PROP_FLAG_DONT_FIXATE,
                 (60, 1),
                 (15, 1),
                 (60, 1),
@@ -815,5 +815,34 @@ mod tests {
             },
             _ => panic!(),
         }
+    }
+
+    /// Choice property with flags=0 (used for VideoSize / VideoFramerate
+    /// in the OBS-pattern EnumFormat where the consumer is fine with
+    /// whatever size/rate the producer offers, no DONT_FIXATE).
+    #[test]
+    fn choice_rectangle_range_with_zero_flags() {
+        let mut b = PodBuilder::new();
+        {
+            let mut o = b.push_object(
+                spa_sys::SPA_TYPE_OBJECT_Format,
+                spa_sys::SPA_PARAM_EnumFormat,
+            );
+            o.add_choice_rectangle_range(
+                spa_sys::SPA_FORMAT_VIDEO_size,
+                0,  // no MANDATORY, no DONT_FIXATE
+                (1920, 1080),
+                (320, 240),
+                (7680, 4320),
+            );
+        }
+        let bytes = b.finish();
+        let (_n, value) = PodDeserializer::deserialize_any_from(&bytes).expect("deserialise");
+        let obj = match value {
+            Value::Object(o) => o,
+            _ => panic!(),
+        };
+        let p = &obj.properties[0];
+        assert_eq!(p.flags.bits(), 0, "flags should be 0 when explicitly passed 0");
     }
 }
