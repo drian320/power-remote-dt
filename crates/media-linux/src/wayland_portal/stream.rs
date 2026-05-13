@@ -316,6 +316,13 @@ impl PipeWireStream {
 
                 let _listener = stream
                     .add_local_listener::<()>()
+                    .state_changed(|_stream, _ud, old, new| {
+                        tracing::info!(
+                            old = ?old,
+                            new = ?new,
+                            "pipewire stream state changed"
+                        );
+                    })
                     .param_changed({
                         let sz = current_size_thread.clone();
                         move |stream, _ud, id, param| {
