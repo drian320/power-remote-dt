@@ -186,8 +186,8 @@ pub enum ParseError {
     NotObject,
     #[error("pod type is not ParamFormat (got raw type {0})")]
     WrongType(u32),
-    #[error("MediaType is not Video")]
-    NotVideo,
+    #[error("MediaType is not Video (got id={0:?})")]
+    NotVideo(Option<u32>),
     #[error("MediaSubtype is not Raw")]
     NotRaw,
     #[error("VideoFormat is not BGRA/BGRx (got id={0})")]
@@ -258,7 +258,7 @@ pub fn parse(p: &Pod) -> Result<NegotiatedFormat, ParseError> {
     }
 
     if media_type != Some(MediaType::Video.as_raw()) {
-        return Err(ParseError::NotVideo);
+        return Err(ParseError::NotVideo(media_type));
     }
     if media_subtype != Some(MediaSubtype::Raw.as_raw()) {
         return Err(ParseError::NotRaw);
@@ -564,7 +564,7 @@ mod tests {
         let pod = Pod::from_bytes(&bytes).expect("Pod::from_bytes ok");
         let err = parse(pod).expect_err("Audio MediaType must reject");
         assert!(
-            matches!(err, ParseError::NotVideo),
+            matches!(err, ParseError::NotVideo(_)),
             "expected NotVideo, got {err:?}"
         );
     }
