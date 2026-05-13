@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 prdt-media-sw = { path = "../media-sw" }
+prdt-protocol = { path = "../protocol" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
