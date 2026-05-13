@@ -14,7 +14,12 @@ on:
 jobs:
   release-linux:
     name: Build Linux x86_64 release binary
-    runs-on: ubuntu-22.04
+    # Ubuntu 24.04 ships libpipewire-0.3 >= 1.0.5 (well above the 0.3.55
+    # ABI floor that pipewire-rs 0.9 / libspa-sys-0.9.2 require). Ubuntu
+    # 22.04 only has 0.3.48 and the build script panics with "Cannot find
+    # libraries: libpipewire-0.3 >= 0.3" even when libpipewire-0.3-dev is
+    # installed (the .pc file's Version field is checked at build time).
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
@@ -33,7 +38,8 @@ jobs:
             libxkbcommon-dev libwayland-dev libssl-dev \
             libgtk-3-dev libpango1.0-dev libcairo2-dev \
             libgdk-pixbuf-2.0-dev libatk1.0-dev libayatana-appindicator3-dev \
-            libasound2-dev
+            libasound2-dev \
+            libpipewire-0.3-dev libspa-0.2-dev
 
       - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
@@ -99,4 +105,4 @@ jobs:
                            --decoder openh264 --codec h264
             ```
 
-            Built on `ubuntu-22.04`. Runtime deps: `libasound2`, `libstdc++6`, `libwayland-client0` (any modern desktop Linux).
+            Built on `ubuntu-24.04`. Runtime deps: `libasound2t64` (or `libasound2`), `libstdc++6`, `libwayland-client0`, `libpipewire-0.3-0` (any modern desktop Linux running PipeWire).
