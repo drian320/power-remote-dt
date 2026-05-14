@@ -604,9 +604,29 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
     transport tests pass after migration (48 lib + 13 integration).
     Workspace `cargo clippy --workspace --all-targets -D warnings`
     clean.
-  - **Real-device smoke (N100, GNOME 46 Wayland, 2026-05-14)**: viewer
-    renders live desktop at `textures_decoded / frames_received ≥
-    90 %`. Host CPU at 1080p60 5 Mbps: <actual %>. **Pending T8.**
+  - **Real-device smoke (N100, GNOME 46 Wayland, 2026-05-14)**:
+    transport-side load-bearing assertion verified — host emitted
+    `frames_sent=815, send_errors=0` over ~28s at 1080p 5 Mbps VAAPI
+    H.264 (Intel Alder Lake-N iHD driver). **Zero `FrameTooLarge`
+    errors** (the pre-fix smoke saw repeated
+    `FrameTooLarge { bytes: 168527, max_bytes: 76800 }`). Wire-side
+    throughput `bytes_sent_window=400KB-1MB/s` healthy. Dynamic-k
+    FEC consumes the VAAPI HW-encoded NAL stream without rejection.
+    Full viewer-side `textures_decoded / frames_received ≥ 90 %`
+    measurement deferred: the smoke was loopback-only (single N100
+    box ran both encoder + OpenH264 SW decoder + portal + GUI) which
+    saturated the CPU (decode_p50≈91ms vs 16.6ms frame budget,
+    encoder Degraded→4.25Mbps). A matched-version Windows viewer was
+    attempted but the older binary's `HelloRequest` struct diverged
+    from this branch's wire (`bincode UnexpectedEof` on handshake;
+    rooted in a separate P6 protocol_version=4 bump, not this PR).
+    Two-machine smoke with a matched-version viewer is tracked as a
+    follow-up.
+  - **Follow-up**: 2-machine smoke with matched-version viewer
+    (Linux+Linux or Linux+Windows from this branch). Requires
+    either extending `release.yml` with a Windows build job or
+    building viewer locally on a peer machine. Tracking as
+    `P5C-2machine-smoke` in next phase.
   - **Out of scope (deferred)**: VAEncMiscParameterMaxFrameSize cap on
     encoder side, adaptive parity ratio based on observed loss,
     multi-compositor smoke (P5C-3), per-frame `FecCodec::new` cost
