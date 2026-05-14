@@ -143,6 +143,7 @@ pub fn packetize(
     } else {
         0
     };
+    let frame_payload_bytes = bytes as u32;
     let mut out = Vec::with_capacity(k + m);
     for (idx, shard) in source.iter().enumerate() {
         let start = idx * chunk_payload_len;
@@ -156,6 +157,7 @@ pub fn packetize(
             parity_chunks: m as u16,
             video_flags: kf_flag,
             payload_bytes: valid,
+            frame_payload_bytes,
             chunk_payload: shard.clone(),
         });
     }
@@ -168,6 +170,7 @@ pub fn packetize(
             parity_chunks: m as u16,
             video_flags: kf_flag | video_flags::IS_PARITY,
             payload_bytes: chunk_payload_len as u16,
+            frame_payload_bytes,
             chunk_payload: shard.clone(),
         });
     }

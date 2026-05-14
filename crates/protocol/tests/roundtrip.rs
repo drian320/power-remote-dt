@@ -32,6 +32,7 @@ fn full_video_datagram_round_trip() {
         parity_chunks: 2,
         video_flags: video_flags::IS_KEYFRAME,
         payload_bytes: 4,
+        frame_payload_bytes: 9_604,
         chunk_payload: vec![0xDE, 0xAD, 0xBE, 0xEF],
     };
     let datagram = build_video_datagram(0xDEAD_BEEF_CAFE_BABE, &chunk);
@@ -134,6 +135,7 @@ proptest! {
         source_chunks in 1u16..32,
         parity_chunks in 0u16..8,
         is_kf in any::<bool>(),
+        frame_payload_bytes in 0u32..u32::MAX,
         payload in prop::collection::vec(any::<u8>(), 0..=1200),
     ) {
         let flags = if is_kf { video_flags::IS_KEYFRAME } else { 0 };
@@ -145,6 +147,7 @@ proptest! {
             parity_chunks,
             video_flags: flags,
             payload_bytes: payload.len() as u16,
+            frame_payload_bytes,
             chunk_payload: payload.clone(),
         };
         let buf = pkt.encode();
@@ -155,6 +158,7 @@ proptest! {
         prop_assert_eq!(back.source_chunks, source_chunks);
         prop_assert_eq!(back.parity_chunks, parity_chunks);
         prop_assert_eq!(back.video_flags, flags);
+        prop_assert_eq!(back.frame_payload_bytes, frame_payload_bytes);
         prop_assert_eq!(back.chunk_payload, payload);
     }
 }

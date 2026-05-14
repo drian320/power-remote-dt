@@ -260,6 +260,70 @@ fn large_idr_round_trip() {
     assert_eq!(reconstructed.seq, 7);
 }
 
+/// Regression for the 2026-05-14 N100 smoke (6 % decode rate): a
+/// non-divisible-size IDR whose *last* source chunk is lost and
+/// FEC-reconstructed must reassemble to the exact original bytes,
+/// with no trailing zero padding.
+///
+/// The last source chunk is the only partial one; its valid length
+/// lived only in that packet's header, so when the packet was dropped
+/// the assembler padded the reconstructed shard to the full shard
+/// length, appending garbage zeros to every such NAL unit.
+///
+/// 101 376 B / 1200 B = 85 source chunks (last = 576 B), m =
+/// ceil(85×10/100) = 9 parity → 94 packets. Dropping index 84 (the
+/// last source chunk) forces FEC reconstruction of the partial chunk.
+#[test]
+fn last_source_chunk_loss_reassembles_exact_length() {
+    let policy = FecPolicy::standard();
+    let payload: Vec<u8> = (0..=255u8).cycle().take(101_376).collect();
+    let frame = EncodedFrame {
+        seq: 11,
+        timestamp_host_us: 300,
+        is_keyframe: true,
+        nal_units: Bytes::from(payload.clone()),
+        width: 1920,
+        height: 1080,
+        codec: Codec::H264,
+    };
+    let (k, m) = policy
+        .compute_k_m(payload.len(), 1200)
+        .expect("compute_k_m");
+    assert_eq!((k, m), (85, 9), "expected k=85, m=9 for 101376 B");
+    let pkts = packetize(&frame, 1200, &policy).expect("packetize");
+
+    // Drop the last source chunk (index k-1 = 84). It is the only
+    // partial chunk (576 valid bytes), so FEC must reconstruct it and
+    // the assembler must trim it back to 576 bytes, not 1200.
+    let last_source_idx = (k - 1) as u16;
+    let kept: Vec<_> = pkts
+        .into_iter()
+        .filter(|p| p.chunk_idx != last_source_idx)
+        .collect();
+
+    let fec = FecCodec::new(k, m).expect("fec");
+    let mut asm = FrameAssembler::new(1920, 1080, Codec::H264);
+    let mut completed: Option<EncodedFrame> = None;
+    for p in kept {
+        match asm.feed(p, &fec).expect("feed") {
+            FeedResult::Complete(f) => {
+                completed = Some(f);
+                break;
+            }
+            FeedResult::Pending | FeedResult::Stale => {}
+        }
+    }
+    let reconstructed = completed.expect("assembler must FEC-recover last-chunk loss");
+    assert_eq!(
+        reconstructed.nal_units.len(),
+        payload.len(),
+        "reassembled length must match exactly (no trailing zero padding)"
+    );
+    assert_eq!(&reconstructed.nal_units[..], &payload[..]);
+    assert!(reconstructed.is_keyframe);
+    assert_eq!(reconstructed.seq, 11);
+}
+
 /// Drop 5 deterministic source packets from a 180 KB IDR; FEC must
 /// reconstruct the missing chunks via parity (m = 15 ≥ 5).
 #[test]
