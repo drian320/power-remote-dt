@@ -16,12 +16,12 @@ use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Resource, ID3D11VideoContext, ID3D11VideoDevice, ID3D11VideoProcessor,
     ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView,
-    D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-    D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
-    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
-    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
-    D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
-    D3D11_VPOV_DIMENSION_TEXTURE2D,
+    D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT,
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
+    D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+    D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_RATIONAL;
 
@@ -173,14 +173,24 @@ impl Nv12Renderer {
                 .cast()
                 .map_err(|e| MediaError::d3d11("input Texture2D -> Resource", e))?;
             let mut in_view: Option<ID3D11VideoProcessorInputView> = None;
-            self.video_dev
-                .CreateVideoProcessorInputView(
-                    &in_res,
-                    &self.enumerator,
-                    &in_view_desc,
-                    Some(&mut in_view),
-                )
-                .map_err(|e| MediaError::d3d11("CreateVideoProcessorInputView", e))?;
+            if let Err(e) = self.video_dev.CreateVideoProcessorInputView(
+                &in_res,
+                &self.enumerator,
+                &in_view_desc,
+                Some(&mut in_view),
+            ) {
+                // issue #19 Bug 4 re-diagnosis: a prior fix removed
+                // RENDER_TARGET from the input texture's bind flags but the
+                // error persisted, so that hypothesis was wrong. Dump the
+                // *actual* texture desc, the video-processor content desc,
+                // and the driver's format-support bits so the next smoke
+                // pinpoints the real cause instead of guessing again.
+                let diag = self.diagnose_input_view_failure(input.raw());
+                tracing::error!(target: "prdt_media_win::nv12_renderer", "{diag}");
+                return Err(MediaError::Other(format!(
+                    "CreateVideoProcessorInputView failed ({e}); {diag}"
+                )));
+            }
             let in_view =
                 in_view.ok_or_else(|| MediaError::Other("null VideoProcessorInputView".into()))?;
 
@@ -229,6 +239,50 @@ impl Nv12Renderer {
             blt_result.map_err(|e| MediaError::d3d11("VideoProcessorBlt", e))?;
         }
         Ok(())
+    }
+
+    /// Diagnostic dump for a `CreateVideoProcessorInputView` failure
+    /// (issue #19 Bug 4 re-diagnosis). Reports the *actual* input texture
+    /// desc, this renderer's video-processor content desc, and the
+    /// driver's format-support bits for the texture's format — enough to
+    /// distinguish a bind-flag problem, a dimension mismatch, and an
+    /// unsupported-format problem without another guess-and-smoke cycle.
+    fn diagnose_input_view_failure(
+        &self,
+        tex: &windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
+    ) -> String {
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { tex.GetDesc(&mut desc) };
+        let support_str = match unsafe { self.enumerator.CheckVideoProcessorFormat(desc.Format) } {
+            Ok(bits) => {
+                let input_ok = bits & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT.0 as u32 != 0;
+                format!("format_support=0x{bits:08X} input_supported={input_ok}")
+            }
+            Err(e) => format!("CheckVideoProcessorFormat error: {e}"),
+        };
+        format!(
+            "Bug4 probe: input_tex{{ Width:{} Height:{} Format:{} MipLevels:{} ArraySize:{} \
+             Usage:{} BindFlags:0x{:X} CPUAccessFlags:0x{:X} MiscFlags:0x{:X} \
+             SampleDesc{{Count:{},Quality:{}}} }} content_desc{{ InputWidth:{} InputHeight:{} \
+             OutputWidth:{} OutputHeight:{} }} in_view_desc{{ FourCC:0 \
+             ViewDimension:TEXTURE2D MipSlice:0 ArraySlice:0 }} {}",
+            desc.Width,
+            desc.Height,
+            desc.Format.0,
+            desc.MipLevels,
+            desc.ArraySize,
+            desc.Usage.0,
+            desc.BindFlags,
+            desc.CPUAccessFlags,
+            desc.MiscFlags,
+            desc.SampleDesc.Count,
+            desc.SampleDesc.Quality,
+            self.input_width,
+            self.input_height,
+            self.output_width,
+            self.output_height,
+            support_str,
+        )
     }
 }
 

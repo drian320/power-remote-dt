@@ -16,10 +16,14 @@ struct Partial {
     first_seen: Instant,
     source_chunks: u16,
     parity_chunks: u16,
-    // chunk_idx → payload (full-length shard, payload_bytes for valid length of last source chunk)
+    // chunk_idx → full-length (shard_len) shard payload
     chunks: HashMap<u16, Vec<u8>>,
-    // payload_bytes of each source chunk we've received (idx → bytes)
-    source_payload_bytes: HashMap<u16, u16>,
+    /// Total unpadded byte length of the whole frame. Carried identically
+    /// on every packet (source and parity), so it is known even when the
+    /// last source chunk was lost and must be FEC-reconstructed — that
+    /// chunk is the only partial one, and its own packet was the only
+    /// place its `payload_bytes` lived.
+    frame_payload_bytes: u32,
     is_keyframe: bool,
 }
 
@@ -75,21 +79,20 @@ impl FrameAssembler {
 
         let total = pkt.source_chunks as usize + pkt.parity_chunks as usize;
         let shard_len = pkt.chunk_payload.len();
-        let is_source = !pkt.is_parity();
         let is_kf = pkt.is_keyframe();
-        let payload_bytes = pkt.payload_bytes;
         let chunk_idx = pkt.chunk_idx;
         let frame_seq = pkt.frame_seq;
         let ts = pkt.timestamp_host_us;
         let source_chunks = pkt.source_chunks;
         let parity_chunks = pkt.parity_chunks;
+        let frame_payload_bytes = pkt.frame_payload_bytes;
 
         let entry = self.partials.entry(frame_seq).or_insert_with(|| Partial {
             first_seen: Instant::now(),
             source_chunks,
             parity_chunks,
             chunks: HashMap::new(),
-            source_payload_bytes: HashMap::new(),
+            frame_payload_bytes,
             is_keyframe: is_kf,
         });
 
@@ -98,9 +101,6 @@ impl FrameAssembler {
             return Ok(FeedResult::Pending);
         }
         entry.chunks.insert(chunk_idx, pkt.chunk_payload);
-        if is_source {
-            entry.source_payload_bytes.insert(chunk_idx, payload_bytes);
-        }
         if is_kf {
             entry.is_keyframe = true;
         }
@@ -165,16 +165,17 @@ impl FrameAssembler {
             shards.drain(..k).map(|s| s.unwrap()).collect()
         };
 
-        // Stitch source shards back into a single EncodedFrame, honouring
-        // payload_bytes for the (possibly) partial last chunk.
-        let total_bytes = Self::compute_total_bytes(k, shard_len, entry);
+        // Stitch source shards back into a single EncodedFrame. The frame's
+        // total unpadded length comes from `frame_payload_bytes`, which is
+        // carried on every packet — so it is correct even when the last
+        // source chunk (the only partial one) was FEC-reconstructed and
+        // its own `payload_bytes` was never received. Each chunk's valid
+        // span is `[i*shard_len, min((i+1)*shard_len, total))`.
+        let total_bytes = entry.frame_payload_bytes as usize;
         let mut buf = Vec::with_capacity(total_bytes);
         for (i, shard) in source.iter().enumerate().take(k) {
-            let valid = entry
-                .source_payload_bytes
-                .get(&(i as u16))
-                .copied()
-                .unwrap_or(shard_len as u16) as usize;
+            let chunk_start = i * shard_len;
+            let valid = total_bytes.saturating_sub(chunk_start).min(shard_len);
             buf.extend_from_slice(&shard[..valid]);
         }
 
@@ -189,19 +190,6 @@ impl FrameAssembler {
             height: self.height,
             codec: self.codec,
         }))
-    }
-
-    fn compute_total_bytes(k: usize, shard_len: usize, entry: &Partial) -> usize {
-        let mut total = 0;
-        for i in 0..k {
-            let valid = entry
-                .source_payload_bytes
-                .get(&(i as u16))
-                .copied()
-                .unwrap_or(shard_len as u16) as usize;
-            total += valid;
-        }
-        total
     }
 
     /// Drop frames older than `self.timeout`. Returns Vec of frame_seqs

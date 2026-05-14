@@ -15,9 +15,9 @@ pub const MAX_SHARDS: usize = 240;
 /// Wraps a ReedSolomon codec with per-frame shard encoding/decoding.
 ///
 /// All shards MUST have the same length. Callers pad the last source
-/// shard with zeros before passing here (the length is tracked separately
-/// in the VideoPacket.payload_bytes field so the receiver knows the true
-/// length of the final source chunk).
+/// shard with zeros before passing here; the frame's true total length
+/// is tracked separately in `VideoPacket.frame_payload_bytes` (carried on
+/// every packet, so it survives FEC reconstruction of the last chunk).
 pub struct FecCodec {
     k: usize,
     m: usize,

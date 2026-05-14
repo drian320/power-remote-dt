@@ -6,7 +6,12 @@ use crate::input::{InputEvent, MouseButton};
 pub const MAGIC: u8 = 0x52; // 'R'
 
 /// Current protocol version. Incremented on any breaking wire change.
-pub const PROTOCOL_VERSION: u8 = 0x01;
+///
+/// 0x02: VideoPacket gained `frame_payload_bytes` (total unpadded frame
+/// length), so the assembler can trim a FEC-reconstructed last source
+/// chunk back to its true length even when the original packet — the
+/// only one that carried that chunk's `payload_bytes` — was dropped.
+pub const PROTOCOL_VERSION: u8 = 0x02;
 
 /// Length of the common header in bytes.
 pub const HEADER_LEN: usize = 16;
@@ -199,7 +204,7 @@ mod header_tests {
 }
 
 /// VideoPacket payload header length (before chunk data).
-pub const VIDEO_PAYLOAD_HDR_LEN: usize = 26;
+pub const VIDEO_PAYLOAD_HDR_LEN: usize = 30;
 
 /// Flags packed into VideoPacket.video_flags byte.
 pub mod video_flags {
@@ -222,7 +227,8 @@ pub mod video_flags {
 /// 22     | 1    | video_flags
 /// 23     | 1    | reserved
 /// 24     | 2    | payload_bytes (valid bytes inside this chunk)
-/// 26     | N    | chunk_payload (up to DEFAULT_CHUNK_PAYLOAD_LEN)
+/// 26     | 4    | frame_payload_bytes (total unpadded frame length)
+/// 30     | N    | chunk_payload (up to DEFAULT_CHUNK_PAYLOAD_LEN)
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoPacket {
@@ -233,6 +239,12 @@ pub struct VideoPacket {
     pub parity_chunks: u16,
     pub video_flags: u8,
     pub payload_bytes: u16,
+    /// Total unpadded byte length of the whole frame's NAL units. Identical
+    /// on every packet of a frame (source and parity), so it survives FEC
+    /// reconstruction. The assembler uses it to trim the last source chunk
+    /// — the only partial one — back to its true length even when that
+    /// chunk's own packet (which alone carried its `payload_bytes`) was lost.
+    pub frame_payload_bytes: u32,
     pub chunk_payload: Vec<u8>,
 }
 
@@ -256,6 +268,7 @@ impl VideoPacket {
         out.push(self.video_flags);
         out.push(0); // reserved
         out.extend_from_slice(&self.payload_bytes.to_le_bytes());
+        out.extend_from_slice(&self.frame_payload_bytes.to_le_bytes());
         out.extend_from_slice(&self.chunk_payload);
         out
     }
@@ -276,6 +289,7 @@ impl VideoPacket {
         let video_flags = buf[22];
         let _reserved = buf[23];
         let payload_bytes = u16::from_le_bytes(buf[24..26].try_into().unwrap());
+        let frame_payload_bytes = u32::from_le_bytes(buf[26..30].try_into().unwrap());
 
         // NOTE: read the FULL wire-side chunk payload, not truncated to
         // payload_bytes. FEC reconstruct requires all shards to have the
@@ -298,6 +312,7 @@ impl VideoPacket {
             parity_chunks,
             video_flags,
             payload_bytes,
+            frame_payload_bytes,
             chunk_payload,
         })
     }
@@ -317,6 +332,7 @@ mod video_tests {
             parity_chunks: 2,
             video_flags: video_flags::IS_KEYFRAME,
             payload_bytes: 5,
+            frame_payload_bytes: 9_005,
             chunk_payload: vec![0x01, 0x02, 0x03, 0x04, 0x05],
         };
         let buf = pkt.encode();
@@ -337,6 +353,7 @@ mod video_tests {
             parity_chunks: 2,
             video_flags: video_flags::IS_PARITY,
             payload_bytes: 0,
+            frame_payload_bytes: 0,
             chunk_payload: vec![],
         };
         let buf = pkt.encode();
