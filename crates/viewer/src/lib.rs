@@ -38,7 +38,7 @@ use prdt_transport::{
     CustomUdpTransport, ReceivedMessage, Transport, UdpTransportConfig, DEFAULT_HANDSHAKE_TIMEOUT,
 };
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
@@ -936,6 +936,17 @@ fn map_cursor_to_virtual_desktop(
     (abs_x, abs_y)
 }
 
+/// True when the CLI supplied an explicit connection target. When this
+/// holds, the Windows GUI launcher is skipped entirely: the user told us
+/// where to connect, so every CLI arg (including `--decoder`) applies
+/// verbatim. Without this gate the launcher's persisted `ViewerConfig`
+/// would clobber explicit CLI flags via `apply_connect_args` (issue #19
+/// Bug 2).
+#[cfg(any(windows, test))]
+fn has_explicit_connection_target(args: &Args) -> bool {
+    args.host.is_some() || args.host_pubkey.is_some() || args.signaling_url.is_some()
+}
+
 #[cfg(windows)]
 fn apply_connect_args(args: &mut Args, c: prdt_gui_viewer::ConnectArgs) {
     // Map ConnectArgs into the existing Args fields. Each ConnectArgs
@@ -1277,7 +1288,7 @@ pub fn run_with_args(
     prdt_gui_common::install_panic_hook(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
 
     #[cfg(windows)]
-    if !args.headless {
+    if !args.headless && !has_explicit_connection_target(&args) {
         match prdt_gui_viewer::run_viewer_launcher(args.config.clone())
             .map_err(|e| anyhow::anyhow!(e))?
         {
@@ -1526,14 +1537,16 @@ fn spawn_worker_tasks(
                     Ok(c) => c,
                     Err(e) => {
                         tracing::error!(error = %e, "parse turn URL failed");
-                        return;
+                        eprintln!("viewer: TURN config parse failed: {e}");
+                        std::process::exit(1);
                     }
                 };
                 match CustomUdpTransport::bind_with_relay(bind_addr, cfg, turn_cfg).await {
                     Ok(t) => Arc::new(t),
                     Err(e) => {
-                        warn!(?e, "bind_with_relay failed");
-                        return;
+                        error!(?e, "bind_with_relay failed");
+                        eprintln!("viewer: bind_with_relay failed: {e:?}");
+                        std::process::exit(1);
                     }
                 }
             }
@@ -1541,7 +1554,8 @@ fn spawn_worker_tasks(
                 Ok(t) => Arc::new(t),
                 Err(e) => {
                     warn!(?e, "UDP bind failed");
-                    return;
+                    eprintln!("viewer: UDP bind failed: {e:?}");
+                    std::process::exit(1);
                 }
             },
         };
@@ -1549,7 +1563,8 @@ fn spawn_worker_tasks(
             Ok(a) => a,
             Err(e) => {
                 tracing::error!(error = %e, "local_addr failed");
-                return;
+                eprintln!("viewer: local_addr failed: {e}");
+                std::process::exit(1);
             }
         };
 
@@ -1571,21 +1586,24 @@ fn spawn_worker_tasks(
                 Ok(o) => o,
                 Err(e) => {
                     tracing::error!(error = %e, "signaling rendezvous failed");
-                    return;
+                    eprintln!("viewer: signaling rendezvous failed: {e}");
+                    std::process::exit(5);
                 }
             };
             let pk_b64 = match outcome.peer_pubkey_b64.as_deref() {
                 Some(s) => s,
                 None => {
                     tracing::error!("signaling did not return a host pubkey");
-                    return;
+                    eprintln!("viewer: signaling did not return a host pubkey");
+                    std::process::exit(5);
                 }
             };
             let pk = match PubKey::from_base64(pk_b64) {
                 Ok(p) => p,
                 Err(e) => {
                     tracing::error!(error = %e, "bad host pubkey from signaling");
-                    return;
+                    eprintln!("viewer: bad host pubkey from signaling: {e}");
+                    std::process::exit(5);
                 }
             };
 
@@ -1602,11 +1620,13 @@ fn spawn_worker_tasks(
                 }
                 Ok(TofuVerdict::Mismatch { .. }) => {
                     tracing::error!(%host_id, "TOFU pubkey mismatch. Refusing to connect. Use --force-tofu to override.");
-                    return;
+                    eprintln!("viewer: TOFU pubkey mismatch for host {host_id}. Refusing to connect. Use --force-tofu to override.");
+                    std::process::exit(5);
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "known-host-ids error");
-                    return;
+                    eprintln!("viewer: known-host-ids error: {e}");
+                    std::process::exit(5);
                 }
             }
 
@@ -1628,7 +1648,8 @@ fn spawn_worker_tasks(
                 Ok(a) => a,
                 Err(e) => {
                     tracing::error!(error = %e, "probe_and_commit_peer failed");
-                    return;
+                    eprintln!("viewer: probe_and_commit_peer failed: {e}");
+                    std::process::exit(5);
                 }
             };
             tracing::info!(peer = %probed, "probe selected winner");
@@ -1653,7 +1674,8 @@ fn spawn_worker_tasks(
             .await
         {
             warn!(?e, "Noise client handshake failed");
-            return;
+            eprintln!("viewer: Noise client handshake failed: {e:?}");
+            std::process::exit(5);
         }
         tracing::info!("Noise handshake complete");
 
@@ -1719,7 +1741,8 @@ fn spawn_worker_tasks(
             }
             Err(e) => {
                 warn!(?e, "auth handshake failed");
-                return;
+                eprintln!("viewer: auth handshake failed: {e:?}");
+                std::process::exit(5);
             }
         };
         // Store granted_permissions on all platforms (overlay IPC is Windows-only
@@ -1759,21 +1782,24 @@ fn spawn_worker_tasks(
                 Ok(a) => a,
                 Err(e) => {
                     tracing::error!(error = %e, "pick_default_adapter");
-                    return;
+                    eprintln!("viewer: pick_default_adapter failed: {e}");
+                    std::process::exit(6);
                 }
             };
             let dev = match prdt_media_win::D3d11Device::create(&adapter) {
                 Ok(d) => d,
                 Err(e) => {
                     tracing::error!(error = %e, "D3d11Device::create");
-                    return;
+                    eprintln!("viewer: D3d11Device::create failed: {e}");
+                    std::process::exit(6);
                 }
             };
             match build_consumer(&decoder, ack.negotiated_codec, ack.neg_width, ack.neg_height, &dev) {
                 Ok(c) => Arc::new(tokio::sync::Mutex::new(c)),
                 Err(e) => {
                     tracing::error!(error = %e, "build_consumer");
-                    return;
+                    eprintln!("viewer: build_consumer failed: {e}");
+                    std::process::exit(6);
                 }
             }
         };
@@ -1787,7 +1813,8 @@ fn spawn_worker_tasks(
             Ok(c) => Arc::new(tokio::sync::Mutex::new(c)),
             Err(e) => {
                 tracing::error!(error = %e, "build_consumer");
-                return;
+                eprintln!("viewer: build_consumer failed: {e}");
+                std::process::exit(6);
             }
         };
         info!(
@@ -2778,5 +2805,32 @@ mod tests {
         );
         // Must have attempted max_retries sends.
         assert_eq!(transport.sent.len(), TEST_RETRIES as usize);
+    }
+
+    #[test]
+    fn explicit_target_via_host() {
+        let args = Args::try_parse_from(["prdt-viewer", "--host", "127.0.0.1:9000"]).unwrap();
+        assert!(has_explicit_connection_target(&args));
+    }
+
+    #[test]
+    fn explicit_target_via_host_pubkey() {
+        let args = Args::try_parse_from(["prdt-viewer", "--host-pubkey", "abc"]).unwrap();
+        assert!(has_explicit_connection_target(&args));
+    }
+
+    #[test]
+    fn no_explicit_target_bare() {
+        let args = Args::try_parse_from(["prdt-viewer"]).unwrap();
+        assert!(!has_explicit_connection_target(&args));
+    }
+
+    #[test]
+    fn no_explicit_target_decoder_only() {
+        // --decoder alone is NOT a connection target: the launcher should
+        // still run so the user can pick a host, and the GUI decoder choice
+        // applies. Only host/host-pubkey/signaling-url skip the launcher.
+        let args = Args::try_parse_from(["prdt-viewer", "--decoder", "openh264"]).unwrap();
+        assert!(!has_explicit_connection_target(&args));
     }
 }

@@ -51,6 +51,10 @@ fn default_encoder_choice() -> String {
     "auto".into()
 }
 
+fn default_codec_choice() -> String {
+    "auto".into()
+}
+
 fn default_host_key_path() -> std::path::PathBuf {
     if let Some(base) = dirs::data_local_dir() {
         let dir = base.join("prdt");
@@ -80,6 +84,10 @@ impl Default for HostConfig {
 pub struct ViewerConfig {
     pub recv_dir: PathBuf,
     pub decoder: String,
+    /// Codec preference forwarded to the viewer CLI as `--codec`.
+    /// "auto" lets the host negotiate. Other values: "h264", "h265".
+    #[serde(default = "default_codec_choice")]
+    pub codec: String,
     pub default_resolution: String,
     pub default_fps: u32,
     #[serde(default)]
@@ -95,6 +103,7 @@ impl Default for ViewerConfig {
         Self {
             recv_dir: PathBuf::from("prdt-received"),
             decoder: "nvdec".into(),
+            codec: "auto".into(),
             default_resolution: "1920x1080".into(),
             default_fps: 60,
             signaling_url: String::new(),
@@ -283,6 +292,7 @@ known_host_ids = "known-host-ids"
         std::fs::write(&path, legacy).unwrap();
         let cfg = Config::load(&path).unwrap();
         assert_eq!(cfg.gui.locale, "");
+        assert_eq!(cfg.viewer.codec, "auto");
     }
 
     #[test]

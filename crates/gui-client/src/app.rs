@@ -40,6 +40,8 @@ pub struct ClientApp {
     // Connect
     peer_host: String,
     peer_pubkey: String,
+    peer_codec: String,
+    peer_decoder: String,
     /// Last status line shown under the Connect button.
     connect_status: Option<String>,
 
@@ -72,6 +74,13 @@ impl ClientApp {
             .unwrap_or_else(|| PathBuf::from("host-auth.toml"));
         let host_auth = HostAuthConfig::load_or_default(&host_auth_path).unwrap_or_default();
 
+        let (peer_codec, peer_decoder) = {
+            let cfg_guard = cfg.lock().unwrap();
+            (
+                cfg_guard.viewer.codec.clone(),
+                cfg_guard.viewer.decoder.clone(),
+            )
+        };
         let mut app = Self {
             cfg,
             config_path,
@@ -83,6 +92,8 @@ impl ClientApp {
             host_status: None,
             peer_host: "127.0.0.1:9000".to_string(),
             peer_pubkey: String::new(),
+            peer_codec,
+            peer_decoder,
             connect_status: None,
             consent_rx: None,
             pending_consent: None,
@@ -264,6 +275,27 @@ impl ClientApp {
         if !self.peer_pubkey.trim().is_empty() {
             cmd.arg("--host-pubkey").arg(self.peer_pubkey.trim());
         }
+        if !self.peer_codec.trim().is_empty() {
+            cmd.arg("--codec").arg(self.peer_codec.trim());
+        }
+        if !self.peer_decoder.trim().is_empty() {
+            cmd.arg("--decoder").arg(self.peer_decoder.trim());
+        }
+        // Persist codec/decoder selections back to ViewerConfig.
+        {
+            let mut cfg_guard = self.cfg.lock().unwrap();
+            cfg_guard.viewer.codec = self.peer_codec.clone();
+            cfg_guard.viewer.decoder = self.peer_decoder.clone();
+            let path = self.config_path.clone();
+            let cfg_snapshot = cfg_guard.clone();
+            drop(cfg_guard);
+            if let Err(e) = cfg_snapshot.save(&path) {
+                tracing::warn!(
+                    ?e,
+                    "config save failed (codec/decoder selection not persisted)"
+                );
+            }
+        }
         match cmd.spawn() {
             Ok(child) => {
                 self.connect_status = Some(format!("launched viewer (pid {})", child.id()));
@@ -424,6 +456,27 @@ impl ClientApp {
         ui.add_space(4.0);
         ui.label("Peer pubkey (base64)");
         ui.add(egui::TextEdit::singleline(&mut self.peer_pubkey).desired_width(420.0));
+
+        ui.add_space(4.0);
+        ui.label("Codec");
+        egui::ComboBox::from_id_source("connect-codec-combo")
+            .selected_text(&self.peer_codec)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.peer_codec, "auto".to_string(), "auto");
+                ui.selectable_value(&mut self.peer_codec, "h264".to_string(), "h264");
+                ui.selectable_value(&mut self.peer_codec, "h265".to_string(), "h265");
+            });
+
+        ui.add_space(4.0);
+        ui.label("Decoder");
+        egui::ComboBox::from_id_source("connect-decoder-combo")
+            .selected_text(&self.peer_decoder)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.peer_decoder, "auto".to_string(), "auto");
+                ui.selectable_value(&mut self.peer_decoder, "nvdec".to_string(), "nvdec");
+                ui.selectable_value(&mut self.peer_decoder, "mf".to_string(), "mf");
+                ui.selectable_value(&mut self.peer_decoder, "openh264".to_string(), "openh264");
+            });
 
         ui.add_space(8.0);
         if ui.button("Connect").clicked() {
