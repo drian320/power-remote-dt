@@ -225,7 +225,7 @@ impl FrameAssembler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::packetize::packetize;
+    use crate::packetize::{packetize, FecPolicy};
     use bytes::Bytes;
 
     fn make_frame(seq: u64, bytes: &[u8]) -> EncodedFrame {
@@ -242,14 +242,19 @@ mod tests {
 
     #[test]
     fn assembler_trivial_all_chunks() {
-        let fec = FecCodec::new(4, 2).unwrap();
+        // 250 bytes at chunk_payload_len=100 → k=ceil(250/100)=3, m=2, total=5.
+        // fec must match (k=3, m=2) in case reconstruction is needed.
+        // Feed all 3 source chunks (indices 0,1,2); stop before parity to
+        // avoid re-inserting a new partial entry for the completed frame.
+        let fec = FecCodec::new(3, 2).unwrap();
+        let policy = FecPolicy::strict_small();
         let frame = make_frame(1, &[0xAA; 250]);
-        let pkts = packetize(&frame, &fec, 100).unwrap();
+        let pkts = packetize(&frame, 100, &policy).unwrap();
         let mut asm = FrameAssembler::new(1920, 1080, Codec::H265);
 
         // Feed source chunks only; skip parity.
         let mut last = FeedResult::Pending;
-        for p in pkts.iter().take(4).cloned() {
+        for p in pkts.iter().take(3).cloned() {
             last = asm.feed(p, &fec).unwrap();
         }
         match last {
@@ -264,9 +269,13 @@ mod tests {
 
     #[test]
     fn assembler_reconstructs_missing_source() {
-        let fec = FecCodec::new(4, 2).unwrap();
+        // 200 bytes at chunk_payload_len=100 → k=2, parity_ratio_pct=50 →
+        // raw_m=1, clamped to min_m=2 → m=2, total=4.
+        // fec must match (k=2, m=2) for reconstruction to succeed.
+        let fec = FecCodec::new(2, 2).unwrap();
+        let policy = FecPolicy::strict_small();
         let frame = make_frame(1, &[0xCD; 200]);
-        let mut pkts = packetize(&frame, &fec, 100).unwrap();
+        let mut pkts = packetize(&frame, 100, &policy).unwrap();
         // Drop source chunk idx 1.
         pkts.remove(1);
         let mut asm = FrameAssembler::new(1920, 1080, Codec::H265);
@@ -284,25 +293,33 @@ mod tests {
 
     #[test]
     fn assembler_drops_stale() {
-        let fec = FecCodec::new(4, 2).unwrap();
+        // [0; 10] at chunk_payload_len=100 → k=1, m=2, total=3.
+        // Feed only the 1 source chunk (take(1)) so high_water advances to
+        // 100 without re-inserting a new partial when parity arrives later.
+        let fec = FecCodec::new(1, 2).unwrap();
+        let policy = FecPolicy::strict_small();
         let f1 = make_frame(100, &[0; 10]);
-        let pkts_f1 = packetize(&f1, &fec, 100).unwrap();
+        let pkts_f1 = packetize(&f1, 100, &policy).unwrap();
         let mut asm = FrameAssembler::new(1920, 1080, Codec::H265);
-        for p in pkts_f1.into_iter().take(4) {
+        for p in pkts_f1.into_iter().take(1) {
             asm.feed(p, &fec).unwrap();
         }
         // Now try a stale seq = 50; high_water_seq is now 100.
         let stale_frame = make_frame(50, &[0; 10]);
-        let stale_pkts = packetize(&stale_frame, &fec, 100).unwrap();
+        let stale_pkts = packetize(&stale_frame, 100, &policy).unwrap();
         let r = asm.feed(stale_pkts[0].clone(), &fec).unwrap();
         assert!(matches!(r, FeedResult::Stale));
     }
 
     #[test]
     fn assembler_purges_timed_out() {
-        let fec = FecCodec::new(4, 2).unwrap();
-        let frame = make_frame(1, &[0; 10]);
-        let pkts = packetize(&frame, &fec, 100).unwrap();
+        let fec = FecCodec::new(2, 2).unwrap();
+        let policy = FecPolicy::strict_small();
+        // 150 bytes at chunk_payload_len=100 → k=ceil(150/100)=2, m=2, total=4.
+        // Feed only the first chunk → have=1 < k=2 → stays Pending in partials
+        // → times out → purge() fires.
+        let frame = make_frame(1, &[0; 150]);
+        let pkts = packetize(&frame, 100, &policy).unwrap();
         let mut asm = FrameAssembler::new(1920, 1080, Codec::H265);
         asm.set_timeout(Duration::from_millis(1));
         asm.feed(pkts[0].clone(), &fec).unwrap();
