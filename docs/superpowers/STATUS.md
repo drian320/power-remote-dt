@@ -622,11 +622,24 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
     rooted in a separate P6 protocol_version=4 bump, not this PR).
     Two-machine smoke with a matched-version viewer is tracked as a
     follow-up.
-  - **Follow-up**: 2-machine smoke with matched-version viewer
-    (Linux+Linux or Linux+Windows from this branch). Requires
-    either extending `release.yml` with a Windows build job or
-    building viewer locally on a peer machine. Tracking as
-    `P5C-2machine-smoke` in next phase.
+  - **2-machine smoke (2026-05-14, N100 host + Windows viewer over
+    LAN)**: transport-side assertion **re-confirmed on a real
+    2-machine setup** — host emitted `frames_sent=124, send_errors=0`
+    with `first frame ready elapsed_ms=84`, zero `FrameTooLarge`.
+    `release.yml` gained a Windows build job (PR #18) so
+    `prdt-windows-x86_64.exe` is now a release asset. The viewer-side
+    `textures_decoded / frames_received ≥ 90 %` measurement is still
+    blocked — three separate pre-existing viewer/host bugs surfaced
+    (see issue #19): (1) `--silent-allow` doesn't bypass TOFU
+    unknown-peer consent, (2) viewer `--decoder` CLI flag doesn't
+    override `ViewerConfig.decoder` at the negotiation guard, (3)
+    `--decoder auto`/`mf` exit before handshake. None are in
+    `prdt-transport`; all are viewer/host CLI + GUI gaps.
+  - **Follow-up**: `P5C-2machine-smoke` — full viewer-side decode-
+    ratio measurement, blocked on issue #19 (viewer/host CLI + GUI
+    connection-settings fixes). The Windows GUI Connect tab also
+    needs host/codec/decoder fields wired into `spawn_connect()`
+    (`crates/gui-client/src/app.rs:251`).
   - **Out of scope (deferred)**: VAEncMiscParameterMaxFrameSize cap on
     encoder side, adaptive parity ratio based on observed loss,
     multi-compositor smoke (P5C-3), per-frame `FecCodec::new` cost
