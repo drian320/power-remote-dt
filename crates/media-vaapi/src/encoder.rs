@@ -45,6 +45,22 @@ use prdt_protocol::frame::{Codec, EncodedFrame};
 use std::path::PathBuf;
 use std::rc::Rc;
 
+/// Hard per-frame size cap handed to the VAAPI rate controller via
+/// `VAEncMiscParameterBufferMaxFrameSize`, submitted on every encode.
+///
+/// The transport layer cannot packetize a frame whose NAL units exceed
+/// `MAX_SOURCE_CHUNKS (200) × DEFAULT_CHUNK_PAYLOAD_LEN (1200) = 240,000`
+/// bytes into a single FEC group — `packetize()` rejects it with
+/// `FrameTooLarge`. Without a `MaxFrameSize` buffer, the Intel iHD CBR
+/// controller emits a startup burst of 250–416 KB frames (IDRs included)
+/// that the host then drops, leaving the viewer's decoder with sequence
+/// gaps it can never recover from (`dsRefLost` cascade).
+///
+/// Capped at 200,000 — comfortably under the 240,000 transport ceiling,
+/// since the driver treats this value as an approximate target and may
+/// overshoot slightly.
+const MAX_FRAME_SIZE_BYTES: u32 = 200_000;
+
 pub struct VaapiH264EncoderConfig {
     pub width: u32,
     pub height: u32,
@@ -446,6 +462,17 @@ impl VaapiH264Encoder {
             None
         };
 
+        // 6b. MaxFrameSize hard cap — submitted every frame so no encoded
+        //     frame can exceed what the transport layer can packetize
+        //     (see MAX_FRAME_SIZE_BYTES).
+        let max_frame_size_buf = context
+            .create_buffer(libva::BufferType::EncMiscParameter(
+                libva::EncMiscParameter::MaxFrameSize(
+                    libva::EncMiscParameterBufferMaxFrameSize::new(MAX_FRAME_SIZE_BYTES),
+                ),
+            ))
+            .map_err(|e| VaapiError::Bitstream(format!("create_buffer(MaxFrameSize): {e}")))?;
+
         // 7. Picture state machine: take ownership of the surface for this
         //    frame, attach all buffers, begin/render/end/sync (with retry).
         let st_surfaces = st.surfaces.as_mut().unwrap();
@@ -466,6 +493,7 @@ impl VaapiH264Encoder {
         if let Some(b) = rc_buf_opt {
             picture.add_buffer(b);
         }
+        picture.add_buffer(max_frame_size_buf);
 
         let p_begin = picture
             .begin::<()>()
@@ -917,6 +945,20 @@ mod tests {
         assert_eq!((c.width, c.height), (1920, 1080));
         assert_eq!(c.fps, 60);
         assert_eq!(c.initial_bitrate_bps, 5_000_000);
+    }
+
+    #[test]
+    fn max_frame_size_stays_under_transport_ceiling() {
+        // The transport layer rejects any frame larger than
+        // MAX_SOURCE_CHUNKS (200) × DEFAULT_CHUNK_PAYLOAD_LEN (1200) =
+        // 240_000 bytes. The VAAPI MaxFrameSize cap must stay strictly
+        // below that so the driver's (approximate) enforcement still
+        // leaves the result packetizable.
+        const TRANSPORT_CEILING: u32 = 200 * 1200;
+        assert!(
+            MAX_FRAME_SIZE_BYTES < TRANSPORT_CEILING,
+            "MAX_FRAME_SIZE_BYTES ({MAX_FRAME_SIZE_BYTES}) must be < transport ceiling ({TRANSPORT_CEILING})"
+        );
     }
 
     #[test]
