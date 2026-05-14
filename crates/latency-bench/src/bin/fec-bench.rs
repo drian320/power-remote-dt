@@ -2,6 +2,13 @@
 //! synthetic frame -> packetize -> per-packet drop -> FrameAssembler.
 //! No transport, no GPU, no async. Sweeps (k, m, drop_ppm) and writes
 //! a recovery-rate + reconstruction-latency CSV.
+//!
+//! Note on `frame_bytes`: The CLI `--frame-bytes` argument is stored in `Cfg`
+//! for informational purposes only. The actual frame size used in each trial is
+//! `k * chunk_payload_len` so that dynamic-k packetize (which derives k from
+//! `ceil(frame_bytes / chunk_len)`) produces exactly `cfg.k` source shards.
+//! The CSV `frame_bytes` column reports this effective size (`k * chunk_len`),
+//! not the user-supplied `--frame-bytes` value.
 
 use std::path::PathBuf;
 
@@ -58,6 +65,10 @@ struct Cfg {
     k: usize,
     m: usize,
     drop_ppm: u32,
+    /// Informational only. The actual frame size used in trials is
+    /// `k * chunk_payload_len` to guarantee exactly k source shards.
+    /// Kept for CLI/CSV schema backwards compatibility.
+    #[allow(dead_code)]
     frame_bytes: usize,
     chunk_payload_len: usize,
     trials: u64,
@@ -93,7 +104,7 @@ use prdt_protocol::{frame::Codec, EncodedFrame};
 use prdt_transport::{
     assembler::{FeedResult, FrameAssembler},
     packetize::packetize,
-    FecCodec,
+    FecCodec, FecPolicy,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +172,7 @@ fn make_frame(seed: u64, trial_idx: u64, frame_bytes: usize) -> EncodedFrame {
 
 /// Run one packetize -> drop -> assemble cycle.
 fn simulate_one_trial(cfg: &Cfg, trial_idx: u64, seed: u64) -> TrialResult {
+    // Keep fec for asm.feed() which still takes &FecCodec.
     let fec = match FecCodec::new(cfg.k, cfg.m) {
         Ok(f) => f,
         Err(_) => {
@@ -170,8 +182,23 @@ fn simulate_one_trial(cfg: &Cfg, trial_idx: u64, seed: u64) -> TrialResult {
             };
         }
     };
-    let frame = make_frame(seed, trial_idx, cfg.frame_bytes);
-    let packets = match packetize(&frame, &fec, cfg.chunk_payload_len) {
+
+    // Dynamic-k packetize derives k = ceil(frame_bytes / chunk_len).
+    // Size the frame to exactly k * chunk_len so packetize emits exactly
+    // cfg.k source shards regardless of the user's --frame-bytes request.
+    let effective_frame_bytes = cfg.k * cfg.chunk_payload_len;
+    let frame = make_frame(seed, trial_idx, effective_frame_bytes);
+
+    // Build a FecPolicy that forces exactly (cfg.k, cfg.m). Setting
+    // max_k = cfg.k pins the source-shard count; parity_ratio_pct and
+    // min_m = max_m = cfg.m pin the parity count exactly.
+    let policy = FecPolicy {
+        max_k: cfg.k,
+        max_m: cfg.m,
+        parity_ratio_pct: ((cfg.m * 100) / cfg.k.max(1)) as u32,
+        min_m: cfg.m,
+    };
+    let packets = match packetize(&frame, cfg.chunk_payload_len, &policy) {
         Ok(p) => p,
         Err(_) => {
             return TrialResult {
@@ -306,7 +333,7 @@ fn write_summary_csv(path: &std::path::Path, stats: &[ConfigStats]) -> std::io::
             s.cfg.k,
             s.cfg.m,
             s.cfg.drop_ppm,
-            s.cfg.frame_bytes,
+            s.cfg.k * s.cfg.chunk_payload_len,
             s.cfg.trials,
             s.complete_no_fec,
             s.complete_with_fec,
@@ -580,7 +607,7 @@ mod tests {
         );
         assert_eq!(
             lines[1],
-            "k8m2-drop50000,8,2,50000,5000,100,90,9,1,990000,18,35"
+            "k8m2-drop50000,8,2,50000,9600,100,90,9,1,990000,18,35"
         );
     }
 }
