@@ -74,7 +74,13 @@ impl CpuI420Uploader {
             hresult: 0,
         })?;
 
-        let dst = D3d11Texture::new_default(dev, width, height, TextureFormat::Nv12)?;
+        // Must be a video-processor input texture (SHADER_RESOURCE only,
+        // no RENDER_TARGET): `Nv12Renderer` feeds `dst` to
+        // `CreateVideoProcessorInputView`, which rejects NV12 textures
+        // carrying `D3D11_BIND_RENDER_TARGET` with `E_INVALIDARG` (issue
+        // #19 Bug 4). `dst` is only ever a `CopyResource` destination
+        // here, so it never needs render-target binding.
+        let dst = D3d11Texture::new_for_video_processor(dev, width, height, TextureFormat::Nv12)?;
 
         Ok(Self {
             dev: dev.clone(),

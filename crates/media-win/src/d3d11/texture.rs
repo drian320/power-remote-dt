@@ -146,6 +146,44 @@ impl D3d11Texture {
         Self::new_with_desc(dev, desc, fmt, None)
     }
 
+    /// Create a DEFAULT-usage texture intended as a Direct3D11 *video
+    /// processor input* (the texture handed to `CreateVideoProcessorInputView`).
+    ///
+    /// `SHADER_RESOURCE` only — **no `RENDER_TARGET`**. The D3D11 video
+    /// processor's `CreateVideoProcessorInputView` rejects NV12 textures
+    /// that carry `D3D11_BIND_RENDER_TARGET` with `E_INVALIDARG` (issue
+    /// #19 Bug 4: the OpenH264 software-decode path fed `Nv12Renderer`
+    /// textures built via `new_default`, which sets `RENDER_TARGET`, and
+    /// every frame failed to present). This is the same bind-flag
+    /// sensitivity already documented on `new_for_cuda_interop`.
+    ///
+    /// The resulting texture is still a valid `CopyResource` destination
+    /// (`CpuI420Uploader` copies its staging texture into it) — copy
+    /// destinations do not require any specific bind flag.
+    pub fn new_for_video_processor(
+        dev: &D3d11Device,
+        width: u32,
+        height: u32,
+        fmt: TextureFormat,
+    ) -> Result<Self> {
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: fmt.to_dxgi(),
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        Self::new_with_desc(dev, desc, fmt, None)
+    }
+
     /// Create a STAGING texture for CPU readback.
     pub fn new_staging(
         dev: &D3d11Device,
@@ -367,6 +405,19 @@ mod tests {
         let tex = D3d11Texture::new_staging(&dev, 64, 64, TextureFormat::Bgra8)
             .expect("create staging texture");
         assert_eq!(tex.width(), 64);
+    }
+
+    #[test]
+    fn create_video_processor_input_texture() {
+        // issue #19 Bug 4: NV12 video-processor input textures must be
+        // created without D3D11_BIND_RENDER_TARGET or
+        // CreateVideoProcessorInputView rejects them with E_INVALIDARG.
+        let dev = D3d11Device::create_default().expect("D3D11 device");
+        let tex = D3d11Texture::new_for_video_processor(&dev, 128, 64, TextureFormat::Nv12)
+            .expect("create video-processor input texture");
+        assert_eq!(tex.width(), 128);
+        assert_eq!(tex.height(), 64);
+        assert_eq!(tex.format(), TextureFormat::Nv12);
     }
 
     #[test]
