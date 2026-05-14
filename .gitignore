@@ -7,6 +7,7 @@ Cargo.lock
 *.log
 *.jsonl
 /tmp/
-/.omc/state/
+/.omc/
+/.claude/
 crates/gui-host/assets/*.png
 target-docker/

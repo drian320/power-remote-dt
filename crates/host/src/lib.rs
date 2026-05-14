@@ -235,7 +235,10 @@ pub struct HostAuthHook {
 
 impl HostAuthHook {
     pub fn new(validator: std::sync::Arc<auth::AuthValidator>, silent_allow: bool) -> Self {
-        Self { validator, silent_allow }
+        Self {
+            validator,
+            silent_allow,
+        }
     }
 }
 
