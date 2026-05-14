@@ -936,6 +936,17 @@ fn map_cursor_to_virtual_desktop(
     (abs_x, abs_y)
 }
 
+/// True when the CLI supplied an explicit connection target. When this
+/// holds, the Windows GUI launcher is skipped entirely: the user told us
+/// where to connect, so every CLI arg (including `--decoder`) applies
+/// verbatim. Without this gate the launcher's persisted `ViewerConfig`
+/// would clobber explicit CLI flags via `apply_connect_args` (issue #19
+/// Bug 2).
+#[cfg(any(windows, test))]
+fn has_explicit_connection_target(args: &Args) -> bool {
+    args.host.is_some() || args.host_pubkey.is_some() || args.signaling_url.is_some()
+}
+
 #[cfg(windows)]
 fn apply_connect_args(args: &mut Args, c: prdt_gui_viewer::ConnectArgs) {
     // Map ConnectArgs into the existing Args fields. Each ConnectArgs
@@ -1277,7 +1288,7 @@ pub fn run_with_args(
     prdt_gui_common::install_panic_hook(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
 
     #[cfg(windows)]
-    if !args.headless {
+    if !args.headless && !has_explicit_connection_target(&args) {
         match prdt_gui_viewer::run_viewer_launcher(args.config.clone())
             .map_err(|e| anyhow::anyhow!(e))?
         {
@@ -2778,5 +2789,32 @@ mod tests {
         );
         // Must have attempted max_retries sends.
         assert_eq!(transport.sent.len(), TEST_RETRIES as usize);
+    }
+
+    #[test]
+    fn explicit_target_via_host() {
+        let args = Args::try_parse_from(["prdt-viewer", "--host", "127.0.0.1:9000"]).unwrap();
+        assert!(has_explicit_connection_target(&args));
+    }
+
+    #[test]
+    fn explicit_target_via_host_pubkey() {
+        let args = Args::try_parse_from(["prdt-viewer", "--host-pubkey", "abc"]).unwrap();
+        assert!(has_explicit_connection_target(&args));
+    }
+
+    #[test]
+    fn no_explicit_target_bare() {
+        let args = Args::try_parse_from(["prdt-viewer"]).unwrap();
+        assert!(!has_explicit_connection_target(&args));
+    }
+
+    #[test]
+    fn no_explicit_target_decoder_only() {
+        // --decoder alone is NOT a connection target: the launcher should
+        // still run so the user can pick a host, and the GUI decoder choice
+        // applies. Only host/host-pubkey/signaling-url skip the launcher.
+        let args = Args::try_parse_from(["prdt-viewer", "--decoder", "openh264"]).unwrap();
+        assert!(!has_explicit_connection_target(&args));
     }
 }
