@@ -38,7 +38,7 @@ use prdt_transport::{
     CustomUdpTransport, ReceivedMessage, Transport, UdpTransportConfig, DEFAULT_HANDSHAKE_TIMEOUT,
 };
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
@@ -1544,7 +1544,7 @@ fn spawn_worker_tasks(
                 match CustomUdpTransport::bind_with_relay(bind_addr, cfg, turn_cfg).await {
                     Ok(t) => Arc::new(t),
                     Err(e) => {
-                        warn!(?e, "bind_with_relay failed");
+                        error!(?e, "bind_with_relay failed");
                         eprintln!("viewer: bind_with_relay failed: {e:?}");
                         std::process::exit(1);
                     }

@@ -286,7 +286,9 @@ impl ClientApp {
             let path = self.config_path.clone();
             let cfg_snapshot = cfg_guard.clone();
             drop(cfg_guard);
-            let _ = cfg_snapshot.save(&path);
+            if let Err(e) = cfg_snapshot.save(&path) {
+                tracing::warn!(?e, "config save failed (codec/decoder selection not persisted)");
+            }
         }
         match cmd.spawn() {
             Ok(child) => {

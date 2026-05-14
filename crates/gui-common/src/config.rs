@@ -292,6 +292,7 @@ known_host_ids = "known-host-ids"
         std::fs::write(&path, legacy).unwrap();
         let cfg = Config::load(&path).unwrap();
         assert_eq!(cfg.gui.locale, "");
+        assert_eq!(cfg.viewer.codec, "auto");
     }
 
     #[test]
