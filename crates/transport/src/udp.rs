@@ -13,7 +13,6 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::error::TransportError;
-use crate::fec::FecCodec;
 use crate::packetize::packetize;
 use crate::transport_trait::{ReceivedMessage, Transport};
 
@@ -82,8 +81,9 @@ pub const PROBE_RETRY_COUNT: u32 = 5;
 pub struct UdpTransportConfig {
     pub session_id: u64,
     pub chunk_payload_len: usize,
-    pub fec_k: usize,
-    pub fec_m: usize,
+    /// FEC policy for dynamic-k packetization. See
+    /// `prdt_transport::FecPolicy` for cap semantics.
+    pub fec_policy: crate::packetize::FecPolicy,
 }
 
 impl Default for UdpTransportConfig {
@@ -91,13 +91,10 @@ impl Default for UdpTransportConfig {
         Self {
             session_id: 0,
             chunk_payload_len: prdt_protocol::DEFAULT_CHUNK_PAYLOAD_LEN,
-            // fec_k=64, fec_m=6 allows 64*1200 = 76,800B per frame,
-            // covering 4K60 up to ~30 Mbps average. Smoke-test feedback
-            // showed lower defaults (k=8, k=32) were too tight. Plan 4
-            // will add dynamic FEC sizing per spec §5.3 so we pick the
-            // smallest k per frame rather than a one-size default.
-            fec_k: 64,
-            fec_m: 6,
+            // Dynamic-k FEC tuned for VAAPI 1080p60 5 Mbps (IDRs reach
+            // ~170 KB). See spec docs/superpowers/specs/
+            // 2026-05-14-transport-mtu-hw-nal-fix-design.md.
+            fec_policy: crate::packetize::FecPolicy::standard(),
         }
     }
 }
@@ -107,7 +104,6 @@ pub struct CustomUdpTransport {
     socket: Socket,
     cfg: UdpTransportConfig,
     peer: AsyncMutex<Option<SocketAddr>>, // set after first packet received or configure_peer()
-    fec: FecCodec,
     input_seq: AsyncMutex<u64>,
     assembler: AsyncMutex<crate::assembler::FrameAssembler>,
     /// Noise transport session. `None` means no encryption has been
@@ -162,12 +158,10 @@ fn bind_with_rcvbuf(addr: SocketAddr) -> std::io::Result<UdpSocket> {
 impl CustomUdpTransport {
     pub async fn bind(addr: SocketAddr, cfg: UdpTransportConfig) -> Result<Self, TransportError> {
         let socket = Socket::Direct(Arc::new(bind_with_rcvbuf(addr)?));
-        let fec = FecCodec::new(cfg.fec_k, cfg.fec_m)?;
         Ok(Self {
             socket,
             cfg,
             peer: AsyncMutex::new(None),
-            fec,
             input_seq: AsyncMutex::new(0),
             assembler: AsyncMutex::new(crate::assembler::FrameAssembler::new(
                 1920,
@@ -193,12 +187,10 @@ impl CustomUdpTransport {
                 .await
                 .map_err(|e| TransportError::Io(std::io::Error::other(format!("turn: {e}"))))?,
         );
-        let fec = FecCodec::new(cfg.fec_k, cfg.fec_m)?;
         Ok(Self {
             socket: Socket::Relay(relay),
             cfg,
             peer: AsyncMutex::new(None),
-            fec,
             input_seq: AsyncMutex::new(0),
             assembler: AsyncMutex::new(crate::assembler::FrameAssembler::new(
                 1920,
@@ -658,8 +650,23 @@ impl CustomUdpTransport {
                         return Ok(None);
                     }
                 };
+                // Construct a per-packet FecCodec from the wire-announced
+                // (source_chunks, parity_chunks) so the assembler's FEC
+                // reconstruction uses exactly the same parameters the sender
+                // chose (dynamic-k). Drop the packet on codec build failure
+                // (malformed header) rather than propagating a fatal error.
+                let fec = match crate::fec::FecCodec::new(
+                    vp.source_chunks as usize,
+                    vp.parity_chunks as usize,
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(?e, "bad FEC params in VideoPacket header; dropping");
+                        return Ok(None);
+                    }
+                };
                 let mut asm = self.assembler.lock().await;
-                match asm.feed(vp, &self.fec) {
+                match asm.feed(vp, &fec) {
                     Ok(crate::FeedResult::Complete(frame)) => {
                         Ok(Some(ReceivedMessage::Video(frame)))
                     }
@@ -697,7 +704,7 @@ impl CustomUdpTransport {
 #[async_trait]
 impl Transport for CustomUdpTransport {
     async fn send_video(&self, frame: EncodedFrame) -> Result<(), TransportError> {
-        let pkts = packetize(&frame, &self.fec, self.cfg.chunk_payload_len)?;
+        let pkts = packetize(&frame, self.cfg.chunk_payload_len, &self.cfg.fec_policy)?;
         for pkt in pkts {
             let body = pkt.encode();
             let hdr = PacketHeader {

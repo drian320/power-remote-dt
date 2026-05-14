@@ -14,7 +14,7 @@ use prdt_protocol::{frame::Codec, EncodedFrame};
 
 use crate::assembler::FrameAssembler;
 use crate::fec::FecCodec;
-use crate::packetize::packetize;
+use crate::packetize::{packetize, FecPolicy};
 
 fn make_idr_frame(seq: u64, size_bytes: usize) -> EncodedFrame {
     EncodedFrame {
@@ -43,16 +43,22 @@ fn make_p_frame(seq: u64) -> EncodedFrame {
 /// Feed all packets of `frame` except those whose chunk_idx is in `drop_indices`.
 fn feed_with_drops(
     asm: &mut FrameAssembler,
-    fec: &FecCodec,
+    policy: &FecPolicy,
     frame: &EncodedFrame,
     drop_indices: &[u16],
 ) {
-    let pkts = packetize(frame, fec, 1200).expect("packetize");
+    let pkts = packetize(frame, 1200, policy).expect("packetize");
+    // Build a FecCodec matching the (k, m) chosen by packetize so the
+    // assembler's reconstruction uses the correct parameters.
+    let (k, m) = policy
+        .compute_k_m(frame.nal_units.len(), 1200)
+        .expect("policy compute_k_m");
+    let fec = FecCodec::new(k, m).expect("FecCodec::new");
     for pkt in pkts {
         if drop_indices.contains(&pkt.chunk_idx) {
             continue; // simulate UDP loss
         }
-        let _ = asm.feed(pkt, fec);
+        let _ = asm.feed(pkt, &fec);
     }
 }
 
@@ -65,15 +71,22 @@ fn feed_with_drops(
 /// recover → assembler times out and purge() returns seq=0.
 #[test]
 fn idr_fragment_loss_detected_by_purge() {
-    let fec = FecCodec::new(4, 2).expect("fec");
+    let policy = FecPolicy {
+        max_k: 4,
+        max_m: 2,
+        parity_ratio_pct: 50,
+        min_m: 2,
+    };
     let mut asm = FrameAssembler::new(1920, 1080, Codec::H264);
     // Set a very short timeout so the test doesn't have to wait 100ms.
     asm.set_timeout(Duration::from_millis(5));
 
-    let idr = make_idr_frame(0, 800); // 800 bytes → 4 source chunks (k=4, padded)
-                                      // Drop 3 of 4 source chunks → only 3 chunks received (1 source + 2 parity)
-                                      // which is less than k=4 required for FEC recovery.
-    feed_with_drops(&mut asm, &fec, &idr, &[0, 1, 2]);
+    // 4800 bytes at chunk_payload_len=1200 → k=ceil(4800/1200)=4, m=2, total=6.
+    // Dropping source chunks [0,1,2] leaves 1 source + 2 parity = 3 received
+    // which is less than k=4 required for FEC recovery → assembler times out
+    // and purge() returns seq=0.
+    let idr = make_idr_frame(0, 4800);
+    feed_with_drops(&mut asm, &policy, &idr, &[0, 1, 2]);
 
     // No frame should have completed.
     // Purge should be empty immediately (timeout not elapsed yet).
@@ -130,13 +143,19 @@ fn purge_triggers_idr_requester_mark() {
         }
     }
 
-    let fec = FecCodec::new(4, 2).expect("fec");
+    let policy = FecPolicy {
+        max_k: 4,
+        max_m: 2,
+        parity_ratio_pct: 50,
+        min_m: 2,
+    };
     let mut asm = FrameAssembler::new(1920, 1080, Codec::H264);
     asm.set_timeout(Duration::from_millis(5));
     let mut req = IdrRequester::new();
 
-    let idr = make_idr_frame(1, 800);
-    feed_with_drops(&mut asm, &fec, &idr, &[0, 1, 2]);
+    // 4800 bytes → k=4, m=2. Dropping [0,1,2] leaves 3 chunks < k=4 → can't recover.
+    let idr = make_idr_frame(1, 4800);
+    feed_with_drops(&mut asm, &policy, &idr, &[0, 1, 2]);
     std::thread::sleep(Duration::from_millis(10));
 
     let purged = asm.purge();
@@ -164,19 +183,30 @@ fn purge_triggers_idr_requester_mark() {
 /// error path is the expected trigger (documented here, tested in viewer unit test).
 #[test]
 fn p_frame_wholesale_loss_not_detected_by_purge() {
-    let fec = FecCodec::new(4, 2).expect("fec");
+    let policy = FecPolicy {
+        max_k: 4,
+        max_m: 2,
+        parity_ratio_pct: 50,
+        min_m: 2,
+    };
     let mut asm = FrameAssembler::new(1920, 1080, Codec::H264);
     asm.set_timeout(Duration::from_millis(5));
 
     // IDR arrives with all source chunks (but no parity). With 200 bytes <
-    // 1200 chunk_payload, k=4 source chunks are present → FEC trivially
-    // succeeds → assembler marks the frame complete and removes it from
-    // partials immediately. Parity chunks are deliberately not fed to avoid
-    // re-creating the partial entry (feeding parity after completion inserts
-    // a new partial via or_insert_with, which would then time out in purge).
+    // 1200 chunk_payload, dynamic-k gives k=1 (ceil(200/1200)=1), m=2.
+    // All source chunks are fed → FEC trivially succeeds → assembler marks
+    // the frame complete and removes it from partials immediately. Parity
+    // chunks are deliberately not fed to avoid re-creating the partial entry
+    // (feeding parity after completion inserts a new partial via
+    // or_insert_with, which would then time out in purge).
     let idr = make_idr_frame(0, 200);
-    let k = fec.k() as u16;
-    let idr_pkts = packetize(&idr, &fec, 1200).expect("packetize idr");
+    // Old assumed static k=4; with dynamic-k, k = ceil(bytes / chunk_len).
+    let k = idr.nal_units.len().div_ceil(1200) as u16;
+    let idr_pkts = packetize(&idr, 1200, &policy).expect("packetize idr");
+    let (k_actual, m_actual) = policy
+        .compute_k_m(idr.nal_units.len(), 1200)
+        .expect("compute_k_m");
+    let fec = FecCodec::new(k_actual, m_actual).expect("FecCodec::new");
     for pkt in idr_pkts {
         if pkt.chunk_idx >= k {
             continue; // skip parity chunks
