@@ -247,12 +247,7 @@ mod tests {
         // Feed all 3 source chunks (indices 0,1,2); stop before parity to
         // avoid re-inserting a new partial entry for the completed frame.
         let fec = FecCodec::new(3, 2).unwrap();
-        let policy = FecPolicy {
-            max_k: 4,
-            max_m: 2,
-            parity_ratio_pct: 50,
-            min_m: 2,
-        };
+        let policy = FecPolicy::strict_small();
         let frame = make_frame(1, &[0xAA; 250]);
         let pkts = packetize(&frame, 100, &policy).unwrap();
         let mut asm = FrameAssembler::new(1920, 1080, Codec::H265);
@@ -278,12 +273,7 @@ mod tests {
         // raw_m=1, clamped to min_m=2 → m=2, total=4.
         // fec must match (k=2, m=2) for reconstruction to succeed.
         let fec = FecCodec::new(2, 2).unwrap();
-        let policy = FecPolicy {
-            max_k: 4,
-            max_m: 2,
-            parity_ratio_pct: 50,
-            min_m: 2,
-        };
+        let policy = FecPolicy::strict_small();
         let frame = make_frame(1, &[0xCD; 200]);
         let mut pkts = packetize(&frame, 100, &policy).unwrap();
         // Drop source chunk idx 1.
@@ -307,12 +297,7 @@ mod tests {
         // Feed only the 1 source chunk (take(1)) so high_water advances to
         // 100 without re-inserting a new partial when parity arrives later.
         let fec = FecCodec::new(1, 2).unwrap();
-        let policy = FecPolicy {
-            max_k: 4,
-            max_m: 2,
-            parity_ratio_pct: 50,
-            min_m: 2,
-        };
+        let policy = FecPolicy::strict_small();
         let f1 = make_frame(100, &[0; 10]);
         let pkts_f1 = packetize(&f1, 100, &policy).unwrap();
         let mut asm = FrameAssembler::new(1920, 1080, Codec::H265);
@@ -329,12 +314,7 @@ mod tests {
     #[test]
     fn assembler_purges_timed_out() {
         let fec = FecCodec::new(2, 2).unwrap();
-        let policy = FecPolicy {
-            max_k: 4,
-            max_m: 2,
-            parity_ratio_pct: 50,
-            min_m: 2,
-        };
+        let policy = FecPolicy::strict_small();
         // 150 bytes at chunk_payload_len=100 → k=ceil(150/100)=2, m=2, total=4.
         // Feed only the first chunk → have=1 < k=2 → stays Pending in partials
         // → times out → purge() fires.

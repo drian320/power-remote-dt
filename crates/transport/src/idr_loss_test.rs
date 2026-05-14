@@ -64,19 +64,14 @@ fn feed_with_drops(
 
 /// IDR fragment loss → purge() returns the stale frame_seq.
 ///
-/// With FecCodec::new(4,2): 800-byte frame fits in 1 chunk of 1200 bytes,
-/// but packetize always produces k=4 source chunks (padding remaining with
-/// zeros) + 2 parity chunks = 6 total. Dropping source chunks [0,1,2]
-/// leaves only 1 source + 2 parity = 3 received < 4 needed → FEC can't
-/// recover → assembler times out and purge() returns seq=0.
+/// With dynamic-k FEC: a 4800-byte frame at chunk_len=1200 produces
+/// k=4 source chunks + m=2 parity = 6 packets total. Dropping source
+/// indices [0, 1, 2] leaves 1 source + 2 parity = 3 received < 4
+/// needed → Reed-Solomon cannot recover → assembler times out and
+/// `purge()` returns seq=0.
 #[test]
 fn idr_fragment_loss_detected_by_purge() {
-    let policy = FecPolicy {
-        max_k: 4,
-        max_m: 2,
-        parity_ratio_pct: 50,
-        min_m: 2,
-    };
+    let policy = FecPolicy::strict_small();
     let mut asm = FrameAssembler::new(1920, 1080, Codec::H264);
     // Set a very short timeout so the test doesn't have to wait 100ms.
     asm.set_timeout(Duration::from_millis(5));
@@ -143,12 +138,7 @@ fn purge_triggers_idr_requester_mark() {
         }
     }
 
-    let policy = FecPolicy {
-        max_k: 4,
-        max_m: 2,
-        parity_ratio_pct: 50,
-        min_m: 2,
-    };
+    let policy = FecPolicy::strict_small();
     let mut asm = FrameAssembler::new(1920, 1080, Codec::H264);
     asm.set_timeout(Duration::from_millis(5));
     let mut req = IdrRequester::new();
@@ -183,12 +173,7 @@ fn purge_triggers_idr_requester_mark() {
 /// error path is the expected trigger (documented here, tested in viewer unit test).
 #[test]
 fn p_frame_wholesale_loss_not_detected_by_purge() {
-    let policy = FecPolicy {
-        max_k: 4,
-        max_m: 2,
-        parity_ratio_pct: 50,
-        min_m: 2,
-    };
+    let policy = FecPolicy::strict_small();
     let mut asm = FrameAssembler::new(1920, 1080, Codec::H264);
     asm.set_timeout(Duration::from_millis(5));
 
