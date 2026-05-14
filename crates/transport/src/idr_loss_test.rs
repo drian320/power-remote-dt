@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use prdt_protocol::{frame::Codec, EncodedFrame};
 
-use crate::assembler::FrameAssembler;
+use crate::assembler::{FeedResult, FrameAssembler};
 use crate::fec::FecCodec;
 use crate::packetize::{packetize, FecPolicy};
 
@@ -213,3 +213,95 @@ fn p_frame_wholesale_loss_not_detected_by_purge() {
 // Suppress dead_code warning for make_p_frame which documents the P-frame
 // struct shape used in the prose above but isn't called directly.
 const _: fn(u64) -> EncodedFrame = make_p_frame;
+
+/// Regression for the P5C-1 + P5B-2a-successor smoke failure
+/// (2026-05-13, N100 GNOME 46): VAAPI produced a 168 KB IDR that the
+/// old static fec_k=64 transport could not packetize. With dynamic-k
+/// FEC, a 168 KB synthetic IDR must round-trip cleanly at 0 % loss.
+///
+/// 168 000 B / 1200 B = 140 source chunks, m = ceil(140×10/100) = 14
+/// parity → 154 total packets, well within MAX_SHARDS=160.
+#[test]
+fn large_idr_round_trip() {
+    let policy = FecPolicy::standard();
+    // 168 KB → k = ceil(168000/1200) = 140, m = ceil(140*10/100) = 14
+    let payload: Vec<u8> = (0..=255u8).cycle().take(168_000).collect();
+    let frame = EncodedFrame {
+        seq: 7,
+        timestamp_host_us: 100,
+        is_keyframe: true,
+        nal_units: Bytes::from(payload.clone()),
+        width: 1920,
+        height: 1080,
+        codec: Codec::H264,
+    };
+    let pkts = packetize(&frame, 1200, &policy).expect("packetize large IDR");
+    assert_eq!(pkts.len(), 140 + 14, "expected 154 packets");
+
+    // Feed all 140 source packets through the assembler. The codec needs
+    // to match the (k, m) that packetize used.
+    let fec = FecCodec::new(140, 14).expect("fec 140/14");
+    let mut asm = FrameAssembler::new(1920, 1080, Codec::H264);
+    let mut completed: Option<EncodedFrame> = None;
+    for p in pkts.iter().take(140).cloned() {
+        match asm.feed(p, &fec).expect("feed") {
+            FeedResult::Complete(f) => {
+                completed = Some(f);
+                break;
+            }
+            FeedResult::Pending | FeedResult::Stale => {}
+        }
+    }
+    let reconstructed = completed.expect("assembler must reconstruct large IDR");
+    assert_eq!(reconstructed.nal_units.len(), payload.len());
+    assert_eq!(&reconstructed.nal_units[..], &payload[..]);
+    assert!(reconstructed.is_keyframe);
+    assert_eq!(reconstructed.seq, 7);
+}
+
+/// Drop 5 deterministic source packets from a 168 KB IDR; FEC must
+/// reconstruct the missing chunks via parity (m = 14 ≥ 5).
+#[test]
+fn large_idr_with_loss_recovery() {
+    let policy = FecPolicy::standard();
+    let payload: Vec<u8> = (0..=255u8).cycle().take(168_000).collect();
+    let frame = EncodedFrame {
+        seq: 9,
+        timestamp_host_us: 200,
+        is_keyframe: true,
+        nal_units: Bytes::from(payload.clone()),
+        width: 1920,
+        height: 1080,
+        codec: Codec::H264,
+    };
+    let pkts = packetize(&frame, 1200, &policy).expect("packetize");
+    assert_eq!(pkts.len(), 154);
+
+    // Drop 5 deterministic source indices + keep all 14 parity.
+    let drop_indices = [3usize, 42, 87, 120, 139];
+    let kept: Vec<_> = pkts
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !drop_indices.contains(i))
+        .map(|(_, p)| p.clone())
+        .collect();
+    assert_eq!(kept.len(), 154 - 5);
+
+    let fec = FecCodec::new(140, 14).expect("fec 140/14");
+    let mut asm = FrameAssembler::new(1920, 1080, Codec::H264);
+    let mut completed: Option<EncodedFrame> = None;
+    for p in kept {
+        match asm.feed(p, &fec).expect("feed") {
+            FeedResult::Complete(f) => {
+                completed = Some(f);
+                break;
+            }
+            FeedResult::Pending | FeedResult::Stale => {}
+        }
+    }
+    let reconstructed = completed.expect("assembler must FEC-recover after 5 source losses");
+    assert_eq!(reconstructed.nal_units.len(), payload.len());
+    assert_eq!(&reconstructed.nal_units[..], &payload[..]);
+    assert!(reconstructed.is_keyframe);
+    assert_eq!(reconstructed.seq, 9);
+}
