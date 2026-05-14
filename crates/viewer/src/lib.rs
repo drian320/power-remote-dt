@@ -1537,14 +1537,16 @@ fn spawn_worker_tasks(
                     Ok(c) => c,
                     Err(e) => {
                         tracing::error!(error = %e, "parse turn URL failed");
-                        return;
+                        eprintln!("viewer: TURN config parse failed: {e}");
+                        std::process::exit(1);
                     }
                 };
                 match CustomUdpTransport::bind_with_relay(bind_addr, cfg, turn_cfg).await {
                     Ok(t) => Arc::new(t),
                     Err(e) => {
                         warn!(?e, "bind_with_relay failed");
-                        return;
+                        eprintln!("viewer: bind_with_relay failed: {e:?}");
+                        std::process::exit(1);
                     }
                 }
             }
@@ -1552,7 +1554,8 @@ fn spawn_worker_tasks(
                 Ok(t) => Arc::new(t),
                 Err(e) => {
                     warn!(?e, "UDP bind failed");
-                    return;
+                    eprintln!("viewer: UDP bind failed: {e:?}");
+                    std::process::exit(1);
                 }
             },
         };
@@ -1560,7 +1563,8 @@ fn spawn_worker_tasks(
             Ok(a) => a,
             Err(e) => {
                 tracing::error!(error = %e, "local_addr failed");
-                return;
+                eprintln!("viewer: local_addr failed: {e}");
+                std::process::exit(1);
             }
         };
 
@@ -1582,21 +1586,24 @@ fn spawn_worker_tasks(
                 Ok(o) => o,
                 Err(e) => {
                     tracing::error!(error = %e, "signaling rendezvous failed");
-                    return;
+                    eprintln!("viewer: signaling rendezvous failed: {e}");
+                    std::process::exit(5);
                 }
             };
             let pk_b64 = match outcome.peer_pubkey_b64.as_deref() {
                 Some(s) => s,
                 None => {
                     tracing::error!("signaling did not return a host pubkey");
-                    return;
+                    eprintln!("viewer: signaling did not return a host pubkey");
+                    std::process::exit(5);
                 }
             };
             let pk = match PubKey::from_base64(pk_b64) {
                 Ok(p) => p,
                 Err(e) => {
                     tracing::error!(error = %e, "bad host pubkey from signaling");
-                    return;
+                    eprintln!("viewer: bad host pubkey from signaling: {e}");
+                    std::process::exit(5);
                 }
             };
 
@@ -1613,11 +1620,13 @@ fn spawn_worker_tasks(
                 }
                 Ok(TofuVerdict::Mismatch { .. }) => {
                     tracing::error!(%host_id, "TOFU pubkey mismatch. Refusing to connect. Use --force-tofu to override.");
-                    return;
+                    eprintln!("viewer: TOFU pubkey mismatch for host {host_id}. Refusing to connect. Use --force-tofu to override.");
+                    std::process::exit(5);
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "known-host-ids error");
-                    return;
+                    eprintln!("viewer: known-host-ids error: {e}");
+                    std::process::exit(5);
                 }
             }
 
@@ -1639,7 +1648,8 @@ fn spawn_worker_tasks(
                 Ok(a) => a,
                 Err(e) => {
                     tracing::error!(error = %e, "probe_and_commit_peer failed");
-                    return;
+                    eprintln!("viewer: probe_and_commit_peer failed: {e}");
+                    std::process::exit(5);
                 }
             };
             tracing::info!(peer = %probed, "probe selected winner");
@@ -1664,7 +1674,8 @@ fn spawn_worker_tasks(
             .await
         {
             warn!(?e, "Noise client handshake failed");
-            return;
+            eprintln!("viewer: Noise client handshake failed: {e:?}");
+            std::process::exit(5);
         }
         tracing::info!("Noise handshake complete");
 
@@ -1730,7 +1741,8 @@ fn spawn_worker_tasks(
             }
             Err(e) => {
                 warn!(?e, "auth handshake failed");
-                return;
+                eprintln!("viewer: auth handshake failed: {e:?}");
+                std::process::exit(5);
             }
         };
         // Store granted_permissions on all platforms (overlay IPC is Windows-only
@@ -1770,21 +1782,24 @@ fn spawn_worker_tasks(
                 Ok(a) => a,
                 Err(e) => {
                     tracing::error!(error = %e, "pick_default_adapter");
-                    return;
+                    eprintln!("viewer: pick_default_adapter failed: {e}");
+                    std::process::exit(6);
                 }
             };
             let dev = match prdt_media_win::D3d11Device::create(&adapter) {
                 Ok(d) => d,
                 Err(e) => {
                     tracing::error!(error = %e, "D3d11Device::create");
-                    return;
+                    eprintln!("viewer: D3d11Device::create failed: {e}");
+                    std::process::exit(6);
                 }
             };
             match build_consumer(&decoder, ack.negotiated_codec, ack.neg_width, ack.neg_height, &dev) {
                 Ok(c) => Arc::new(tokio::sync::Mutex::new(c)),
                 Err(e) => {
                     tracing::error!(error = %e, "build_consumer");
-                    return;
+                    eprintln!("viewer: build_consumer failed: {e}");
+                    std::process::exit(6);
                 }
             }
         };
@@ -1798,7 +1813,8 @@ fn spawn_worker_tasks(
             Ok(c) => Arc::new(tokio::sync::Mutex::new(c)),
             Err(e) => {
                 tracing::error!(error = %e, "build_consumer");
-                return;
+                eprintln!("viewer: build_consumer failed: {e}");
+                std::process::exit(6);
             }
         };
         info!(
