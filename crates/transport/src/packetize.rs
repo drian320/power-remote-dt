@@ -1,4 +1,4 @@
-use prdt_protocol::{wire::video_flags, EncodedFrame, VideoPacket, DEFAULT_CHUNK_PAYLOAD_LEN};
+use prdt_protocol::{wire::video_flags, EncodedFrame, VideoPacket};
 
 use crate::error::TransportError;
 use crate::fec::FecCodec;
@@ -83,38 +83,32 @@ impl Default for FecPolicy {
     }
 }
 
-/// Split an EncodedFrame into k source chunks, then apply FEC to produce
-/// m parity chunks. Returns exactly k + m VideoPackets.
+/// Dynamic-k packetization. Replaces the static `&FecCodec`
+/// argument with a `&FecPolicy` and constructs the codec per call.
 ///
-/// All chunks use the SAME `chunk_payload` byte length (padded with zeros
-/// on the last source chunk). The original frame byte length is preserved
-/// indirectly through `payload_bytes` which records the true valid bytes
-/// per chunk.
+/// The receiver-side `FrameAssembler` reads `source_chunks` and
+/// `parity_chunks` from each packet header, so dynamic k/m is fully
+/// wire-compatible.
+///
+/// Returns `FrameTooLarge` if the frame's chunk count exceeds the
+/// policy's `max_k` or the global `MAX_SOURCE_CHUNKS` ceiling.
 pub fn packetize(
     frame: &EncodedFrame,
-    fec: &FecCodec,
     chunk_payload_len: usize,
+    policy: &FecPolicy,
 ) -> Result<Vec<VideoPacket>, TransportError> {
-    let k = fec.k();
-    let m = fec.m();
-
-    // How many source chunks are needed?
     let bytes = frame.nal_units.len();
-    let chunks_needed = bytes.div_ceil(chunk_payload_len);
-    if chunks_needed > k {
-        return Err(TransportError::FrameTooLarge {
+    let (k, m) = policy.compute_k_m(bytes, chunk_payload_len).ok_or(
+        TransportError::FrameTooLarge {
             bytes,
-            max_bytes: k * chunk_payload_len,
-        });
-    }
-    if chunks_needed > MAX_SOURCE_CHUNKS {
-        return Err(TransportError::FrameTooLarge {
-            bytes,
-            max_bytes: MAX_SOURCE_CHUNKS * chunk_payload_len,
-        });
-    }
+            // Report the *effective* ceiling: whichever cap fired.
+            max_bytes: policy.max_k.min(MAX_SOURCE_CHUNKS) * chunk_payload_len,
+        },
+    )?;
 
-    // Build k source shards, each of fixed length chunk_payload_len.
+    let fec = FecCodec::new(k, m)?;
+
+    // Build k source shards.
     let mut source: Vec<Vec<u8>> = Vec::with_capacity(k);
     for i in 0..k {
         let start = i * chunk_payload_len;
@@ -129,7 +123,6 @@ pub fn packetize(
     // Compute m parity shards.
     let parity = fec.encode_parity(&source)?;
 
-    // Emit k + m VideoPackets.
     let kf_flag = if frame.is_keyframe {
         video_flags::IS_KEYFRAME
     } else {
@@ -163,9 +156,6 @@ pub fn packetize(
             chunk_payload: shard.clone(),
         });
     }
-    // Silence unused-const warning if DEFAULT_CHUNK_PAYLOAD_LEN is only referenced
-    // via the protocol re-export.
-    let _ = DEFAULT_CHUNK_PAYLOAD_LEN;
     Ok(out)
 }
 
@@ -189,12 +179,20 @@ mod tests {
 
     #[test]
     fn packetize_small_frame() {
-        let fec = FecCodec::new(4, 2).unwrap();
+        let policy = FecPolicy {
+            max_k: 4,
+            max_m: 2,
+            parity_ratio_pct: 50,  // 4*50% = 2 → m=2 (matches old k=4, m=2)
+            min_m: 2,
+        };
         let payload = vec![0xAB; 10];
-        let pkts = packetize(&make_frame(&payload), &fec, 100).unwrap();
-        assert_eq!(pkts.len(), 6); // k + m
-        assert_eq!(pkts[0].chunk_idx, 0);
-        assert_eq!(pkts[0].source_chunks, 4);
+        let pkts = packetize(&make_frame(&payload), 100, &policy).unwrap();
+        // 10 bytes → 1 chunk at 100B → k=1, m=2 (min_m floor)
+        // NOTE: behavior INTENTIONALLY differs from the old test which
+        // forced k=4 by using FecCodec::new(4, 2). The new contract is
+        // "k = ceil(bytes / chunk_payload_len), clamped".
+        assert_eq!(pkts.len(), 1 + 2);
+        assert_eq!(pkts[0].source_chunks, 1);
         assert_eq!(pkts[0].parity_chunks, 2);
         assert!(pkts[0].is_keyframe());
         assert!(!pkts[0].is_parity());
@@ -202,17 +200,23 @@ mod tests {
         assert_eq!(pkts[0].chunk_payload[..10], [0xAB; 10]);
         // rest of the shard is zero-padded
         assert_eq!(pkts[0].chunk_payload[10..], [0u8; 90]);
-        // parity flag
-        assert!(pkts[4].is_parity());
-        assert!(pkts[5].is_parity());
+        // parity packets
+        assert!(pkts[1].is_parity());
+        assert!(pkts[2].is_parity());
     }
 
     #[test]
     fn packetize_frame_spanning_multiple_chunks() {
-        let fec = FecCodec::new(4, 2).unwrap();
+        let policy = FecPolicy {
+            max_k: 8,
+            max_m: 2,
+            parity_ratio_pct: 25,  // k=4 → m=1, but min_m=2 → m=2 (matches old m=2)
+            min_m: 2,
+        };
         let payload: Vec<u8> = (0..=255).cycle().take(350).collect();
-        let pkts = packetize(&make_frame(&payload), &fec, 100).unwrap();
-        assert_eq!(pkts.len(), 6);
+        let pkts = packetize(&make_frame(&payload), 100, &policy).unwrap();
+        // 350 / 100 = 4 chunks → k=4, m=2
+        assert_eq!(pkts.len(), 4 + 2);
         // chunk 0..=2 are full, chunk 3 has 50 valid bytes
         assert_eq!(pkts[0].payload_bytes, 100);
         assert_eq!(pkts[1].payload_bytes, 100);
@@ -222,9 +226,14 @@ mod tests {
 
     #[test]
     fn packetize_rejects_oversize() {
-        let fec = FecCodec::new(2, 1).unwrap();
-        let huge = vec![0u8; 500]; // needs 5 chunks at 100B but k=2
-        let err = packetize(&make_frame(&huge), &fec, 100).unwrap_err();
+        let policy = FecPolicy {
+            max_k: 2,
+            max_m: 1,
+            parity_ratio_pct: 50,
+            min_m: 1,
+        };
+        let huge = vec![0u8; 500]; // needs 5 chunks at 100B but max_k=2
+        let err = packetize(&make_frame(&huge), 100, &policy).unwrap_err();
         assert!(matches!(err, TransportError::FrameTooLarge { .. }));
     }
 
@@ -291,5 +300,46 @@ mod tests {
             min_m: 5, // intentionally > max_m
         };
         let _ = p.compute_k_m(1000, 1200);
+    }
+
+    #[test]
+    fn packetize_new_signature_tiny_frame() {
+        let policy = FecPolicy::standard();
+        let payload = vec![0xAB; 10];
+        let pkts = packetize(&make_frame(&payload), 1200, &policy).unwrap();
+        // tiny frame → k=1, m=1, total 2 packets
+        assert_eq!(pkts.len(), 2);
+        assert_eq!(pkts[0].source_chunks, 1);
+        assert_eq!(pkts[0].parity_chunks, 1);
+        assert!(pkts[0].is_keyframe());
+        assert!(!pkts[0].is_parity());
+        assert_eq!(pkts[0].payload_bytes, 10);
+        assert!(pkts[1].is_parity());
+    }
+
+    #[test]
+    fn packetize_new_signature_idr_frame() {
+        let policy = FecPolicy::standard();
+        // 168 KB frame → k=140, m=14
+        let payload = vec![0x42; 168_000];
+        let pkts = packetize(&make_frame(&payload), 1200, &policy).unwrap();
+        assert_eq!(pkts.len(), 140 + 14);
+        for p in pkts.iter().take(140) {
+            assert_eq!(p.source_chunks, 140);
+            assert_eq!(p.parity_chunks, 14);
+            assert!(!p.is_parity());
+        }
+        for p in pkts.iter().skip(140) {
+            assert!(p.is_parity());
+        }
+    }
+
+    #[test]
+    fn packetize_new_signature_oversize_rejects() {
+        let policy = FecPolicy::standard();
+        // 250000 B → MAX_SOURCE_CHUNKS=200 violated
+        let payload = vec![0u8; 250_000];
+        let err = packetize(&make_frame(&payload), 1200, &policy).unwrap_err();
+        assert!(matches!(err, TransportError::FrameTooLarge { .. }));
     }
 }
