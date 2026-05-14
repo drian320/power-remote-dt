@@ -737,3 +737,75 @@ negotiation before content could even be evaluated.
 
 - **DMABUF zero-copy**: still uses BGRA mmap + CPU memcpy. Zero-copy
   DMABUF lands together with `FrameInput::Dmabuf` in P5C-2.
+
+
+## P5C-transport-mtu-fix — Dynamic-k FEC for HW-encoded NAL (GNOME 46 verified)
+
+### Section M — N100 transport MTU end-to-end smoke
+
+**Pre-conditions:**
+- Linux host running a GNOME 46 Wayland session (Ubuntu 24.04 verified
+  on N100 Intel Alder Lake-N iGPU).
+- Intel iGPU (Tigerlake+) or AMD APU (Renoir+) for VAAPI.
+- `prdt host` + `prdt connect` from the
+  `phase-transport-mtu-hw-nal-fix` branch artifact.
+- `~/.config/prdt/host-peers.toml` pre-populated with viewer pubkey.
+
+**Steps:**
+
+1. Verify Wayland: `echo $XDG_SESSION_TYPE` → `wayland`.
+
+2. Start host:
+   ```bash
+   ./prdt host --encoder vaapi --bitrate-mbps 5 --silent-allow 2>&1 | tee p5c-mtu.log
+   ```
+
+3. Click "Share" on the GNOME portal consent dialog.
+
+4. From a second machine, connect viewer:
+   ```bash
+   ./prdt connect --host <ip>:9000 --decoder openh264 --codec h264 \
+       --host-pubkey <pubkey-from-host-log>
+   ```
+
+5. **Success criteria** (the load-bearing assertions):
+   - viewer window shows the N100's live desktop content (NOT black)
+   - viewer log: `frames_received=N textures_decoded=M` with **M/N ≥ 90 %**
+     (was 9 % before this fix on the P5B-2a-successor branch)
+   - host log: zero or only sporadic `send_video error; continuing`
+   - host CPU at 1080p60 5 Mbps: < 15 % (record actual)
+
+6. After ~30 seconds of streaming, capture:
+   ```bash
+   pidstat -p $(pgrep -f "prdt host") 1 30
+   ```
+   Record the average %CPU.
+
+7. Tear down: viewer Ctrl+C → host watchdog kills session within ~5 s.
+   Reconnect to confirm clean re-session.
+
+### Known issues / follow-ups (P5C-transport-mtu-fix)
+
+- **VAEncMiscParameterMaxFrameSize on VAAPI side**: keeps NAL sizes
+  predictable even on weird content. The transport now handles up to
+  240 KB; the encoder *could* still output a 250 KB frame on
+  pathological input. Deferred follow-up.
+
+- **Adaptive parity ratio**: 10 % static parity is fine for LAN. WiFi
+  / WAN with 5–10 % loss may benefit from controller-driven m. Defer
+  until smoke evidence shows it matters.
+
+- **Per-receiver memory budget**: with k up to 200, the assembler
+  holds ~240 KB per in-flight frame. With ~10 frames in-flight that's
+  2.4 MB. Acceptable; the existing purge_assembler path (L3) already
+  drops stale entries on timeout.
+
+- **Multi-compositor verification**: KDE 6 / Sway / Hyprland not yet
+  exercised at large-NAL sizes. Defer to P5C-3 smoke matrix.
+
+- **Per-frame `FecCodec::new` cost**: with dynamic-k, the Reed-Solomon
+  matrix is constructed per frame on both sender (in `packetize()`)
+  and receiver (in `dispatch_packet`). For 1080p60 at k≈140-150, this
+  is a ~150×165 Vandermonde matrix invert per frame. Observed
+  acceptable in N100 smoke; can cache `(k,m) → FecCodec` if profiling
+  shows hot.

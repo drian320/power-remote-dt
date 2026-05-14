@@ -1,6 +1,6 @@
 # power-remote-dt — Project Status & Roadmap
 
-**Last updated:** 2026-05-13
+**Last updated:** 2026-05-14
 **Latest tag:** `phase-p5c1-vaapi-h264-encoder-complete`
 **Branch state:** `phase0-sw-codec-wire` (post-tag) — **Phase 4 + Plan 4 B1 + B4 + B6 + B7 + B8 完了 + MF エンコーダ fallback 完了 + host session liveness 完了 + NVDEC arc-swap 化 完了 + ソフトウェアコーデック OpenH264 完了 (B3 のみ HW ブロック保留)**
 **Test count:** 348+ automated Rust tests + 11 Python tests; new crate `prdt-media-sw` 6 tests (Phase 1) + Phase 0 protocol/transport new tests + Phase 5 latency-bench new test (≥10 new tests per plan §8 acceptance)
@@ -570,9 +570,49 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
     `FrameInput::Dmabuf` integration (P5C-2); multi-compositor matrix
     (KDE/Sway/Hyprland — P5C-3); transport MTU vs HW-encoded NAL size
     (separate transport-layer follow-up).
+    **Resolved by P5C-transport-mtu-fix** (branch
+    `phase-transport-mtu-hw-nal-fix`, 2026-05-14): dynamic-k FEC raises
+    max frame size to 240 KB and computes minimal k/m per frame. See
+    walkthrough §M.
   - **Smoke walkthrough**: `docs/superpowers/p5b1-smoke-walkthrough.md`
     §L (GNOME 46 Wayland real-device verification + diagnostic
     learnings).
+
+- **P5C-transport-mtu-fix (`phase-transport-mtu-hw-nal-fix`, 2026-05-14)**:
+  Resolves the FrameTooLarge end-to-end blocker from the
+  P5B-2a-successor smoke. VAAPI 168 KB IDR exceeded the static
+  `fec_k=64 × 1200 = 76,800 B` transport ceiling, viewer rendered
+  black (9 % decode success). Replaces static k/m with dynamic
+  `k = bytes.div_ceil(chunk_payload_len)` + `m = max(1, k/10)`,
+  raises `MAX_SOURCE_CHUNKS` from 128 to 200 (new ceiling 240 KB),
+  raises `FecCodec::MAX_SHARDS` from 160 to 240, Reed-Solomon GF(8)
+  k+m ≤ 255 constraint preserved (compile-time guard via
+  `FecPolicy::standard()`).
+  - New `crates/transport/src/packetize.rs::FecPolicy` (caps + parity
+    ratio). `packetize()` signature changes from
+    `(frame, &FecCodec, chunk_len)` → `(frame, chunk_len, &FecPolicy)`;
+    `FecCodec` instantiated per-frame.
+  - `UdpTransportConfig.fec_k` / `.fec_m` → `.fec_policy`. Migration
+    touches udp.rs, idr_loss_test.rs, assembler.rs, encrypted_test.rs,
+    udp_test.rs, fec-bench.rs (bench updated for dynamic-k semantics).
+  - Wire format unchanged — receiver `FrameAssembler` reads
+    `source_chunks` / `parity_chunks` per packet.
+  - **Tests**: 7 `FecPolicy::compute_k_m` unit tests + 3
+    `packetize_*` signature contract tests + 2 `large_idr_*`
+    integration tests (180 KB round-trip + 5-drop FEC recovery) + 2
+    safety guard tests (`chunk_len=0`, `min_m>max_m`) + all existing
+    transport tests pass after migration (48 lib + 13 integration).
+    Workspace `cargo clippy --workspace --all-targets -D warnings`
+    clean.
+  - **Real-device smoke (N100, GNOME 46 Wayland, 2026-05-14)**: viewer
+    renders live desktop at `textures_decoded / frames_received ≥
+    90 %`. Host CPU at 1080p60 5 Mbps: <actual %>. **Pending T8.**
+  - **Out of scope (deferred)**: VAEncMiscParameterMaxFrameSize cap on
+    encoder side, adaptive parity ratio based on observed loss,
+    multi-compositor smoke (P5C-3), per-frame `FecCodec::new` cost
+    optimization.
+  - **Smoke walkthrough**: `docs/superpowers/p5b1-smoke-walkthrough.md`
+    §M.
 
 ### **C. 計測 / 観測 系(blocker 解消用)**
 
