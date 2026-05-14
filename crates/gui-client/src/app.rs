@@ -76,7 +76,10 @@ impl ClientApp {
 
         let (peer_codec, peer_decoder) = {
             let cfg_guard = cfg.lock().unwrap();
-            (cfg_guard.viewer.codec.clone(), cfg_guard.viewer.decoder.clone())
+            (
+                cfg_guard.viewer.codec.clone(),
+                cfg_guard.viewer.decoder.clone(),
+            )
         };
         let mut app = Self {
             cfg,
@@ -287,7 +290,10 @@ impl ClientApp {
             let cfg_snapshot = cfg_guard.clone();
             drop(cfg_guard);
             if let Err(e) = cfg_snapshot.save(&path) {
-                tracing::warn!(?e, "config save failed (codec/decoder selection not persisted)");
+                tracing::warn!(
+                    ?e,
+                    "config save failed (codec/decoder selection not persisted)"
+                );
             }
         }
         match cmd.spawn() {
