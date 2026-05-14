@@ -2,7 +2,9 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use prdt_protocol::{control::ControlMessage, frame::Codec, EncodedFrame, InputEvent, MouseButton};
-use prdt_transport::{CustomUdpTransport, FecPolicy, ReceivedMessage, Transport, UdpTransportConfig};
+use prdt_transport::{
+    CustomUdpTransport, FecPolicy, ReceivedMessage, Transport, UdpTransportConfig,
+};
 
 #[tokio::test]
 async fn udp_round_trip_control() {

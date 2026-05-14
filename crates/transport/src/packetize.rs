@@ -64,7 +64,11 @@ impl FecPolicy {
     /// Compute `(k, m)` for a frame of `nal_bytes` bytes split into
     /// `chunk_payload_len`-byte chunks. Returns `None` if the frame is
     /// too large (exceeds `MAX_SOURCE_CHUNKS` or `max_k`).
-    pub fn compute_k_m(&self, nal_bytes: usize, chunk_payload_len: usize) -> Option<(usize, usize)> {
+    pub fn compute_k_m(
+        &self,
+        nal_bytes: usize,
+        chunk_payload_len: usize,
+    ) -> Option<(usize, usize)> {
         if chunk_payload_len == 0 {
             return None;
         }
@@ -81,8 +85,7 @@ impl FecPolicy {
         if raw_k > self.max_k {
             return None;
         }
-        let raw_m =
-            (raw_k.saturating_mul(self.parity_ratio_pct as usize)).div_ceil(100);
+        let raw_m = (raw_k.saturating_mul(self.parity_ratio_pct as usize)).div_ceil(100);
         let m = raw_m.max(self.min_m).min(self.max_m);
         Some((raw_k, m))
     }
@@ -109,13 +112,14 @@ pub fn packetize(
     policy: &FecPolicy,
 ) -> Result<Vec<VideoPacket>, TransportError> {
     let bytes = frame.nal_units.len();
-    let (k, m) = policy.compute_k_m(bytes, chunk_payload_len).ok_or(
-        TransportError::FrameTooLarge {
-            bytes,
-            // Report the *effective* ceiling: whichever cap fired.
-            max_bytes: policy.max_k.min(MAX_SOURCE_CHUNKS) * chunk_payload_len,
-        },
-    )?;
+    let (k, m) =
+        policy
+            .compute_k_m(bytes, chunk_payload_len)
+            .ok_or(TransportError::FrameTooLarge {
+                bytes,
+                // Report the *effective* ceiling: whichever cap fired.
+                max_bytes: policy.max_k.min(MAX_SOURCE_CHUNKS) * chunk_payload_len,
+            })?;
 
     let fec = FecCodec::new(k, m)?;
 
@@ -193,7 +197,7 @@ mod tests {
         let policy = FecPolicy {
             max_k: 4,
             max_m: 2,
-            parity_ratio_pct: 50,  // 4*50% = 2 → m=2 (matches old k=4, m=2)
+            parity_ratio_pct: 50, // 4*50% = 2 → m=2 (matches old k=4, m=2)
             min_m: 2,
         };
         let payload = vec![0xAB; 10];
@@ -221,7 +225,7 @@ mod tests {
         let policy = FecPolicy {
             max_k: 8,
             max_m: 2,
-            parity_ratio_pct: 25,  // k=4 → m=1, but min_m=2 → m=2 (matches old m=2)
+            parity_ratio_pct: 25, // k=4 → m=1, but min_m=2 → m=2 (matches old m=2)
             min_m: 2,
         };
         let payload: Vec<u8> = (0..=255).cycle().take(350).collect();
