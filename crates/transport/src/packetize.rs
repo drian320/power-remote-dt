@@ -11,6 +11,16 @@ use crate::fec::FecCodec;
 /// 20) the realistic worst case is k = 200, m = 20 → 220 chunks total.
 pub const MAX_SOURCE_CHUNKS: usize = 200;
 
+// Compile-time consistency: FecPolicy::standard()'s worst case (k=max_k +
+// m=max_m) must fit within FecCodec::MAX_SHARDS, otherwise packetize()
+// would fail at FecCodec construction for frames that pass compute_k_m().
+// FecPolicy::standard(): max_k=200, max_m=20
+const _: () = {
+    if 200 + 20 > crate::fec::MAX_SHARDS {
+        panic!("FecPolicy::standard() max_k + max_m exceeds FecCodec::MAX_SHARDS");
+    }
+};
+
 /// Per-frame FEC sizing policy. Replaces the old static `fec_k` / `fec_m`
 /// pair on `UdpTransportConfig`. `packetize()` computes the actual `k`
 /// from the frame size and clamps to `max_k`; `m` is derived from `k`

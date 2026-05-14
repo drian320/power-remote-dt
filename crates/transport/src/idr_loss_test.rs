@@ -217,15 +217,16 @@ const _: fn(u64) -> EncodedFrame = make_p_frame;
 /// Regression for the P5C-1 + P5B-2a-successor smoke failure
 /// (2026-05-13, N100 GNOME 46): VAAPI produced a 168 KB IDR that the
 /// old static fec_k=64 transport could not packetize. With dynamic-k
-/// FEC, a 168 KB synthetic IDR must round-trip cleanly at 0 % loss.
+/// FEC and MAX_SHARDS=240, a 180 KB synthetic IDR must round-trip
+/// cleanly at 0 % loss.
 ///
-/// 168 000 B / 1200 B = 140 source chunks, m = ceil(140×10/100) = 14
-/// parity → 154 total packets, well within MAX_SHARDS=160.
+/// 180 000 B / 1200 B = 150 source chunks, m = ceil(150×10/100) = 15
+/// parity → 165 total packets, well within MAX_SHARDS=240.
 #[test]
 fn large_idr_round_trip() {
     let policy = FecPolicy::standard();
-    // 168 KB → k = ceil(168000/1200) = 140, m = ceil(140*10/100) = 14
-    let payload: Vec<u8> = (0..=255u8).cycle().take(168_000).collect();
+    // 180 KB → k = ceil(180000/1200) = 150, m = ceil(150*10/100) = 15
+    let payload: Vec<u8> = (0..=255u8).cycle().take(180_000).collect();
     let frame = EncodedFrame {
         seq: 7,
         timestamp_host_us: 100,
@@ -236,14 +237,14 @@ fn large_idr_round_trip() {
         codec: Codec::H264,
     };
     let pkts = packetize(&frame, 1200, &policy).expect("packetize large IDR");
-    assert_eq!(pkts.len(), 140 + 14, "expected 154 packets");
+    assert_eq!(pkts.len(), 150 + 15, "expected 165 packets");
 
-    // Feed all 140 source packets through the assembler. The codec needs
+    // Feed all 150 source packets through the assembler. The codec needs
     // to match the (k, m) that packetize used.
-    let fec = FecCodec::new(140, 14).expect("fec 140/14");
+    let fec = FecCodec::new(150, 15).expect("fec 150/15");
     let mut asm = FrameAssembler::new(1920, 1080, Codec::H264);
     let mut completed: Option<EncodedFrame> = None;
-    for p in pkts.iter().take(140).cloned() {
+    for p in pkts.iter().take(150).cloned() {
         match asm.feed(p, &fec).expect("feed") {
             FeedResult::Complete(f) => {
                 completed = Some(f);
@@ -259,12 +260,12 @@ fn large_idr_round_trip() {
     assert_eq!(reconstructed.seq, 7);
 }
 
-/// Drop 5 deterministic source packets from a 168 KB IDR; FEC must
-/// reconstruct the missing chunks via parity (m = 14 ≥ 5).
+/// Drop 5 deterministic source packets from a 180 KB IDR; FEC must
+/// reconstruct the missing chunks via parity (m = 15 ≥ 5).
 #[test]
 fn large_idr_with_loss_recovery() {
     let policy = FecPolicy::standard();
-    let payload: Vec<u8> = (0..=255u8).cycle().take(168_000).collect();
+    let payload: Vec<u8> = (0..=255u8).cycle().take(180_000).collect();
     let frame = EncodedFrame {
         seq: 9,
         timestamp_host_us: 200,
@@ -275,19 +276,19 @@ fn large_idr_with_loss_recovery() {
         codec: Codec::H264,
     };
     let pkts = packetize(&frame, 1200, &policy).expect("packetize");
-    assert_eq!(pkts.len(), 154);
+    assert_eq!(pkts.len(), 165);
 
-    // Drop 5 deterministic source indices + keep all 14 parity.
-    let drop_indices = [3usize, 42, 87, 120, 139];
+    // Drop 5 deterministic source indices + keep all 15 parity.
+    let drop_indices = [3usize, 42, 87, 120, 149];
     let kept: Vec<_> = pkts
         .iter()
         .enumerate()
         .filter(|(i, _)| !drop_indices.contains(i))
         .map(|(_, p)| p.clone())
         .collect();
-    assert_eq!(kept.len(), 154 - 5);
+    assert_eq!(kept.len(), 165 - 5);
 
-    let fec = FecCodec::new(140, 14).expect("fec 140/14");
+    let fec = FecCodec::new(150, 15).expect("fec 150/15");
     let mut asm = FrameAssembler::new(1920, 1080, Codec::H264);
     let mut completed: Option<EncodedFrame> = None;
     for p in kept {
