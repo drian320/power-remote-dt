@@ -14,9 +14,10 @@ pub const MAX_SOURCE_CHUNKS: usize = 200;
 // Compile-time consistency: FecPolicy::standard()'s worst case (k=max_k +
 // m=max_m) must fit within FecCodec::MAX_SHARDS, otherwise packetize()
 // would fail at FecCodec construction for frames that pass compute_k_m().
-// FecPolicy::standard(): max_k=200, max_m=20
+// Reed-Solomon GF(2^8) hard upper bound is 255 total codewords.
 const _: () = {
-    if 200 + 20 > crate::fec::MAX_SHARDS {
+    let p = FecPolicy::standard();
+    if p.max_k + p.max_m > crate::fec::MAX_SHARDS {
         panic!("FecPolicy::standard() max_k + max_m exceeds FecCodec::MAX_SHARDS");
     }
 };
