@@ -99,13 +99,19 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           body: |
-            Linux x86_64 build of `prdt` (the unified host+viewer client) for tag `${{ github.event.inputs.ref || github.ref_name }}`.
+            `prdt` (the unified host+viewer client) for tag `${{ github.event.inputs.ref || github.ref_name }}`.
 
             **Install on a Linux box:**
             ```bash
             curl -L -o prdt https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/prdt-linux-x86_64
             chmod +x prdt
             ./prdt --help
+            ```
+
+            **Install on a Windows box (PowerShell):**
+            ```powershell
+            curl.exe -L -o prdt.exe https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/prdt-windows-x86_64.exe
+            .\prdt.exe --help
             ```
 
             **Run as host** (capture + serve):
@@ -120,4 +126,69 @@ jobs:
                            --decoder openh264 --codec h264
             ```
 
-            Built on `ubuntu-24.04`. Runtime deps: `libasound2t64` (or `libasound2`), `libstdc++6`, `libwayland-client0`, `libpipewire-0.3-0` (any modern desktop Linux running PipeWire).
+            Linux build: `ubuntu-24.04`. Runtime deps: `libasound2t64` (or `libasound2`), `libstdc++6`, `libwayland-client0`, `libpipewire-0.3-0` (any modern desktop Linux running PipeWire).
+            Windows build: `windows-latest` (MSVC). Runtime deps: Windows 10 1809+ with Media Foundation H.264/H.265 codecs (default on most installs).
+
+  release-windows:
+    name: Build Windows x86_64 release binary
+    # windows-latest = windows-2022 at time of writing. Mirrors the
+    # CI workflow (.github/workflows/ci.yml) which uses the same
+    # runner for cargo build --workspace, so we know the toolchain
+    # + system libs (MSVC, Win SDK, Media Foundation headers) are
+    # present.
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build prdt (unified host+viewer client, release profile)
+        run: |
+          cargo build --release -p prdt-client --target x86_64-pc-windows-msvc
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          cp target/x86_64-pc-windows-msvc/release/prdt.exe artifacts/prdt-windows-x86_64.exe
+          (cd artifacts && sha256sum prdt-windows-x86_64.exe > prdt-windows-x86_64.exe.sha256)
+          ls -la artifacts/
+
+      - name: Upload workflow artifact (always)
+        uses: actions/upload-artifact@v4
+        with:
+          name: prdt-windows-x86_64
+          path: artifacts/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Attach Windows binary to GitHub Release
+        # Same gate as the Linux job. The action handles concurrent
+        # uploads to the same release by merging files — the Linux
+        # job's body wins because softprops/action-gh-release@v2
+        # preserves existing body on subsequent calls when no `body`
+        # is set here.
+        if: |
+          startsWith(github.ref, 'refs/tags/') ||
+          (github.event_name == 'workflow_dispatch' && (
+            startsWith(github.event.inputs.ref, 'phase-') ||
+            startsWith(github.event.inputs.ref, 'v')
+          ))
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.ref || github.ref_name }}
+          files: |
+            artifacts/prdt-windows-x86_64.exe
+            artifacts/prdt-windows-x86_64.exe.sha256
+          fail_on_unmatched_files: true
