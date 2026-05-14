@@ -54,6 +54,15 @@ impl FecPolicy {
     /// `chunk_payload_len`-byte chunks. Returns `None` if the frame is
     /// too large (exceeds `MAX_SOURCE_CHUNKS` or `max_k`).
     pub fn compute_k_m(&self, nal_bytes: usize, chunk_payload_len: usize) -> Option<(usize, usize)> {
+        if chunk_payload_len == 0 {
+            return None;
+        }
+        debug_assert!(
+            self.min_m <= self.max_m,
+            "FecPolicy: min_m ({}) must be <= max_m ({})",
+            self.min_m,
+            self.max_m,
+        );
         let raw_k = nal_bytes.div_ceil(chunk_payload_len).max(1);
         if raw_k > MAX_SOURCE_CHUNKS {
             return None;
@@ -263,5 +272,24 @@ mod tests {
         let p = FecPolicy::strict_small();
         assert_eq!(p.compute_k_m(400, 1200), Some((1, 2)));
         assert!(p.compute_k_m(5000, 1200).is_none());
+    }
+
+    #[test]
+    fn fec_policy_compute_k_m_zero_chunk_len_returns_none() {
+        let p = FecPolicy::standard();
+        assert!(p.compute_k_m(1000, 0).is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "min_m")]
+    #[cfg(debug_assertions)]
+    fn fec_policy_compute_k_m_misconfigured_min_max_panics_in_debug() {
+        let p = FecPolicy {
+            max_k: 100,
+            max_m: 2,
+            parity_ratio_pct: 10,
+            min_m: 5, // intentionally > max_m
+        };
+        let _ = p.compute_k_m(1000, 1200);
     }
 }
