@@ -639,3 +639,101 @@ behaviour); no `CursorUpdate` messages on the wire.
   spec, will land alongside `FrameInput::Dmabuf` integration in P5C-2.
 
 - **BGRA buffer clone**: each encode submission copies the BGRA scratch into the per-call command sent to the dedicated encoder thread. P5C-2 (DMABUF zero-copy) removes this copy together with the producer-side `bgra_to_i420` step.
+
+## P5B-2a-successor — Wayland portal libspa POD rewrite (GNOME 46 verified)
+
+### Section L — GNOME 46 Wayland real-device smoke
+
+**Pre-conditions:**
+- Linux host running a GNOME 46 Wayland session (Ubuntu 24.04 verified
+  on N100 Intel Alder Lake-N iGPU 2026-05-13).
+- Intel iGPU (Tigerlake+) or AMD APU (Renoir+) for VAAPI.
+- User in `render` group so `/dev/dri/renderD128` is RW-accessible.
+- `prdt host` + `prdt connect` binaries from the
+  `phase-p5b2a-successor-libspa-pod-rewrite` branch.
+- `~/.config/prdt/host-peers.toml` pre-populated with viewer pubkey
+  (P5C-1 TOFU workaround still applies).
+
+**Steps:**
+
+1. Verify Wayland: `echo $XDG_SESSION_TYPE` → `wayland`.
+
+2. Start host:
+   ```bash
+   ./prdt host --encoder vaapi --bitrate-mbps 5 --silent-allow 2>&1 | tee p5b2as.log
+   ```
+
+3. Click "Share" on the GNOME portal consent dialog.
+
+4. Verify the key log line transitions:
+   - `portal session: started has_token=true`
+   - `encoder ready backend="linux-vaapi-h264"`
+   - `pipewire stream state changed old=Unconnected new=Connecting`
+   - `pipewire stream state changed old=Connecting new=Paused`
+   - `pipewire negotiated format w=1920 h=1080 fmt=BGRx modifier=Some(0)`
+     ← the negotiated Format POD was successfully parsed
+   - `pipewire stream state changed old=Paused new=Streaming`
+     ← the goal state; frame ingestion is unblocked
+   - `first frame ready elapsed_ms=<NN>` (typically < 200 ms)
+
+5. From a second machine, connect viewer:
+   ```bash
+   ./prdt connect --host <ip>:9000 --decoder openh264 --codec h264 \
+       --host-pubkey <pubkey-from-host-log>
+   ```
+
+6. Note: end-to-end viewer rendering currently fails due to a SEPARATE
+   transport-layer issue (`FrameTooLarge { bytes: ~170000, max_bytes:
+   76800 }`) — VAAPI's H264 NAL units exceed the UDP transport's MTU
+   that was sized for OpenH264 SW frames. This is OUT OF SCOPE for
+   P5B-2a-successor (whose deliverable is Wayland frame ingestion).
+   Tracked as the next follow-up: "transport MTU vs HW-encoded NAL
+   size on Linux".
+
+### Diagnostic learnings (the 4 fixes that landed on the way)
+
+Real-device smoke surfaced four mismatches between our outbound
+`EnumFormat` and what GNOME 46 mutter actually wants. journalctl on
+the gnome-shell side was the load-bearing diagnostic — pipewire dumps
+both producer and consumer pods when a `pw_link` negotiation fails.
+
+| Symptom | Root cause | Fix |
+|---|---|---|
+| `pipewire stream: error invalid message received 0 for 2: Invalid argument` | pipewire-rs 0.9.2 `Object`/`Choice` serializer produces non-conforming wire bytes | Rewrite `format::build()` on a `libspa-sys` raw-FFI `PodBuilder` (T1–T6) |
+| `Paused → Error("no more input formats")` (first attempt with libspa-FFI) | mutter on Intel iHD holds frames as GPU-side DMABUF; missing `VideoModifier` property | Add `Choice<Long>` over `[LINEAR (0), INVALID]` with `MANDATORY \| DONT_FIXATE` |
+| `Paused → Error("no more input formats")` (after adding modifier) | `DONT_FIXATE` on `VideoSize` / `VideoFramerate` confuses mutter (which has fixed display size + rate); also `VideoFramerate` should be SCALAR with `VideoMaxFramerate` as the Choice Range | OBS pattern: flags=0 on size, scalar `framerate=0/1` + separate `maxFramerate` Choice Range |
+| `Paused → Unconnected` with `format::parse failed: MediaType is not Video (got id=None)` | mutter sends the negotiated Format POD with EVERY property wrapped in a `Choice` (SPA_CHOICE_None convention: a degenerate 1-alternative Choice indicates the picked value); our parser only matched scalars | Rewrite `parse()` extractors to handle both scalar and Choice-wrapped values |
+
+The wire-format problem in pipewire-rs's high-level `Object`
+serializer (the original P5B-2a blocker) was correctly identified;
+the libspa-sys FFI rewrite is the right fix. The remaining 3 issues
+were CONTENT mismatches against mutter's expectations that the
+P5B-2a-era code never surfaced because the wire bug stopped
+negotiation before content could even be evaluated.
+
+### Known issues / follow-ups (P5B-2a-successor)
+
+- **Transport MTU vs HW-encoded NAL**: VAAPI produces H264 NAL units of
+  ~165 KB at 1080p, exceeding the UDP transport's `max_bytes=76800`
+  threshold. Host logs `send_video error; continuing
+  e=FrameTooLarge`, viewer logs OpenH264 `Native:4` decode errors on
+  partial frames. The Wayland → encoder → wire chain is otherwise
+  fully working (`frames_received=512` confirms transport delivers
+  partial frames; viewer requests IDR loop). Tracked as separate
+  follow-up: increase MTU / improve fragmentation for HW-encoded
+  paths, or constrain VAAPI `MaxBitrate` to keep NAL sizes manageable.
+
+- **Multi-compositor verification deferred**: KDE 6 (kwin), Sway
+  (xdg-desktop-portal-wlr), and Hyprland NOT verified. Each compositor
+  backend may negotiate differently; the OBS-pattern flags + scalar
+  framerate + Choice-unwrap parser are well-established conventions
+  so we expect reasonable compatibility, but no guarantee. See P5C-3
+  smoke matrix follow-up.
+
+- **`SPA_PARAM_Buffers` POD**: still constructed via pipewire-rs's
+  `PodSerializer`. Not observed to fail (handshake reaches Streaming
+  on GNOME 46), but the same library is in the path. If multi-
+  compositor smoke flags it, rewrite via PodBuilder.
+
+- **DMABUF zero-copy**: still uses BGRA mmap + CPU memcpy. Zero-copy
+  DMABUF lands together with `FrameInput::Dmabuf` in P5C-2.

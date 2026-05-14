@@ -10,23 +10,21 @@
 use pipewire::spa::param::{
     format::{FormatProperties, MediaSubtype, MediaType},
     video::VideoFormat,
-    ParamType,
 };
 use pipewire::spa::pod::deserialize::PodDeserializer;
-use pipewire::spa::pod::serialize::PodSerializer;
-use pipewire::spa::pod::{ChoiceValue, Object, Pod, Property, PropertyFlags, Value};
-use pipewire::spa::utils::{Choice, ChoiceEnum, ChoiceFlags, Fraction, Id, Rectangle, SpaTypes};
+use pipewire::spa::pod::{ChoiceValue, Pod, Value};
+use pipewire::spa::utils::{ChoiceEnum, Fraction, Id, Rectangle, SpaTypes};
 use thiserror::Error;
 
 /// DRM modifier: linear (no tiling). Compositors that hand us a DMABUF
 /// with this modifier produce CPU-readable BGRA.
 pub const DRM_FORMAT_MOD_LINEAR: i64 = 0;
 
-/// DRM modifier: "unspecified". Compositors use this when they don't want
-/// to commit to a specific tiling layout. NOT linear-guaranteed; if the
-/// negotiated modifier is this value we disconnect rather than mmap tiled
-/// data (would be `unsafe`-but-broken). See spec §4.3.
-pub const DRM_FORMAT_MOD_INVALID: i64 = -1;
+/// DRM modifier: "invalid / no preference".
+/// Value is `(1u64 << 56) - 1 = 0x00FFFFFFFFFFFFFF` per drm_fourcc.h —
+/// NOT `-1` (which is a different bit pattern). The previous value of -1
+/// was wrong; this is the canonical value mutter's screencast catalog uses.
+pub const DRM_FORMAT_MOD_INVALID: i64 = 72057594037927935;
 
 /// Owned byte storage for the serialised POD(s) handed to `stream.connect`.
 ///
@@ -70,94 +68,100 @@ impl BuiltParams {
 /// them to a small set of `PixelFormat` variants the encoder pipeline
 /// already handles (or BGRA-equivalent for the alpha-channel variants).
 ///
-/// **VideoModifier is intentionally omitted.** P5B-2a originally advertised
-/// a `Choice<Long>` over `[LINEAR, INVALID]`, but omitting the property
-/// entirely lets mutter pick its default modifier (typically LINEAR for
-/// CPU consumers) which we can mmap directly. DMABUF zero-copy (P5C-2)
-/// will reintroduce the modifier property with the correct flags + the
-/// full driver-advertised modifier list.
+/// **VideoModifier: `Choice<Long>` Enum `[LINEAR (0), INVALID (-1)]`.**
+/// GNOME 46 mutter on Intel iHD holds frames as GPU-side DMABUF. Without
+/// a `VideoModifier` Choice property mutter concludes we can't accept
+/// DMABUF and offers no MemFd fallback for this hardware, producing "no
+/// more input formats" (smoke 2026-05-13). We advertise `LINEAR` as the
+/// preferred default with `INVALID` as the modifier-agnostic fallback,
+/// matching OBS / gnome-remote-desktop. Both `MANDATORY` and `DONT_FIXATE`
+/// are required so mutter treats the list as "pick one" rather than
+/// "must be exactly this value".
 pub fn build() -> BuiltParams {
-    // Flag set used on every Choice-typed Property below. See doc comment.
-    let choice_flags = PropertyFlags::MANDATORY | PropertyFlags::DONT_FIXATE;
+    use crate::wayland_portal::pod_builder::PodBuilder;
+    use pipewire::spa::sys as spa_sys;
 
-    let obj = Object {
-        type_: SpaTypes::ObjectParamFormat.as_raw(),
-        id: ParamType::EnumFormat.as_raw(),
-        properties: vec![
-            // MediaType and MediaSubtype are scalar Ids (not Choices). Per
-            // libspa convention they don't need DONT_FIXATE; leave flags
-            // empty (matches Property::new default).
-            Property::new(
-                FormatProperties::MediaType.as_raw(),
-                Value::Id(Id(MediaType::Video.as_raw())),
-            ),
-            Property::new(
-                FormatProperties::MediaSubtype.as_raw(),
-                Value::Id(Id(MediaSubtype::Raw.as_raw())),
-            ),
-            Property {
-                key: FormatProperties::VideoFormat.as_raw(),
-                flags: choice_flags,
-                value: Value::Choice(ChoiceValue::Id(Choice(
-                    ChoiceFlags::empty(),
-                    ChoiceEnum::Enum {
-                        default: Id(VideoFormat::BGRA.as_raw()),
-                        alternatives: vec![
-                            Id(VideoFormat::BGRA.as_raw()),
-                            Id(VideoFormat::BGRx.as_raw()),
-                            Id(VideoFormat::RGBA.as_raw()),
-                            Id(VideoFormat::RGBx.as_raw()),
-                            Id(VideoFormat::ARGB.as_raw()),
-                            Id(VideoFormat::ABGR.as_raw()),
-                            Id(VideoFormat::xRGB.as_raw()),
-                            Id(VideoFormat::xBGR.as_raw()),
-                        ],
-                    },
-                ))),
-            },
-            Property {
-                key: FormatProperties::VideoSize.as_raw(),
-                flags: choice_flags,
-                value: Value::Choice(ChoiceValue::Rectangle(Choice(
-                    ChoiceFlags::empty(),
-                    ChoiceEnum::Range {
-                        default: Rectangle {
-                            width: 1920,
-                            height: 1080,
-                        },
-                        min: Rectangle {
-                            width: 320,
-                            height: 240,
-                        },
-                        max: Rectangle {
-                            width: 7680,
-                            height: 4320,
-                        },
-                    },
-                ))),
-            },
-            Property {
-                key: FormatProperties::VideoFramerate.as_raw(),
-                flags: choice_flags,
-                value: Value::Choice(ChoiceValue::Fraction(Choice(
-                    ChoiceFlags::empty(),
-                    ChoiceEnum::Range {
-                        default: Fraction { num: 60, denom: 1 },
-                        min: Fraction { num: 15, denom: 1 },
-                        max: Fraction { num: 60, denom: 1 },
-                    },
-                ))),
-            },
-        ],
-    };
+    let mut b = PodBuilder::new();
+    {
+        let mut o = b.push_object(
+            spa_sys::SPA_TYPE_OBJECT_Format,
+            spa_sys::SPA_PARAM_EnumFormat,
+        );
 
-    let bytes =
-        PodSerializer::serialize(std::io::Cursor::new(Vec::<u8>::new()), &Value::Object(obj))
-            .expect("PodSerializer::serialize(EnumFormat) — only fails on OOM")
-            .0
-            .into_inner();
+        // MediaType / MediaSubtype: scalar Id properties, no Choice.
+        o.add_id_property(spa_sys::SPA_FORMAT_mediaType, spa_sys::SPA_MEDIA_TYPE_video);
+        o.add_id_property(
+            spa_sys::SPA_FORMAT_mediaSubtype,
+            spa_sys::SPA_MEDIA_SUBTYPE_raw,
+        );
 
-    BuiltParams { bytes: vec![bytes] }
+        let f_choice =
+            spa_sys::SPA_POD_PROP_FLAG_MANDATORY | spa_sys::SPA_POD_PROP_FLAG_DONT_FIXATE;
+        let f_negotiable = 0u32; // size/framerate: producer picks freely
+
+        // VideoFormat: producer picks one of the alternatives (DONT_FIXATE).
+        o.add_choice_id_enum(
+            spa_sys::SPA_FORMAT_VIDEO_format,
+            f_choice,
+            spa_sys::SPA_VIDEO_FORMAT_BGRA,
+            &[
+                spa_sys::SPA_VIDEO_FORMAT_BGRA,
+                spa_sys::SPA_VIDEO_FORMAT_BGRx,
+                spa_sys::SPA_VIDEO_FORMAT_RGBA,
+                spa_sys::SPA_VIDEO_FORMAT_RGBx,
+                spa_sys::SPA_VIDEO_FORMAT_ARGB,
+                spa_sys::SPA_VIDEO_FORMAT_ABGR,
+                spa_sys::SPA_VIDEO_FORMAT_xRGB,
+                spa_sys::SPA_VIDEO_FORMAT_xBGR,
+            ],
+        );
+
+        // VideoSize: producer picks freely (flag=0 matches OBS pattern;
+        // DONT_FIXATE on size confuses mutter which has a fixed display
+        // size — observed in N100 smoke 2026-05-13 as "no more input
+        // formats").
+        o.add_choice_rectangle_range(
+            spa_sys::SPA_FORMAT_VIDEO_size,
+            f_negotiable,
+            (1920, 1080),
+            (320, 240),
+            (7680, 4320),
+        );
+
+        // VideoFramerate: scalar Fraction 0/1 ("no fixed rate") per OBS
+        // and mutter convention. The upper bound is declared via the
+        // separate VideoMaxFramerate property below.
+        o.add_fraction_property(spa_sys::SPA_FORMAT_VIDEO_framerate, 0, 1);
+
+        // VideoMaxFramerate: Choice<Fraction> Range with the actual cap.
+        // Mutter on N100 advertises ~60.029 Hz here; we offer 60/1..60/1
+        // (default + clamp), which intersects with mutter's range.
+        o.add_choice_fraction_range(
+            spa_sys::SPA_FORMAT_VIDEO_maxFramerate,
+            f_negotiable,
+            (60, 1),
+            (1, 1),
+            (60, 1),
+        );
+
+        // VideoModifier: producer picks one of [LINEAR, INVALID] (DONT_FIXATE).
+        // Required for GNOME 46 mutter on Intel iHD which holds frames
+        // as GPU-side DMABUF — without this property mutter rejects with
+        // "no more input formats" (smoke 2026-05-13). LINEAR (=0) is the
+        // CPU-consumer preferred default; INVALID (=72057594037927935) is
+        // the canonical DRM_FORMAT_MOD_INVALID sentinel per drm_fourcc.h
+        // and matches what mutter's modifier list contains.
+        o.add_choice_long_enum(
+            spa_sys::SPA_FORMAT_VIDEO_modifier,
+            f_choice,
+            0i64, // DRM_FORMAT_MOD_LINEAR
+            &[0i64, DRM_FORMAT_MOD_INVALID],
+        );
+    } // ObjectScope drop -> pop
+
+    BuiltParams {
+        bytes: vec![b.finish()],
+    }
 }
 
 /// Re-export of `stream::PixelFormat` so callers don't need two imports.
@@ -187,8 +191,8 @@ pub enum ParseError {
     NotObject,
     #[error("pod type is not ParamFormat (got raw type {0})")]
     WrongType(u32),
-    #[error("MediaType is not Video")]
-    NotVideo,
+    #[error("MediaType is not Video (got id={0:?})")]
+    NotVideo(Option<u32>),
     #[error("MediaSubtype is not Raw")]
     NotRaw,
     #[error("VideoFormat is not BGRA/BGRx (got id={0})")]
@@ -225,41 +229,25 @@ pub fn parse(p: &Pod) -> Result<NegotiatedFormat, ParseError> {
 
     for prop in &obj.properties {
         let key = prop.key;
-        // Each Choice arm (Enum/Range/etc) carries a default; we always
-        // pick the default because the *negotiated* POD usually carries
-        // a plain Value (the compositor has already picked one). Choice
-        // unwrapping is defensive for compositors that re-emit a Choice.
-        let v = unwrap_choice_default(&prop.value);
+        let v = &prop.value;
 
         if key == FormatProperties::MediaType.as_raw() {
-            if let Value::Id(Id(id)) = v {
-                media_type = Some(*id);
-            }
+            media_type = extract_id_value(v);
         } else if key == FormatProperties::MediaSubtype.as_raw() {
-            if let Value::Id(Id(id)) = v {
-                media_subtype = Some(*id);
-            }
+            media_subtype = extract_id_value(v);
         } else if key == FormatProperties::VideoFormat.as_raw() {
-            if let Value::Id(Id(id)) = v {
-                video_format = Some(*id);
-            }
+            video_format = extract_id_value(v);
         } else if key == FormatProperties::VideoSize.as_raw() {
-            if let Value::Rectangle(r) = v {
-                size = Some(*r);
-            }
+            size = extract_rectangle_value(v);
         } else if key == FormatProperties::VideoFramerate.as_raw() {
-            if let Value::Fraction(f) = v {
-                framerate = Some(*f);
-            }
+            framerate = extract_fraction_value(v);
         } else if key == FormatProperties::VideoModifier.as_raw() {
-            if let Value::Long(m) = v {
-                modifier = Some(*m);
-            }
+            modifier = extract_long_value(v);
         }
     }
 
     if media_type != Some(MediaType::Video.as_raw()) {
-        return Err(ParseError::NotVideo);
+        return Err(ParseError::NotVideo(media_type));
     }
     if media_subtype != Some(MediaSubtype::Raw.as_raw()) {
         return Err(ParseError::NotRaw);
@@ -301,34 +289,77 @@ pub fn parse(p: &Pod) -> Result<NegotiatedFormat, ParseError> {
     })
 }
 
-/// If `v` is a `Value::Choice`, return the default-branch inner value.
-/// Otherwise return `v` unchanged. Centralises the "compositor sometimes
-/// re-emits a Choice on negotiated Format POD" defence.
-fn unwrap_choice_default(v: &Value) -> &Value {
-    // pipewire-rs's ChoiceValue arms each carry the choice in a Choice<T>
-    // wrapper whose Enum default / Range default is the value we want.
-    // We only need to peel one level — nested Choices are not used by
-    // any compositor we care about.
+/// Extract a `u32` Id from a property value, handling both scalar
+/// `Value::Id(Id)` and Choice-wrapped variants. Returns `None` if the
+/// value isn't an Id-typed value.
+///
+/// mutter sends negotiated Format POD with EVERY property still wrapped
+/// in a `Choice` (SPA_CHOICE_None convention: a degenerate 1-alternative
+/// Choice indicates the picked value). Our parser must unwrap.
+fn extract_id_value(v: &Value) -> Option<u32> {
     match v {
+        Value::Id(Id(id)) => Some(*id),
         Value::Choice(ChoiceValue::Id(c)) => match &c.1 {
-            ChoiceEnum::Enum { default, .. } => {
-                // Inner Id<u32> — must be promoted to a Value::Id. We
-                // can't return a borrow to a temporary, so for the
-                // Choice case parse() reads `prop.value` directly and
-                // matches the Choice arm. Keep this helper for the
-                // simple pass-through case below.
-                let _ = default;
-                v
-            }
-            _ => v,
+            ChoiceEnum::None(Id(id)) => Some(*id),
+            ChoiceEnum::Enum { default, .. } => Some(default.0),
+            ChoiceEnum::Range { default, .. } => Some(default.0),
+            ChoiceEnum::Step { default, .. } => Some(default.0),
+            ChoiceEnum::Flags { default, .. } => Some(default.0),
         },
-        _ => v,
+        _ => None,
+    }
+}
+
+fn extract_rectangle_value(v: &Value) -> Option<Rectangle> {
+    match v {
+        Value::Rectangle(r) => Some(*r),
+        Value::Choice(ChoiceValue::Rectangle(c)) => match &c.1 {
+            ChoiceEnum::None(r) => Some(*r),
+            ChoiceEnum::Enum { default, .. } => Some(*default),
+            ChoiceEnum::Range { default, .. } => Some(*default),
+            ChoiceEnum::Step { default, .. } => Some(*default),
+            ChoiceEnum::Flags { default, .. } => Some(*default),
+        },
+        _ => None,
+    }
+}
+
+fn extract_fraction_value(v: &Value) -> Option<Fraction> {
+    match v {
+        Value::Fraction(f) => Some(*f),
+        Value::Choice(ChoiceValue::Fraction(c)) => match &c.1 {
+            ChoiceEnum::None(f) => Some(*f),
+            ChoiceEnum::Enum { default, .. } => Some(*default),
+            ChoiceEnum::Range { default, .. } => Some(*default),
+            ChoiceEnum::Step { default, .. } => Some(*default),
+            ChoiceEnum::Flags { default, .. } => Some(*default),
+        },
+        _ => None,
+    }
+}
+
+fn extract_long_value(v: &Value) -> Option<i64> {
+    match v {
+        Value::Long(n) => Some(*n),
+        Value::Choice(ChoiceValue::Long(c)) => match &c.1 {
+            ChoiceEnum::None(n) => Some(*n),
+            ChoiceEnum::Enum { default, .. } => Some(*default),
+            ChoiceEnum::Range { default, .. } => Some(*default),
+            ChoiceEnum::Step { default, .. } => Some(*default),
+            ChoiceEnum::Flags { default, .. } => Some(*default),
+        },
+        _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pipewire::spa::param::ParamType;
+    use pipewire::spa::pod::serialize::PodSerializer;
+    use pipewire::spa::pod::{Object, Property, PropertyFlags};
+    use pipewire::spa::sys as spa_sys;
+    use pipewire::spa::utils::{Choice, ChoiceFlags};
 
     /// Helper: serialise a hand-built Object to bytes so tests can feed
     /// it back into `parse()`. Mirrors `build()`'s serialisation step.
@@ -350,15 +381,17 @@ mod tests {
         );
     }
 
-    /// Regression test for the P5C-1 "no more input formats" Wayland smoke
-    /// failure. The libspa wire format treats Choice-typed Properties with
-    /// `flags == 0` as fixated mandatory values, so the compositor must
-    /// accept the *default* alternative exactly. GNOME 46 mutter responds
-    /// with "no more input formats". Setting `MANDATORY | DONT_FIXATE` on
-    /// each Choice Property tells the compositor "you must pick one of
-    /// these alternatives" — the standard EnumFormat negotiation contract.
+    /// Verifies the OBS-pattern per-property flag convention:
+    /// - VideoFormat + VideoModifier: MANDATORY | DONT_FIXATE
+    /// - VideoSize + VideoFramerate: 0 (producer picks freely)
+    ///
+    /// GNOME 46 mutter on N100 still rejected EnumFormat with "no more
+    /// input formats" after the VideoModifier addition. Comparing to OBS
+    /// obs-pipewire-screencast, DONT_FIXATE on size/framerate caused mutter
+    /// to interpret them as "consumer wants negotiation" but its display
+    /// size + rate are fixed, hence no match.
     #[test]
-    fn build_choice_properties_have_mandatory_dont_fixate_flags() {
+    fn build_choice_properties_have_obs_flag_pattern() {
         let built = build();
         let (_consumed, value) =
             PodDeserializer::deserialize_any_from(&built.bytes[0]).expect("deserialise round-trip");
@@ -367,23 +400,47 @@ mod tests {
             other => panic!("build() must serialise to Value::Object, got {other:?}"),
         };
 
-        let expected = PropertyFlags::MANDATORY | PropertyFlags::DONT_FIXATE;
-        let choice_keys = [
-            (FormatProperties::VideoFormat.as_raw(), "VideoFormat"),
-            (FormatProperties::VideoSize.as_raw(), "VideoSize"),
-            (FormatProperties::VideoFramerate.as_raw(), "VideoFramerate"),
+        let expected_per_key: &[(u32, u32, &str)] = &[
+            // (key, expected_flags, name)
+            (
+                FormatProperties::VideoFormat.as_raw(),
+                (PropertyFlags::MANDATORY | PropertyFlags::DONT_FIXATE).bits(),
+                "VideoFormat",
+            ),
+            (
+                FormatProperties::VideoSize.as_raw(),
+                0, // OBS pattern: flag=0
+                "VideoSize",
+            ),
+            // VideoFramerate is now a scalar property (not Choice), flags=0.
+            (
+                FormatProperties::VideoFramerate.as_raw(),
+                0,
+                "VideoFramerate (scalar)",
+            ),
+            (
+                spa_sys::SPA_FORMAT_VIDEO_maxFramerate,
+                0, // OBS pattern: flag=0
+                "VideoMaxFramerate",
+            ),
+            (
+                FormatProperties::VideoModifier.as_raw(),
+                (PropertyFlags::MANDATORY | PropertyFlags::DONT_FIXATE).bits(),
+                "VideoModifier",
+            ),
         ];
 
-        for (key, name) in choice_keys {
+        for &(key, expected, name) in expected_per_key {
             let prop = obj
                 .properties
                 .iter()
                 .find(|p| p.key == key)
                 .unwrap_or_else(|| panic!("EnumFormat POD missing {name} property"));
             assert_eq!(
-                prop.flags, expected,
-                "{name} Property must carry MANDATORY|DONT_FIXATE flags, got {:?}",
-                prop.flags
+                prop.flags.bits(),
+                expected,
+                "{name} Property flags expected {expected:#b}, got {:#b}",
+                prop.flags.bits()
             );
         }
     }
@@ -534,7 +591,7 @@ mod tests {
         let pod = Pod::from_bytes(&bytes).expect("Pod::from_bytes ok");
         let err = parse(pod).expect_err("Audio MediaType must reject");
         assert!(
-            matches!(err, ParseError::NotVideo),
+            matches!(err, ParseError::NotVideo(_)),
             "expected NotVideo, got {err:?}"
         );
     }
@@ -612,5 +669,66 @@ mod tests {
         let pod = Pod::from_bytes(&bytes).expect("Pod::from_bytes ok");
         let neg = parse(pod).expect("parse ok");
         assert_eq!(neg.modifier, Some(DRM_FORMAT_MOD_LINEAR));
+    }
+
+    /// Regression: GNOME 46 mutter sends the negotiated `SPA_PARAM_Format`
+    /// POD with EVERY property wrapped in a Choice (SPA_CHOICE_None
+    /// convention — a degenerate 1-alternative Choice indicates the
+    /// picked value). parse() must unwrap properly. Smoke 2026-05-13 §K2
+    /// captured the exact pattern; failure mode was
+    /// `ParseError::NotVideo(None)`.
+    #[test]
+    fn parse_handles_choice_wrapped_negotiated_format() {
+        let obj = Object {
+            type_: SpaTypes::ObjectParamFormat.as_raw(),
+            id: ParamType::Format.as_raw(),
+            properties: vec![
+                Property::new(
+                    FormatProperties::MediaType.as_raw(),
+                    Value::Choice(ChoiceValue::Id(Choice(
+                        ChoiceFlags::empty(),
+                        ChoiceEnum::None(Id(MediaType::Video.as_raw())),
+                    ))),
+                ),
+                Property::new(
+                    FormatProperties::MediaSubtype.as_raw(),
+                    Value::Choice(ChoiceValue::Id(Choice(
+                        ChoiceFlags::empty(),
+                        ChoiceEnum::None(Id(MediaSubtype::Raw.as_raw())),
+                    ))),
+                ),
+                Property::new(
+                    FormatProperties::VideoFormat.as_raw(),
+                    Value::Choice(ChoiceValue::Id(Choice(
+                        ChoiceFlags::empty(),
+                        ChoiceEnum::None(Id(VideoFormat::BGRA.as_raw())),
+                    ))),
+                ),
+                Property::new(
+                    FormatProperties::VideoSize.as_raw(),
+                    Value::Choice(ChoiceValue::Rectangle(Choice(
+                        ChoiceFlags::empty(),
+                        ChoiceEnum::None(Rectangle {
+                            width: 1920,
+                            height: 1080,
+                        }),
+                    ))),
+                ),
+                Property::new(
+                    FormatProperties::VideoFramerate.as_raw(),
+                    Value::Choice(ChoiceValue::Fraction(Choice(
+                        ChoiceFlags::empty(),
+                        ChoiceEnum::None(Fraction { num: 60, denom: 1 }),
+                    ))),
+                ),
+            ],
+        };
+        let bytes = serialise_object(obj);
+        let pod = Pod::from_bytes(&bytes).expect("Pod::from_bytes ok");
+        let neg = parse(pod).expect("parse Choice-wrapped Format ok");
+        assert_eq!(neg.width, 1920);
+        assert_eq!(neg.height, 1080);
+        assert_eq!(neg.format, PixelFormat::BGRA);
+        assert_eq!(neg.framerate, Some(Fraction { num: 60, denom: 1 }));
     }
 }

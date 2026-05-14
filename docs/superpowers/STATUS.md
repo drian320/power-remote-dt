@@ -513,12 +513,66 @@ OSS / 配布可能な Parsec / Moonlight / RustDesk 競合を目指す Rust 製 
     (`df49812`, `c7c9487`, `65bec41`). Workaround for HW-encode CPU
     verification today: log into a GNOME-on-Xorg session — the
     X11ShmCapturer path feeds VAAPI normally and is unaffected.
+    **Resolved by P5B-2a-successor** (branch
+    `phase-p5b2a-successor-libspa-pod-rewrite`, 2026-05-13): the
+    Wayland portal handshake reaches `state: Streaming` on GNOME 46
+    Wayland and the VAAPI encoder produces frames (`first frame ready
+    elapsed_ms=95`). End-to-end viewer rendering is blocked by a
+    SEPARATE issue (HW-encoded NAL > transport MTU); see walkthrough
+    §L "Known issues" for the next follow-up.
   - **P5B-2a-successor (next branch, not P5C-1)**: rewrite
     `wayland_portal/format.rs` POD construction via `libspa-sys` FFI
     helpers (`spa_pod_builder_*` / `spa_format_video_raw_init`) to
     match `gnome-remote-desktop` / `obs-pipewire-screencast` /
     `xdg-desktop-portal-wlr` reference implementations. Lands
     alongside `FrameInput::Dmabuf` in P5C-2.
+
+- **P5B-2a-successor (`phase-p5b2a-successor-libspa-pod-rewrite`, 2026-05-13)**:
+  Resolves the GNOME 46 Wayland frame-ingestion blocker from P5C-1.
+  Rewrites `crates/media-linux/src/wayland_portal/format.rs::build()`
+  against a new `libspa-sys` raw-FFI safe wrapper (`pod_builder.rs`)
+  so the outbound `SPA_PARAM_EnumFormat` POD matches the byte layout
+  mutter expects. Then four further content-level fixes lined up our
+  format catalog with mutter's offer set: VideoModifier prop, OBS
+  per-property flag pattern, scalar VideoFramerate + Choice
+  VideoMaxFramerate, and Choice-unwrap in the negotiated-Format parser.
+  - New `crates/media-linux/src/wayland_portal/pod_builder.rs`: safe
+    RAII wrapper over `spa_pod_builder_*` raw FFI. `PodBuilder::new` +
+    `push_object` + `ObjectScope` (drop = pop) + 5 primitive helpers
+    (`add_int_primitive` / `add_id_primitive` / `add_rectangle_primitive`
+    / `add_fraction_primitive` / `add_long_primitive`) + scalar
+    `add_fraction_property` + 4 Choice helpers (`add_choice_id_enum` /
+    `add_choice_rectangle_range` / `add_choice_fraction_range` /
+    `add_choice_long_enum`) each with explicit per-call `flags: u32`.
+    Overflow callback grows the backing `Vec<u8>` and reinits the
+    builder pointer. All `unsafe` calls contained behind `// SAFETY:`
+    comments (cursor.rs convention).
+  - `format::build()` rewritten on PodBuilder. Signature unchanged.
+    `parse()` rewritten with four typed extractors that handle both
+    scalar AND Choice-wrapped values (SPA_CHOICE_None convention used
+    by mutter to indicate picked values).
+  - **Compile-time ABI pin**: `const _: () = { assert!(size_of::<spa_pod_builder_state>() == 16) };`
+  - **Tests**: 13 pod_builder unit tests + 9 format tests (8 build/parse
+    + 1 Choice-wrapped parse regression) + 1 integration test
+    `tests/format_golden.rs` (byte-for-byte fixture, golden captured
+    from the actual N100 smoke success). Workspace tests + clippy
+    `--all-targets -D warnings` clean.
+  - **Real-device smoke (N100 Intel Alder Lake-N iGPU, Ubuntu 24.04
+    GNOME 46 Wayland, 2026-05-13)**: pipewire stream reaches
+    `state: Streaming` via the transitions `Unconnected → Connecting →
+    Paused → Streaming`; `pipewire negotiated format w=1920 h=1080
+    fmt=BGRx modifier=Some(0)` extracted from Choice-wrapped POD;
+    `first frame ready elapsed_ms=95`. End-to-end viewer rendering is
+    blocked by a separate `FrameTooLarge` transport-layer issue
+    (next follow-up).
+  - **Out of scope (deferred)**: `SPA_PARAM_Buffers` POD rewrite
+    (still uses pipewire-rs PodSerializer; not observed to fail);
+    `FrameInput::Dmabuf` integration (P5C-2); multi-compositor matrix
+    (KDE/Sway/Hyprland — P5C-3); transport MTU vs HW-encoded NAL size
+    (separate transport-layer follow-up).
+  - **Smoke walkthrough**: `docs/superpowers/p5b1-smoke-walkthrough.md`
+    §L (GNOME 46 Wayland real-device verification + diagnostic
+    learnings).
 
 ### **C. 計測 / 観測 系(blocker 解消用)**
 

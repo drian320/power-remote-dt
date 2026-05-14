@@ -693,7 +693,7 @@ fn parse_video_format(
         match e {
             crate::wayland_portal::format::ParseError::NotObject => "not an object",
             crate::wayland_portal::format::ParseError::WrongType(_) => "wrong pod type",
-            crate::wayland_portal::format::ParseError::NotVideo => "not video",
+            crate::wayland_portal::format::ParseError::NotVideo(_) => "not video",
             crate::wayland_portal::format::ParseError::NotRaw => "not raw",
             crate::wayland_portal::format::ParseError::UnsupportedFormat(_) => "unsupported format",
             crate::wayland_portal::format::ParseError::MissingSize => "missing size",
