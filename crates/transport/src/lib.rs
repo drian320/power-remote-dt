@@ -19,7 +19,7 @@ pub use handshake::{
     SessionAck, DEFAULT_HELLO_RETRIES, DEFAULT_HELLO_TIMEOUT,
 };
 pub use loopback::{InProcTransport, LoopbackOptions};
-pub use packetize::{packetize, MAX_SOURCE_CHUNKS};
+pub use packetize::{packetize, FecPolicy, MAX_SOURCE_CHUNKS};
 pub use transport_trait::{ReceivedMessage, Transport};
 pub use udp::{
     now_monotonic_us, CustomUdpTransport, UdpTransportConfig, DEFAULT_HANDSHAKE_TIMEOUT,
