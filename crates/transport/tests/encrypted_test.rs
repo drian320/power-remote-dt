@@ -7,21 +7,21 @@ use bytes::Bytes;
 use prdt_crypto::KeyPair;
 use prdt_protocol::{control::ControlMessage, frame::Codec, EncodedFrame, InputEvent, MouseButton};
 use prdt_transport::{
-    CustomUdpTransport, ReceivedMessage, Transport, UdpTransportConfig, DEFAULT_HANDSHAKE_TIMEOUT,
+    CustomUdpTransport, FecPolicy, ReceivedMessage, Transport, UdpTransportConfig,
+    DEFAULT_HANDSHAKE_TIMEOUT,
 };
 
 /// Spin up host + client transports on localhost, run Noise handshake,
 /// then exchange messages. Asserts all messages round-trip.
 #[tokio::test]
 async fn encrypted_round_trip_all_message_types() {
-    // Use small fec_k/fec_m to keep the test fast and avoid saturating
-    // the localhost UDP socket buffer with a 70-packet burst (the default
-    // fec_k=64 produces k+m=70 packets per frame even for a tiny frame,
-    // and encryption makes each send slower).
+    // Use FecPolicy::strict_small() (k≤4, m≤2) to keep the test fast and
+    // avoid saturating the receiver socket buffer. The production default
+    // (FecPolicy::standard, k≤200) would produce up to k+m=220 packets per
+    // frame even for a tiny frame, overwhelming the recv buffer.
     let cfg = UdpTransportConfig {
         session_id: 1,
-        fec_k: 4,
-        fec_m: 2,
+        fec_policy: FecPolicy::strict_small(),
         ..Default::default()
     };
 

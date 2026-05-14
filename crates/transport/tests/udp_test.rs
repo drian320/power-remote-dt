@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use prdt_protocol::{control::ControlMessage, frame::Codec, EncodedFrame, InputEvent, MouseButton};
-use prdt_transport::{CustomUdpTransport, ReceivedMessage, Transport, UdpTransportConfig};
+use prdt_transport::{CustomUdpTransport, FecPolicy, ReceivedMessage, Transport, UdpTransportConfig};
 
 #[tokio::test]
 async fn udp_round_trip_control() {
@@ -72,8 +72,7 @@ async fn udp_round_trip_input() {
 async fn udp_round_trip_video_small_frame() {
     let cfg = UdpTransportConfig {
         session_id: 2,
-        fec_k: 4,
-        fec_m: 2,
+        fec_policy: FecPolicy::strict_small(),
         ..Default::default()
     };
     let a = CustomUdpTransport::bind("127.0.0.1:0".parse().unwrap(), cfg)
