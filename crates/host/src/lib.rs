@@ -214,7 +214,7 @@ pub use prdt_gui_host::consent_channel::{ConsentDecision, ConsentRequest, Consen
 ///
 /// - `Granted` → `AuthDecision::Grant(permissions)`
 /// - `Rejected` → `AuthDecision::Reject { .. }`
-/// - `NeedsConsent` → auto-reject with `ConsentDenied`
+/// - `NeedsConsent` → reject with `ConsentDenied`, OR auto-grant (session-only) when `--silent-allow` is set
 ///
 /// The Hello-time NeedsConsent path is only ever reached when the pre-Hello
 /// consent gate in `run_host` failed to bring the peer into the validator's
@@ -226,11 +226,16 @@ pub use prdt_gui_host::consent_channel::{ConsentDecision, ConsentRequest, Consen
 /// continues without entering Hello).
 pub struct HostAuthHook {
     validator: std::sync::Arc<auth::AuthValidator>,
+    /// When set (host started with `--silent-allow`), a Hello-time
+    /// `NeedsConsent` verdict is auto-granted with the proposed default
+    /// permissions instead of rejected. Trust is session-only — the peer
+    /// is NOT written to host-peers.toml. See issue #19 Bug 1.
+    silent_allow: bool,
 }
 
 impl HostAuthHook {
-    pub fn new(validator: std::sync::Arc<auth::AuthValidator>) -> Self {
-        Self { validator }
+    pub fn new(validator: std::sync::Arc<auth::AuthValidator>, silent_allow: bool) -> Self {
+        Self { validator, silent_allow }
     }
 }
 
@@ -246,18 +251,33 @@ impl AuthHook for HostAuthHook {
                 remember: _,
             } => AuthDecision::Grant(permissions),
             AuthVerdict::Rejected { code, reason } => AuthDecision::Reject { code, reason },
-            AuthVerdict::NeedsConsent { .. } => {
-                // Fallthrough: the pre-Hello consent gate should have already
-                // either accepted (and updated known_peers) or short-circuited
-                // the session. Reaching this arm means no GUI channel was
-                // available — typically a headless CLI run.
-                tracing::warn!(
-                    peer = %peer_pubkey_b64,
-                    "unknown peer needs consent but no GUI prompt available (headless); rejecting"
-                );
-                AuthDecision::Reject {
-                    code: HelloRejectCode::ConsentDenied,
-                    reason: "headless host: no consent prompt available".into(),
+            AuthVerdict::NeedsConsent {
+                default_permissions,
+                ..
+            } => {
+                if self.silent_allow {
+                    // Host started with --silent-allow: auto-grant unknown
+                    // peers with the proposed default permissions. Trust is
+                    // session-only — the peer is intentionally NOT persisted
+                    // to host-peers.toml. See issue #19 Bug 1.
+                    tracing::info!(
+                        peer = %peer_pubkey_b64,
+                        "silent-allow: auto-granting unknown peer (session-only, not persisted)"
+                    );
+                    AuthDecision::Grant(default_permissions)
+                } else {
+                    // The pre-Hello consent gate should have already either
+                    // accepted (and updated known_peers) or short-circuited
+                    // the session. Reaching this arm means no GUI channel was
+                    // available — typically a headless CLI run.
+                    tracing::warn!(
+                        peer = %peer_pubkey_b64,
+                        "unknown peer needs consent but no GUI prompt available (headless); rejecting"
+                    );
+                    AuthDecision::Reject {
+                        code: HelloRejectCode::ConsentDenied,
+                        reason: "headless host: no consent prompt available".into(),
+                    }
                 }
             }
         }
@@ -563,7 +583,7 @@ pub async fn run_host(
 
         let known = Arc::new(RwLock::new(known_peers));
         let validator = Arc::new(auth::AuthValidator::new(cfg, known.clone()));
-        (HostAuthHook::new(validator), known)
+        (HostAuthHook::new(validator, args.silent_allow), known)
     };
     let (auth_hook, known_peers_arc) = auth_hook;
 
@@ -1432,6 +1452,10 @@ fn to_policy_codec(c: prdt_protocol::Codec) -> prdt_media_policy::Codec {
 mod cli_tests {
     use super::*;
     use clap::Parser;
+    use prdt_crypto::known_peers::KnownPeers;
+    use prdt_protocol::{AuthMethod, ControlMessage};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
 
     #[test]
     fn cli_capture_backend_default_is_auto() {
@@ -1444,6 +1468,39 @@ mod cli_tests {
         ])
         .expect("default parse");
         assert_eq!(args.capture_backend, "auto");
+    }
+
+    /// When `--silent-allow` is set, a `NeedsConsent` verdict from the
+    /// validator must be auto-granted by `HostAuthHook` rather than
+    /// rejected. Trust is session-only (not persisted). Issue #19 Bug 1.
+    #[tokio::test]
+    async fn silent_allow_auto_grants_needs_consent() {
+        let known = Arc::new(RwLock::new(KnownPeers::default()));
+        let cfg = auth_config::HostAuthConfig {
+            mode: auth_config::AuthMode::Tofu,
+            ..Default::default()
+        };
+        let validator = Arc::new(auth::AuthValidator::new(cfg, known.clone()));
+        let hook = HostAuthHook::new(validator, /* silent_allow */ true);
+
+        let hello = ControlMessage::Hello {
+            protocol_version: 4,
+            auth_method: AuthMethod::Tofu,
+            auth_payload: vec![],
+            req_width: 1920,
+            req_height: 1080,
+            req_fps: 60,
+            codec: prdt_protocol::Codec::H264,
+        };
+        let peer_b64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+        // Peer is unknown → validator returns NeedsConsent.
+        // With silent_allow=true the hook must grant instead of reject.
+        let decision = hook.evaluate(&hello, peer_b64).await;
+        assert!(
+            matches!(decision, AuthDecision::Grant(_)),
+            "expected Grant for silent-allow unknown peer, got {decision:?}"
+        );
     }
 
     #[test]
