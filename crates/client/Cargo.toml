@@ -23,5 +23,12 @@ prdt-gui-client = { path = "../gui-client" }
 prdt-host = { path = "../host" }
 prdt-viewer = { path = "../viewer" }
 
+[features]
+# Forward the host's FFmpeg HEVC VAAPI feature so smoke-test builds of the
+# unified `prdt` binary can be produced via `cargo build -p prdt-client
+# --features ffmpeg-encode-hevc-vaapi`. The host's compile_error! on non-Linux
+# targets remains the hard gate.
+ffmpeg-encode-hevc-vaapi = ["prdt-host/ffmpeg-encode-hevc-vaapi"]
+
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"

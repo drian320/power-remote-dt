@@ -1,0 +1,100 @@
+name: Smoke build — FFmpeg HEVC VAAPI
+
+# Builds the unified `prdt` binary for Linux x86_64 WITH the
+# `ffmpeg-encode-hevc-vaapi` feature enabled, for manual smoke testing of
+# `docs/superpowers/plan-ffmpeg-hevc-vaapi-smoke.md` on real iGPU hardware.
+#
+# This workflow is intentionally separate from `release.yml` because:
+#   1. The FFmpeg feature pulls a new runtime dep (system libavcodec.so etc.)
+#      that's heavier than the default `prdt` distribution targets.
+#   2. P1 is in flight; we don't want every release tag to start shipping the
+#      feature until the ADR is `Accepted` and the hardware smoke is logged.
+#
+# Triggered manually from the Actions UI (`workflow_dispatch`). The built
+# binary is uploaded as a workflow artifact (no GitHub Release attached),
+# downloadable from the run page for 30 days.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch or tag to build (defaults to the workflow's ref)"
+        required: false
+        default: ""
+
+jobs:
+  build-linux:
+    name: Build Linux x86_64 prdt with FFmpeg HEVC VAAPI
+    # Ubuntu 24.04 has libpipewire-0.3 >= 1.0.5 (matches release.yml) and a
+    # recent enough libavcodec-dev (FFmpeg 6.x; rusty_ffmpeg 0.13.0 with
+    # features=["ffmpeg5"] generates bindings from system headers so the
+    # 5.x vs 6.x minor delta is absorbed by bindgen).
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Install Linux build deps (release.yml + FFmpeg dev libs)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libglib2.0-dev libdbus-1-dev \
+            libxcb-shm0-dev libxcb-randr0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libwayland-dev libssl-dev \
+            libgtk-3-dev libpango1.0-dev libcairo2-dev \
+            libgdk-pixbuf-2.0-dev libatk1.0-dev libayatana-appindicator3-dev \
+            libasound2-dev \
+            libpipewire-0.3-dev libspa-0.2-dev \
+            libva-dev libva-drm2 libva-x11-2 \
+            libxdo-dev \
+            libavcodec-dev libavutil-dev libavfilter-dev libavformat-dev \
+            libavdevice-dev libswresample-dev libswscale-dev \
+            clang libclang-dev
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build prdt with ffmpeg-encode-hevc-vaapi feature
+        env:
+          # rusty_ffmpeg 0.13.0's build script reads these to invoke bindgen
+          # against the apt-installed FFmpeg headers and to set rustc-link
+          # search paths against libavcodec.so. Without them the build either
+          # fails at bindgen or silently links the wrong copy.
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: |
+          cargo build \
+            --release \
+            -p prdt-client \
+            --features ffmpeg-encode-hevc-vaapi \
+            --target x86_64-unknown-linux-gnu
+
+      - name: Stage artifact
+        run: |
+          mkdir -p artifacts
+          cp target/x86_64-unknown-linux-gnu/release/prdt artifacts/prdt-linux-x86_64-ffmpeg-hevc
+          chmod +x artifacts/prdt-linux-x86_64-ffmpeg-hevc
+          (cd artifacts && sha256sum prdt-linux-x86_64-ffmpeg-hevc > prdt-linux-x86_64-ffmpeg-hevc.sha256)
+          ls -la artifacts/
+          file artifacts/prdt-linux-x86_64-ffmpeg-hevc
+          # ldd shows the libavcodec runtime dep — verifies dynamic link landed.
+          ldd  artifacts/prdt-linux-x86_64-ffmpeg-hevc | grep -E 'libav|libva' || true
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prdt-linux-x86_64-ffmpeg-hevc
+          path: artifacts/
+          retention-days: 30
+          if-no-files-found: error

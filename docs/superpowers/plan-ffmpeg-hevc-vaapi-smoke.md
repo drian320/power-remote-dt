@@ -58,19 +58,45 @@ Note the viewer machine name here at run time: **Viewer machine:** `<fill in>`
 
 ---
 
-## Build commands
+## Get the binary
 
-From the project root on the Linux host:
+Choose ONE of:
+
+### Option 1 — Download the smoke-build artifact from GitHub Actions (recommended)
+
+1. Open <https://github.com/drian320/power-remote-dt/actions/workflows/smoke-build-ffmpeg-hevc.yml>.
+2. Click **Run workflow** → select the `feat/ffmpeg-hevc-vaapi-p1` branch (or the release tag) → **Run workflow**.
+3. When the run finishes (≈ 5 min), open it and scroll to **Artifacts**. Download `prdt-linux-x86_64-ffmpeg-hevc.zip`. It contains:
+   - `prdt-linux-x86_64-ffmpeg-hevc` — the `prdt` binary with `ffmpeg-encode-hevc-vaapi` compiled in
+   - `prdt-linux-x86_64-ffmpeg-hevc.sha256`
+4. On the iGPU host:
+   ```bash
+   unzip prdt-linux-x86_64-ffmpeg-hevc.zip
+   sha256sum -c prdt-linux-x86_64-ffmpeg-hevc.sha256
+   chmod +x prdt-linux-x86_64-ffmpeg-hevc
+   mv prdt-linux-x86_64-ffmpeg-hevc /usr/local/bin/prdt   # or any PATH dir
+   prdt --version
+   ```
+
+Runtime deps (apt): `libavcodec59 libavutil57 libavfilter8 libavformat59 libva2 libva-drm2 libva-x11-2` (or whatever your distro names them). On a Mesa-shipping desktop these are usually pre-installed.
+
+### Option 2 — Build locally via the dev container
 
 ```bash
 cd /home/ubuntu/project/power-remote-dt
-./scripts/dev-container.sh bash -c 'cargo build -p prdt-host --features ffmpeg-encode-hevc-vaapi --release --target x86_64-unknown-linux-gnu'
+./scripts/dev-container.sh bash -c '
+  export FFMPEG_DLL_PATH=/usr/lib/x86_64-linux-gnu/libavcodec.so
+  export FFMPEG_INCLUDE_DIR=/usr/include/x86_64-linux-gnu
+  cargo build -p prdt-client --features ffmpeg-encode-hevc-vaapi --release --target x86_64-unknown-linux-gnu
+'
 ```
 
 Binary lands at:
 ```
-./target-docker/x86_64-unknown-linux-gnu/release/prdt-host
+./target-docker/x86_64-unknown-linux-gnu/release/prdt
 ```
+
+> Note: the dev container produces a binary linked against bookworm's libavcodec; if the iGPU host runs a different distro (e.g. Ubuntu 22.04 with libavcodec58), prefer Option 1 instead.
 
 ---
 
@@ -79,7 +105,7 @@ Binary lands at:
 Run on the Linux host machine:
 
 ```bash
-./target-docker/x86_64-unknown-linux-gnu/release/prdt-host \
+prdt host \
     --encoder ffmpeg-vaapi-hevc \
     --bind 0.0.0.0:9000 \
     --monitor 0 \
@@ -88,9 +114,11 @@ Run on the Linux host machine:
     --silent-allow --headless
 ```
 
+(If you built locally via Option 2, substitute `./target-docker/x86_64-unknown-linux-gnu/release/prdt host` for `prdt host`.)
+
 Redirect logs to file for post-run assertions:
 ```bash
-./target-docker/x86_64-unknown-linux-gnu/release/prdt-host \
+prdt host \
     --encoder ffmpeg-vaapi-hevc \
     --bind 0.0.0.0:9000 \
     --monitor 0 \
@@ -113,15 +141,17 @@ Host public key: <base64>   ← copy this for the viewer --host-pubkey argument
 On the Windows viewer machine, open PowerShell:
 
 ```powershell
-.\target\release\prdt-viewer.exe --host <linux-host-ip>:9000 --host-pubkey <pubkey> --codec h265 --decoder auto
+.\prdt.exe connect --host <linux-host-ip>:9000 --host-pubkey <pubkey> --codec h265 --decoder auto
 ```
+
+(`prdt.exe` is the unified Windows binary from the `release.yml` workflow — `prdt-windows-x86_64.exe` on the GitHub Release page. No FFmpeg feature needed on the viewer side; the existing MF / NVDEC HEVC paths are used.)
 
 Replace `<linux-host-ip>` with the LAN IP of the Linux host (e.g. from `ip addr`),
 and `<pubkey>` with the base64 string printed by the host above.
 
 Redirect viewer logs:
 ```powershell
-.\target\release\prdt-viewer.exe --host <linux-host-ip>:9000 --host-pubkey <pubkey> --codec h265 --decoder auto 2>&1 | Tee-Object viewer.log
+.\prdt.exe connect --host <linux-host-ip>:9000 --host-pubkey <pubkey> --codec h265 --decoder auto 2>&1 | Tee-Object viewer.log
 ```
 
 Expected line in viewer log:
@@ -176,7 +206,7 @@ While the session runs:
 
 1. Monitor host CPU usage — it should stay low (VA-API encode is GPU-side):
    ```bash
-   top -p $(pgrep prdt-host)
+   top -p $(pgrep -f 'prdt host')
    ```
    Expect: CPU% well below 50% for a single-core; spikes OK, sustained high usage is a
    regression signal.
