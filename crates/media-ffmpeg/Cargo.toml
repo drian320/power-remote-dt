@@ -5,12 +5,20 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-[target.'cfg(target_os = "linux")'.dependencies]
+# `error.rs` (FfmpegError + From<FfmpegError> for prdt_media_core::EncodeError)
+# is compiled on every target so the host crate can keep an `Option<FfmpegError>`
+# field cross-platform even when the encoder itself is Linux-only. So
+# prdt-media-core + thiserror must be unconditional. Linux-only modules
+# (hevc_vaapi_encoder / core_adapter / hwdevice / hwframes / options) keep
+# their cfg-gated deps below.
+[dependencies]
 prdt-media-core = { path = "../media-core" }
-prdt-media-sw   = { path = "../media-sw" }
-prdt-protocol   = { path = "../protocol" }
 thiserror = { workspace = true }
-tracing   = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+prdt-media-sw = { path = "../media-sw" }
+prdt-protocol = { path = "../protocol" }
+tracing = { workspace = true }
 rusty_ffmpeg = { version = "=0.13.0", optional = true, features = ["ffmpeg5"] }
 
 [features]
