@@ -150,19 +150,17 @@ impl D3d11Texture {
     /// processor input* (the texture handed to `CreateVideoProcessorInputView`).
     ///
     /// `BindFlags: 0`. Per the `CreateVideoProcessorInputView`
-    /// documentation, a video-processor input resource must use one of
-    /// exactly these bind-flag combinations:
-    ///   * any combination that *includes* `D3D11_BIND_DECODER`,
-    ///     `D3D11_BIND_VIDEO_ENCODER`, `D3D11_BIND_RENDER_TARGET`, or
-    ///     `D3D11_BIND_UNORDERED_ACCESS_VIEW`, or
-    ///   * `BindFlags = 0`.
-    /// `D3D11_BIND_SHADER_RESOURCE` *alone* is **not** in that set, so a
+    /// documentation, a video-processor input resource must use either
+    /// `BindFlags = 0`, or a combination that includes one of
+    /// `D3D11_BIND_DECODER`, `D3D11_BIND_VIDEO_ENCODER`,
+    /// `D3D11_BIND_RENDER_TARGET`, or `D3D11_BIND_UNORDERED_ACCESS_VIEW`.
+    /// `D3D11_BIND_SHADER_RESOURCE` alone is in neither set, so a
     /// SHADER_RESOURCE-only NV12 texture fails `CreateVideoProcessorInputView`
     /// with `E_INVALIDARG` (issue #19 Bug 4 — confirmed by the 2026-05-15
-    /// smoke probe: `BindFlags:0x8` → `0x80070057`). We pick `0`: it is
-    /// explicitly allowed, minimal, and the texture's only uses —
-    /// `CopyResource` destination for `CpuI420Uploader` and video-processor
-    /// input — neither require a bind flag.
+    /// smoke probe: `BindFlags:0x8` produced `0x80070057`). We pick `0`: it
+    /// is explicitly allowed, minimal, and the texture's only uses
+    /// (`CopyResource` destination for `CpuI420Uploader`, and video-processor
+    /// input) need no bind flag.
     pub fn new_for_video_processor(
         dev: &D3d11Device,
         width: u32,
