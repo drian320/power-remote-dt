@@ -15,7 +15,12 @@ prdt-media-policy = { path = "../media-policy" }
 prdt-protocol = { path = "../protocol" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-prdt-media-vaapi = { path = "../media-vaapi" }
+# cros-libva 0.0.13 (transitively pulled by prdt-media-vaapi) fails to
+# compile against very-recent libva headers (e.g. Arch's rolling libva 2.22+)
+# because of new VAEncPictureParameterBufferVP9 fields the wrapper doesn't
+# know about. Gate it behind a `vaapi-h264` feature (default-on for Ubuntu
+# / Debian bookworm CI) so Arch users can opt out with `--no-default-features`.
+prdt-media-vaapi = { path = "../media-vaapi", optional = true }
 x11rb = { workspace = true, features = ["shm"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -49,6 +54,14 @@ libspa-sys = "0.9"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "time", "rt", "macros"] }
+
+[features]
+default = ["vaapi-h264"]
+# Enables the legacy native VAAPI H.264 encoder path via cros-libva. Disable
+# on systems whose libva is too new for cros-libva 0.0.13's bindings (e.g.
+# Arch rolling); the FFmpeg HEVC VAAPI path in prdt-media-ffmpeg is
+# independent and stays available either way.
+vaapi-h264 = ["dep:prdt-media-vaapi"]
 
 [[example]]
 name = "dump_enum_format"

@@ -15,15 +15,22 @@ anyhow = "1"
 clap = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-prdt-host = { path = "../host" }
+prdt-host = { path = "../host", default-features = false }
 prdt-viewer = { path = "../viewer" }
 prdt-gui-client = { path = "../gui-client" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-prdt-host = { path = "../host" }
+prdt-host = { path = "../host", default-features = false }
 prdt-viewer = { path = "../viewer" }
 
 [features]
+# Default keeps cros-libva-backed VAAPI H.264 (existing CI behaviour).
+# Arch users override with `--no-default-features --features
+# ffmpeg-encode-hevc-vaapi-ffmpeg7` because cros-libva 0.0.13 doesn't compile
+# against libva ≥ 2.22.
+default = ["vaapi-h264"]
+vaapi-h264 = ["prdt-host/vaapi-h264"]
+
 # Forward the host's FFmpeg HEVC VAAPI feature so smoke-test builds of the
 # unified `prdt` binary can be produced via `cargo build -p prdt-client
 # --features ffmpeg-encode-hevc-vaapi`. The host's compile_error! on non-Linux

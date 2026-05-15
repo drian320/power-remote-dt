@@ -43,7 +43,7 @@ serde_json = { workspace = true }
 dirs = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-prdt-media-linux = { path = "../media-linux" }
+prdt-media-linux = { path = "../media-linux", default-features = false }
 prdt-input-linux = { path = "../input-linux" }
 prdt-media-sw = { path = "../media-sw" }
 softbuffer = "0.4"
