@@ -15,6 +15,19 @@ name: Smoke build — FFmpeg HEVC VAAPI
 # downloadable from the run page for 30 days.
 
 on:
+  # workflow_dispatch requires the workflow file to live on the default branch
+  # (a documented GitHub limitation). Add `pull_request` so the workflow can
+  # produce a downloadable artifact while still on the feature branch — useful
+  # for the iGPU smoke before P1 merges. Once P1 is on master, the dispatch
+  # trigger is the primary path and pull_request can be removed in a
+  # follow-up if it's noisy.
+  pull_request:
+    paths:
+      - "crates/media-ffmpeg/**"
+      - "crates/host/**"
+      - "crates/client/**"
+      - "scripts/Dockerfile.dev"
+      - ".github/workflows/smoke-build-ffmpeg-hevc.yml"
   workflow_dispatch:
     inputs:
       ref:
