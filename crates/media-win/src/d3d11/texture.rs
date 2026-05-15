@@ -149,18 +149,21 @@ impl D3d11Texture {
     /// Create a DEFAULT-usage texture intended as a Direct3D11 *video
     /// processor input* (the texture handed to `CreateVideoProcessorInputView`).
     ///
-    /// `BindFlags: 0`. Per the `CreateVideoProcessorInputView`
-    /// documentation, a video-processor input resource must use either
-    /// `BindFlags = 0`, or a combination that includes one of
-    /// `D3D11_BIND_DECODER`, `D3D11_BIND_VIDEO_ENCODER`,
-    /// `D3D11_BIND_RENDER_TARGET`, or `D3D11_BIND_UNORDERED_ACCESS_VIEW`.
-    /// `D3D11_BIND_SHADER_RESOURCE` alone is in neither set, so a
-    /// SHADER_RESOURCE-only NV12 texture fails `CreateVideoProcessorInputView`
-    /// with `E_INVALIDARG` (issue #19 Bug 4 — confirmed by the 2026-05-15
-    /// smoke probe: `BindFlags:0x8` produced `0x80070057`). We pick `0`: it
-    /// is explicitly allowed, minimal, and the texture's only uses
-    /// (`CopyResource` destination for `CpuI420Uploader`, and video-processor
-    /// input) need no bind flag.
+    /// `BindFlags: D3D11_BIND_RENDER_TARGET`. Per the
+    /// `CreateVideoProcessorInputView` documentation, a video-processor
+    /// input resource must use either `BindFlags = 0`, or a combination
+    /// that includes one of `D3D11_BIND_DECODER`,
+    /// `D3D11_BIND_VIDEO_ENCODER`, `D3D11_BIND_RENDER_TARGET`, or
+    /// `D3D11_BIND_UNORDERED_ACCESS_VIEW`. The 2026-05-15 smoke proved
+    /// the spec-allowed `BindFlags = 0` does **not** work on the user's
+    /// Intel iGPU driver — it returned `E_INVALIDARG` even with `0x0` —
+    /// so we use `RENDER_TARGET` (the most general included-flag, used
+    /// by NV12 video pipelines elsewhere). This still rules out the
+    /// pre-PR-#22 `new_default` choice (`RT | SR = 0x28`) — though `0x28`
+    /// is documented-valid (it includes RT), it is unnecessary to keep
+    /// `SHADER_RESOURCE` for this texture's only uses (`CopyResource`
+    /// destination from `CpuI420Uploader`'s staging, and video-processor
+    /// input). Keeping `BindFlags` minimal reduces driver-quirk surface.
     pub fn new_for_video_processor(
         dev: &D3d11Device,
         width: u32,
@@ -178,7 +181,7 @@ impl D3d11Texture {
                 Quality: 0,
             },
             Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: 0,
+            BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
             CPUAccessFlags: 0,
             MiscFlags: 0,
         };
