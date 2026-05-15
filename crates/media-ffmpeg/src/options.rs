@@ -3,9 +3,16 @@ use std::ptr;
 use std::ptr::NonNull;
 
 use rusty_ffmpeg::ffi::{
-    av_dict_set, AVCodecContext, AVDictionary, AVPixelFormat_AV_PIX_FMT_VAAPI, AVRational,
-    AV_CODEC_FLAG_GLOBAL_HEADER, FF_PROFILE_HEVC_MAIN,
+    av_dict_set, AVCodecContext, AVDictionary, AVRational, AV_CODEC_FLAG_GLOBAL_HEADER,
+    AV_PIX_FMT_VAAPI,
 };
+
+// HEVC Main profile (`profile_idc`) is defined by the HEVC standard as the
+// value 1. FFmpeg exposes it as `FF_PROFILE_HEVC_MAIN` (≤ FFmpeg 5.x) and as
+// `AV_PROFILE_HEVC_MAIN` (FFmpeg 6+), with the same numeric value in both.
+// Use the literal so the source compiles cleanly against rusty_ffmpeg's
+// ffmpeg5 / ffmpeg6 / ffmpeg7 bindings without per-feature import noise.
+const AV_PROFILE_HEVC_MAIN: i32 = 1;
 
 use crate::error::FfmpegError;
 
@@ -39,8 +46,8 @@ pub(crate) unsafe fn apply_low_latency_hevc(ctx: *mut AVCodecContext, t: &Encode
             num: t.fps as i32,
             den: 1,
         };
-        (*ctx).pix_fmt = AVPixelFormat_AV_PIX_FMT_VAAPI;
-        (*ctx).profile = FF_PROFILE_HEVC_MAIN as i32;
+        (*ctx).pix_fmt = AV_PIX_FMT_VAAPI;
+        (*ctx).profile = AV_PROFILE_HEVC_MAIN as i32;
         // In-band parameter sets required: re-emitted on every IDR.
         // low_power=0 is the higher-quality path on Intel iGPU at our bitrates.
         (*ctx).flags &= !(AV_CODEC_FLAG_GLOBAL_HEADER as i32);
@@ -132,8 +139,8 @@ mod tests {
             assert_eq!((*ctx).max_b_frames, 0);
             assert_eq!((*ctx).gop_size, 60);
             assert_eq!((*ctx).bit_rate, 8_000_000);
-            assert_eq!((*ctx).pix_fmt, AVPixelFormat_AV_PIX_FMT_VAAPI);
-            assert_eq!((*ctx).profile, FF_PROFILE_HEVC_MAIN as i32);
+            assert_eq!((*ctx).pix_fmt, AV_PIX_FMT_VAAPI);
+            assert_eq!((*ctx).profile, AV_PROFILE_HEVC_MAIN as i32);
             assert_eq!((*ctx).flags & AV_CODEC_FLAG_GLOBAL_HEADER as i32, 0);
         }
 

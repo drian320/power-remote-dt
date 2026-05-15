@@ -11,7 +11,7 @@ use rusty_ffmpeg::ffi::{
     av_hwframe_transfer_data as hw_upload, av_opt_set_int, av_packet_alloc, av_packet_free,
     av_packet_unref, avcodec_alloc_context3, avcodec_find_encoder_by_name, avcodec_free_context,
     avcodec_open2, avcodec_parameters_from_context, avcodec_receive_packet, avcodec_send_frame,
-    AVBSFContext, AVCodecContext, AVFrame, AVPictureType_AV_PICTURE_TYPE_I, AV_OPT_SEARCH_CHILDREN,
+    AVBSFContext, AVCodecContext, AVFrame, AV_OPT_SEARCH_CHILDREN, AV_PICTURE_TYPE_I,
     AV_PKT_FLAG_KEY,
 };
 
@@ -162,7 +162,7 @@ impl HevcVaapiFfmpegEncoder {
         // 7a. Allocate cpu_frame (NV12, software side).
         // SAFETY: av_frame_alloc allocates a zeroed AVFrame; always returns non-null or null on OOM.
         let cpu_ptr = unsafe {
-            use rusty_ffmpeg::ffi::{av_frame_alloc, AVPixelFormat_AV_PIX_FMT_NV12};
+            use rusty_ffmpeg::ffi::{av_frame_alloc, AV_PIX_FMT_NV12};
             let f = av_frame_alloc();
             if f.is_null() {
                 let mut b = bsf_ctx.as_ptr();
@@ -171,7 +171,7 @@ impl HevcVaapiFfmpegEncoder {
                 avcodec_free_context(&mut p);
                 return Err(FfmpegError::OpenCodec(-1));
             }
-            (*f).format = AVPixelFormat_AV_PIX_FMT_NV12;
+            (*f).format = AV_PIX_FMT_NV12;
             (*f).width = cfg.width as i32;
             (*f).height = cfg.height as i32;
             // SAFETY: frame fields are set; 32-byte alignment is safe for NV12.
@@ -285,7 +285,7 @@ impl HevcVaapiFfmpegEncoder {
         // SAFETY: hw is a valid AVFrame owned by self.
         unsafe {
             if force_idr {
-                (*hw).pict_type = AVPictureType_AV_PICTURE_TYPE_I;
+                (*hw).pict_type = AV_PICTURE_TYPE_I;
                 (*hw).key_frame = 1;
             } else {
                 (*hw).pict_type = 0;

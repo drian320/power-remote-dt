@@ -5,7 +5,7 @@ use std::ptr::NonNull;
 
 use rusty_ffmpeg::ffi::{
     av_buffer_unref, av_hwdevice_ctx_create, avcodec_find_encoder_by_name, AVBufferRef,
-    AVHWDeviceType_AV_HWDEVICE_TYPE_VAAPI,
+    AV_HWDEVICE_TYPE_VAAPI,
 };
 
 use crate::error::FfmpegError;
@@ -32,7 +32,7 @@ impl VaapiHwDevice {
         let ret = unsafe {
             av_hwdevice_ctx_create(
                 &mut raw_ptr,
-                AVHWDeviceType_AV_HWDEVICE_TYPE_VAAPI,
+                AV_HWDEVICE_TYPE_VAAPI,
                 node_ptr,
                 ptr::null_mut(),
                 0,

@@ -42,6 +42,8 @@ async-trait = "0.1"
 
 [features]
 ffmpeg-encode-hevc-vaapi = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-vaapi"]
+ffmpeg-encode-hevc-vaapi-ffmpeg6 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-vaapi-ffmpeg6"]
+ffmpeg-encode-hevc-vaapi-ffmpeg7 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-vaapi-ffmpeg7"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }

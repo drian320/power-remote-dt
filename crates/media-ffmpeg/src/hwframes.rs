@@ -2,7 +2,7 @@ use std::ptr::NonNull;
 
 use rusty_ffmpeg::ffi::{
     av_buffer_unref, av_hwframe_ctx_alloc, av_hwframe_ctx_init, AVBufferRef, AVHWFramesContext,
-    AVPixelFormat_AV_PIX_FMT_NV12, AVPixelFormat_AV_PIX_FMT_VAAPI,
+    AV_PIX_FMT_NV12, AV_PIX_FMT_VAAPI,
 };
 
 use crate::error::FfmpegError;
@@ -29,8 +29,8 @@ impl VaapiHwFrames {
         // SAFETY: raw_ptr is non-null; data points to the embedded AVHWFramesContext.
         unsafe {
             let ctx = (*raw_ptr).data as *mut AVHWFramesContext;
-            (*ctx).format = AVPixelFormat_AV_PIX_FMT_VAAPI;
-            (*ctx).sw_format = AVPixelFormat_AV_PIX_FMT_NV12;
+            (*ctx).format = AV_PIX_FMT_VAAPI;
+            (*ctx).sw_format = AV_PIX_FMT_NV12;
             (*ctx).width = width as i32;
             (*ctx).height = height as i32;
             (*ctx).initial_pool_size = 4;
@@ -52,7 +52,7 @@ impl VaapiHwFrames {
             let ctx = (*raw_ptr).data as *mut AVHWFramesContext;
             (*ctx).sw_format
         };
-        if actual_sw_format != AVPixelFormat_AV_PIX_FMT_NV12 {
+        if actual_sw_format != AV_PIX_FMT_NV12 {
             // SAFETY: raw_ptr is the unique owner.
             unsafe { av_buffer_unref(&mut raw_ptr) };
             return Err(FfmpegError::HwFrames(

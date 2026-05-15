@@ -27,8 +27,13 @@ prdt-viewer = { path = "../viewer" }
 # Forward the host's FFmpeg HEVC VAAPI feature so smoke-test builds of the
 # unified `prdt` binary can be produced via `cargo build -p prdt-client
 # --features ffmpeg-encode-hevc-vaapi`. The host's compile_error! on non-Linux
-# targets remains the hard gate.
+# targets remains the hard gate. The -ffmpeg6 / -ffmpeg7 variants select
+# rusty_ffmpeg's pre-generated bindings for those FFmpeg majors so the
+# resulting binary links cleanly against system libavcodec on Ubuntu 24.04
+# (ffmpeg6) or Arch (ffmpeg7) without library-not-found errors at runtime.
 ffmpeg-encode-hevc-vaapi = ["prdt-host/ffmpeg-encode-hevc-vaapi"]
+ffmpeg-encode-hevc-vaapi-ffmpeg6 = ["prdt-host/ffmpeg-encode-hevc-vaapi-ffmpeg6"]
+ffmpeg-encode-hevc-vaapi-ffmpeg7 = ["prdt-host/ffmpeg-encode-hevc-vaapi-ffmpeg7"]
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"

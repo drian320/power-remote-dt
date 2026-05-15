@@ -19,9 +19,23 @@ thiserror = { workspace = true }
 prdt-media-sw = { path = "../media-sw" }
 prdt-protocol = { path = "../protocol" }
 tracing = { workspace = true }
-rusty_ffmpeg = { version = "=0.13.0", optional = true, features = ["ffmpeg5"] }
+# 0.16.5 carries pre-generated bindings for FFmpeg 5/6/7/7.1/8. Pick the right
+# one via the per-ABI feature below — the FFmpeg major must match what's
+# installed on the build/runtime host (bookworm = ffmpeg5; Ubuntu 24.04 =
+# ffmpeg6 but ffmpeg5 bindings happen to be ABI-stable here; Arch = ffmpeg7).
+rusty_ffmpeg = { version = "=0.16.7", optional = true, default-features = false }
 
 [features]
 default = []
+
+# Pick exactly one FFmpeg ABI feature per build. They are mutually exclusive
+# (rusty_ffmpeg's build script rejects multiple) — Cargo merges features
+# across the dep graph so don't enable two simultaneously.
 ffmpeg = ["dep:rusty_ffmpeg"]
-ffmpeg-encode-hevc-vaapi = ["ffmpeg"]
+
+# Backend × ABI combinations. The unsuffixed `ffmpeg-encode-hevc-vaapi`
+# defaults to ffmpeg5 for backward compat (bookworm dev container, current
+# CI matrix). Arch / FFmpeg 7 hosts use the `-ffmpeg7` variant.
+ffmpeg-encode-hevc-vaapi = ["ffmpeg", "rusty_ffmpeg/ffmpeg5"]
+ffmpeg-encode-hevc-vaapi-ffmpeg6 = ["ffmpeg", "rusty_ffmpeg/ffmpeg6"]
+ffmpeg-encode-hevc-vaapi-ffmpeg7 = ["ffmpeg", "rusty_ffmpeg/ffmpeg7"]
