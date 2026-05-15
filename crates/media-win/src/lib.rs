@@ -26,7 +26,8 @@ pub use cpu_i420_upload::CpuI420Uploader;
 pub use crate::nvdec::decoder::DualPlaneFrame;
 pub use adapter::{enumerate_adapters, pick_adapter_by_index, pick_default_adapter, AdapterInfo};
 pub use d3d11::{
-    D3d11Device, D3d11Texture, DualPlaneYuvRenderer, Nv12Renderer, SwapChain, TextureFormat,
+    D3d11Device, D3d11Texture, DualPlaneYuvRenderer, Nv12Renderer, Nv12ShaderRenderer, SwapChain,
+    TextureFormat,
 };
 pub use dxgi::{enumerate_outputs_for_adapter, AcquiredFrame, DesktopDuplication, OutputInfo};
 pub use encoder_trait::{EncodedH265Frame, Hevc265Encoder, HwHevcEncoder};

@@ -6,6 +6,7 @@ pub mod cursor_overlay;
 pub mod device;
 pub mod dual_plane_renderer;
 pub mod nv12_renderer;
+pub mod nv12_shader_renderer;
 pub mod swapchain;
 pub mod texture;
 
@@ -15,5 +16,6 @@ pub use cursor_overlay::CursorOverlay;
 pub use device::D3d11Device;
 pub use dual_plane_renderer::DualPlaneYuvRenderer;
 pub use nv12_renderer::Nv12Renderer;
+pub use nv12_shader_renderer::Nv12ShaderRenderer;
 pub use swapchain::SwapChain;
 pub use texture::{D3d11Texture, TextureFormat};
