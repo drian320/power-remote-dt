@@ -47,7 +47,7 @@ pub(crate) unsafe fn apply_low_latency_hevc(ctx: *mut AVCodecContext, t: &Encode
             den: 1,
         };
         (*ctx).pix_fmt = AV_PIX_FMT_VAAPI;
-        (*ctx).profile = AV_PROFILE_HEVC_MAIN as i32;
+        (*ctx).profile = AV_PROFILE_HEVC_MAIN;
         // In-band parameter sets required: re-emitted on every IDR.
         // low_power=0 is the higher-quality path on Intel iGPU at our bitrates.
         (*ctx).flags &= !(AV_CODEC_FLAG_GLOBAL_HEADER as i32);
