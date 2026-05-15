@@ -28,13 +28,18 @@ jobs:
       # cross-compiling to windows-msvc from a Linux dev-container requires cargo-xwin
       # or mingw which are not available in Dockerfile.dev.
       - name: Cross-target compile_error! assertion (A2b gate)
+        # PowerShell collects multi-line command output as a string array, and
+        # `-notmatch` against an array returns elements that don't match (which
+        # is truthy if any line doesn't match — almost always). Pipe through
+        # Out-String so the regex match runs against the joined single string.
         run: |
-          $output = cargo check -p prdt-host --features ffmpeg-encode-hevc-vaapi 2>&1
+          $output = (cargo check -p prdt-host --features ffmpeg-encode-hevc-vaapi 2>&1) | Out-String
           Write-Output $output
           if ($output -notmatch 'Linux-only') {
             Write-Error "FAIL: expected compile_error! containing 'Linux-only'"
             exit 1
           }
+          Write-Output "PASS: compile_error! contains 'Linux-only'"
 
   media-ffmpeg-compile:
     runs-on: ubuntu-latest
