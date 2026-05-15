@@ -8,10 +8,12 @@
 
 #![forbid(unsafe_code)]
 
+pub mod annexb;
 pub mod error;
 pub mod frame;
 pub mod traits;
 
-pub use error::{CaptureError, DecodeError, EncodeError};
+pub use annexb::normalize_to_annexb;
+pub use error::{AnnexBError, CaptureError, DecodeError, EncodeError};
 pub use frame::EncodedPacket;
 pub use traits::{Capturer, Decoder, Encoder};

@@ -9,6 +9,7 @@ rust-version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+prdt-media-core = { path = "../media-core" }
 prdt-media-sw = { path = "../media-sw" }
 prdt-protocol = { path = "../protocol" }
 bytes = { workspace = true }
