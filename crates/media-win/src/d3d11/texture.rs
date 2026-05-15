@@ -149,17 +149,18 @@ impl D3d11Texture {
     /// Create a DEFAULT-usage texture intended as a Direct3D11 *video
     /// processor input* (the texture handed to `CreateVideoProcessorInputView`).
     ///
-    /// `SHADER_RESOURCE` only — **no `RENDER_TARGET`**. The D3D11 video
-    /// processor's `CreateVideoProcessorInputView` rejects NV12 textures
-    /// that carry `D3D11_BIND_RENDER_TARGET` with `E_INVALIDARG` (issue
-    /// #19 Bug 4: the OpenH264 software-decode path fed `Nv12Renderer`
-    /// textures built via `new_default`, which sets `RENDER_TARGET`, and
-    /// every frame failed to present). This is the same bind-flag
-    /// sensitivity already documented on `new_for_cuda_interop`.
-    ///
-    /// The resulting texture is still a valid `CopyResource` destination
-    /// (`CpuI420Uploader` copies its staging texture into it) — copy
-    /// destinations do not require any specific bind flag.
+    /// `BindFlags: 0`. Per the `CreateVideoProcessorInputView`
+    /// documentation, a video-processor input resource must use either
+    /// `BindFlags = 0`, or a combination that includes one of
+    /// `D3D11_BIND_DECODER`, `D3D11_BIND_VIDEO_ENCODER`,
+    /// `D3D11_BIND_RENDER_TARGET`, or `D3D11_BIND_UNORDERED_ACCESS_VIEW`.
+    /// `D3D11_BIND_SHADER_RESOURCE` alone is in neither set, so a
+    /// SHADER_RESOURCE-only NV12 texture fails `CreateVideoProcessorInputView`
+    /// with `E_INVALIDARG` (issue #19 Bug 4 — confirmed by the 2026-05-15
+    /// smoke probe: `BindFlags:0x8` produced `0x80070057`). We pick `0`: it
+    /// is explicitly allowed, minimal, and the texture's only uses
+    /// (`CopyResource` destination for `CpuI420Uploader`, and video-processor
+    /// input) need no bind flag.
     pub fn new_for_video_processor(
         dev: &D3d11Device,
         width: u32,
@@ -177,7 +178,7 @@ impl D3d11Texture {
                 Quality: 0,
             },
             Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            BindFlags: 0,
             CPUAccessFlags: 0,
             MiscFlags: 0,
         };
@@ -410,8 +411,9 @@ mod tests {
     #[test]
     fn create_video_processor_input_texture() {
         // issue #19 Bug 4: NV12 video-processor input textures must be
-        // created without D3D11_BIND_RENDER_TARGET or
-        // CreateVideoProcessorInputView rejects them with E_INVALIDARG.
+        // created with BindFlags = 0 (or a combination including
+        // RENDER_TARGET / DECODER / VIDEO_ENCODER / UAV); SHADER_RESOURCE
+        // alone makes CreateVideoProcessorInputView fail with E_INVALIDARG.
         let dev = D3d11Device::create_default().expect("D3D11 device");
         let tex = D3d11Texture::new_for_video_processor(&dev, 128, 64, TextureFormat::Nv12)
             .expect("create video-processor input texture");
