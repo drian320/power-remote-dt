@@ -146,25 +146,22 @@ impl D3d11Texture {
         Self::new_with_desc(dev, desc, fmt, None)
     }
 
-    /// Create a DEFAULT-usage texture intended as a Direct3D11 *video
-    /// processor input* (the texture handed to `CreateVideoProcessorInputView`).
+    /// Create a DEFAULT-usage NV12 texture intended as the input to the
+    /// custom shader-based renderer `Nv12ShaderRenderer` (the OpenH264 SW
+    /// path, via `CpuI420Uploader`).
     ///
-    /// `BindFlags: D3D11_BIND_RENDER_TARGET`. Per the
-    /// `CreateVideoProcessorInputView` documentation, a video-processor
-    /// input resource must use either `BindFlags = 0`, or a combination
-    /// that includes one of `D3D11_BIND_DECODER`,
-    /// `D3D11_BIND_VIDEO_ENCODER`, `D3D11_BIND_RENDER_TARGET`, or
-    /// `D3D11_BIND_UNORDERED_ACCESS_VIEW`. The 2026-05-15 smoke proved
-    /// the spec-allowed `BindFlags = 0` does **not** work on the user's
-    /// Intel iGPU driver — it returned `E_INVALIDARG` even with `0x0` —
-    /// so we use `RENDER_TARGET` (the most general included-flag, used
-    /// by NV12 video pipelines elsewhere). This still rules out the
-    /// pre-PR-#22 `new_default` choice (`RT | SR = 0x28`) — though `0x28`
-    /// is documented-valid (it includes RT), it is unnecessary to keep
-    /// `SHADER_RESOURCE` for this texture's only uses (`CopyResource`
-    /// destination from `CpuI420Uploader`'s staging, and video-processor
-    /// input). Keeping `BindFlags` minimal reduces driver-quirk surface.
-    pub fn new_for_video_processor(
+    /// `BindFlags: D3D11_BIND_SHADER_RESOURCE`. The renderer creates two
+    /// SRVs on this texture — one `R8_UNORM` (Y plane), one `R8G8_UNORM`
+    /// (UV plane) — and samples them in a BT.709 fragment shader.
+    ///
+    /// We deliberately route around `ID3D11VideoProcessor` here: the
+    /// 2026-05-15 smoke proved the Intel iGPU driver rejects
+    /// `CreateVideoProcessorInputView` on CPU-uploaded NV12 textures for
+    /// every documented-allowed `BindFlags` value (`0x0`, `0x8`, `0x20`
+    /// were all `E_INVALIDARG` even though `CheckVideoProcessorFormat`
+    /// reported NV12 input as supported). `Nv12ShaderRenderer` does not
+    /// touch the video processor at all, so the bug never fires.
+    pub fn new_for_nv12_shader_input(
         dev: &D3d11Device,
         width: u32,
         height: u32,
@@ -181,7 +178,7 @@ impl D3d11Texture {
                 Quality: 0,
             },
             Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
             CPUAccessFlags: 0,
             MiscFlags: 0,
         };
@@ -412,14 +409,15 @@ mod tests {
     }
 
     #[test]
-    fn create_video_processor_input_texture() {
-        // issue #19 Bug 4: NV12 video-processor input textures must be
-        // created with BindFlags = 0 (or a combination including
-        // RENDER_TARGET / DECODER / VIDEO_ENCODER / UAV); SHADER_RESOURCE
-        // alone makes CreateVideoProcessorInputView fail with E_INVALIDARG.
+    fn create_nv12_shader_input_texture() {
+        // issue #19 Bug 4 final fix: route the OpenH264 path through the
+        // shader-based Nv12ShaderRenderer instead of ID3D11VideoProcessor
+        // (the latter rejected CPU-uploaded NV12 textures with E_INVALIDARG
+        // on the Intel iGPU regardless of BindFlags). The shader needs
+        // SHADER_RESOURCE for the Y / UV SRVs.
         let dev = D3d11Device::create_default().expect("D3D11 device");
-        let tex = D3d11Texture::new_for_video_processor(&dev, 128, 64, TextureFormat::Nv12)
-            .expect("create video-processor input texture");
+        let tex = D3d11Texture::new_for_nv12_shader_input(&dev, 128, 64, TextureFormat::Nv12)
+            .expect("create nv12 shader input texture");
         assert_eq!(tex.width(), 128);
         assert_eq!(tex.height(), 64);
         assert_eq!(tex.format(), TextureFormat::Nv12);

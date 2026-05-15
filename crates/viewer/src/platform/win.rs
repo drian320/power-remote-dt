@@ -15,7 +15,7 @@ use prdt_media_sw::Openh264Decoder;
 use prdt_media_win::NvdecD3d11Consumer;
 use prdt_media_win::{
     pick_default_adapter, CpuI420Uploader, D3d11Device, D3d11Texture, MfD3d11Consumer,
-    Nv12Renderer, SwapChain,
+    Nv12Renderer, Nv12ShaderRenderer, SwapChain,
 };
 use prdt_protocol::MonitorRect;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -68,6 +68,11 @@ pub(crate) enum WinRenderer {
     Mf(Nv12Renderer),
     #[cfg(prdt_nvdec_bindings)]
     Nvdec(prdt_media_win::DualPlaneYuvRenderer),
+    /// OpenH264 SW path: takes a single NV12 D3D11 texture (uploaded by
+    /// `CpuI420Uploader`) and converts via a custom BT.709 pixel shader.
+    /// Sidesteps `ID3D11VideoProcessor`, which the Intel iGPU rejects on
+    /// CPU-uploaded NV12 textures (issue #19 Bug 4).
+    Openh264(Nv12ShaderRenderer),
 }
 
 /// Per-OS render-state. Windows holds D3D11Device + SwapChain + the
@@ -177,6 +182,9 @@ pub fn resize_renderer(
             WinRenderer::Nvdec(_) => {
                 // DualPlaneYuvRenderer is dimension-agnostic.
             }
+            WinRenderer::Openh264(_) => {
+                // Nv12ShaderRenderer is dimension-agnostic.
+            }
         }
     }
     Ok(())
@@ -194,6 +202,7 @@ pub fn present_frame(
         (PlatformFrame::Nv12(nv12), Some(WinRenderer::Mf(rmf))) => {
             rmf.input_size() != (nv12.width(), nv12.height())
         }
+        (PlatformFrame::Nv12(_), Some(WinRenderer::Openh264(_))) => false,
         (_, None) => true,
         #[allow(unreachable_patterns)]
         _ => true,
@@ -218,6 +227,12 @@ pub fn present_frame(
                     .map_err(|e| super::RenderError::Init(format!("Nv12Renderer::new: {e}")))?;
                 WinRenderer::Mf(rn)
             }
+        } else if decoder_label == "openh264" {
+            // Single-NV12-texture shader renderer — sidesteps the Intel
+            // ID3D11VideoProcessor input-view bug entirely (issue #19 Bug 4).
+            let rn = Nv12ShaderRenderer::new(&r.dev)
+                .map_err(|e| super::RenderError::Init(format!("Nv12ShaderRenderer::new: {e}")))?;
+            WinRenderer::Openh264(rn)
         } else {
             let rn = Nv12Renderer::new(&r.dev, iw, ih, r.swap.width(), r.swap.height())
                 .map_err(|e| super::RenderError::Init(format!("Nv12Renderer::new: {e}")))?;
@@ -232,6 +247,11 @@ pub fn present_frame(
             (WinRenderer::Mf(rmf), PlatformFrame::Nv12(nv12_tex)) => {
                 rmf.render(nv12_tex, &r.swap).map_err(|e| {
                     super::RenderError::Present(format!("Nv12Renderer::render: {e}"))
+                })?;
+            }
+            (WinRenderer::Openh264(rn), PlatformFrame::Nv12(nv12_tex)) => {
+                rn.render(nv12_tex, &r.swap).map_err(|e| {
+                    super::RenderError::Present(format!("Nv12ShaderRenderer::render: {e}"))
                 })?;
             }
             #[cfg(prdt_nvdec_bindings)]

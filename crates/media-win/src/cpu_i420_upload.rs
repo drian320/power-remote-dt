@@ -74,13 +74,12 @@ impl CpuI420Uploader {
             hresult: 0,
         })?;
 
-        // Must be a video-processor input texture (SHADER_RESOURCE only,
-        // no RENDER_TARGET): `Nv12Renderer` feeds `dst` to
-        // `CreateVideoProcessorInputView`, which rejects NV12 textures
-        // carrying `D3D11_BIND_RENDER_TARGET` with `E_INVALIDARG` (issue
-        // #19 Bug 4). `dst` is only ever a `CopyResource` destination
-        // here, so it never needs render-target binding.
-        let dst = D3d11Texture::new_for_video_processor(dev, width, height, TextureFormat::Nv12)?;
+        // Created with SHADER_RESOURCE so `Nv12ShaderRenderer` can build
+        // R8 / R8G8 SRVs on it for the BT.709 fragment shader. We
+        // deliberately route around `ID3D11VideoProcessor` (issue #19
+        // Bug 4 — the Intel iGPU rejected `CreateVideoProcessorInputView`
+        // on CPU-uploaded NV12 textures for every documented BindFlags).
+        let dst = D3d11Texture::new_for_nv12_shader_input(dev, width, height, TextureFormat::Nv12)?;
 
         Ok(Self {
             dev: dev.clone(),
