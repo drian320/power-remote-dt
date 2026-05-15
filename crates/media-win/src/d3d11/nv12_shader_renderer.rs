@@ -22,16 +22,12 @@ use windows::Win32::Graphics::Direct3D::{
     D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST, D3D_SRV_DIMENSION_TEXTURE2D,
 };
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11PixelShader, ID3D11RenderTargetView, ID3D11Resource, ID3D11SamplerState,
-    ID3D11ShaderResourceView, ID3D11VertexShader, D3D11_COMPARISON_NEVER,
-    D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_RENDER_TARGET_VIEW_DESC,
-    D3D11_RENDER_TARGET_VIEW_DESC_0, D3D11_RTV_DIMENSION_TEXTURE2D, D3D11_SAMPLER_DESC,
-    D3D11_SHADER_RESOURCE_VIEW_DESC, D3D11_SHADER_RESOURCE_VIEW_DESC_0, D3D11_TEX2D_RTV,
+    ID3D11PixelShader, ID3D11Resource, ID3D11SamplerState, ID3D11ShaderResourceView,
+    ID3D11VertexShader, D3D11_COMPARISON_NEVER, D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+    D3D11_SAMPLER_DESC, D3D11_SHADER_RESOURCE_VIEW_DESC, D3D11_SHADER_RESOURCE_VIEW_DESC_0,
     D3D11_TEX2D_SRV, D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_VIEWPORT,
 };
-use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8_UNORM,
-};
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8_UNORM};
 
 use crate::d3d11::swapchain::SwapChain;
 use crate::d3d11::{D3d11Device, D3d11Texture};
@@ -142,29 +138,19 @@ impl Nv12ShaderRenderer {
     /// per-frame Y and UV SRVs (cheap; matches the per-frame view pattern
     /// used by `DualPlaneYuvRenderer`).
     pub fn render(&self, input: &D3d11Texture, swap: &SwapChain) -> Result<()> {
-        let backbuf = swap.backbuffer()?;
         let out_w = swap.width();
         let out_h = swap.height();
 
-        let rtv_desc = D3D11_RENDER_TARGET_VIEW_DESC {
-            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            ViewDimension: D3D11_RTV_DIMENSION_TEXTURE2D,
-            Anonymous: D3D11_RENDER_TARGET_VIEW_DESC_0 {
-                Texture2D: D3D11_TEX2D_RTV { MipSlice: 0 },
-            },
-        };
-        let backbuf_res: ID3D11Resource = backbuf
-            .cast()
-            .map_err(|e| MediaError::d3d11("backbuffer -> ID3D11Resource", e))?;
-        let mut rtv: Option<ID3D11RenderTargetView> = None;
-        unsafe {
-            self.dev
-                .device()
-                .CreateRenderTargetView(&backbuf_res, Some(&rtv_desc), Some(&mut rtv))
-                .map_err(|e| MediaError::d3d11("CreateRenderTargetView", e))?;
-        }
-        let rtv =
-            rtv.ok_or_else(|| MediaError::Other("CreateRenderTargetView returned null".into()))?;
+        // Reuse the swapchain's cached backbuffer RTV. Creating a *second*
+        // RTV on the same flip-discard backbuffer triggered
+        // DXGI_ERROR_DEVICE_REMOVED (0x887A0005) on the Intel iGPU during
+        // the 2026-05-15 smoke. The SwapChain creates and caches its own
+        // RTV at construction (and refreshes it on resize), so no extra
+        // CreateRenderTargetView is needed here.
+        let rtv = swap
+            .rtv()
+            .ok_or_else(|| MediaError::Other("SwapChain has no cached RTV".into()))?
+            .clone();
 
         // Both SRVs are on the SAME NV12 texture; the format alone tells
         // the driver which plane to expose (R8 -> Y, R8G8 -> UV).
