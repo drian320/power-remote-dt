@@ -26,6 +26,8 @@ on:
       - "crates/media-ffmpeg/**"
       - "crates/host/**"
       - "crates/client/**"
+      - "crates/viewer/**"
+      - "crates/media-win/**"
       - "scripts/Dockerfile.dev"
       - ".github/workflows/smoke-build-ffmpeg-hevc.yml"
   workflow_dispatch:
@@ -108,6 +110,51 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: prdt-linux-x86_64-ffmpeg-hevc
+          path: artifacts/
+          retention-days: 30
+          if-no-files-found: error
+
+  build-windows:
+    name: Build Windows x86_64 prdt (viewer-side, no FFmpeg feature)
+    # Windows side decodes HEVC via Media Foundation / NVDEC — it does NOT need
+    # the ffmpeg-encode-hevc-vaapi feature. We just want a downloadable prdt.exe
+    # that pairs with the Linux-side ffmpeg-hevc artifact so the iGPU smoke can
+    # be run end-to-end (Arch host → Windows viewer) without forcing the user
+    # to install Rust on Windows.
+    runs-on: windows-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build prdt (release, no FFmpeg feature)
+        run: |
+          cargo build --release -p prdt-client --target x86_64-pc-windows-msvc
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          cp target/x86_64-pc-windows-msvc/release/prdt.exe artifacts/prdt-windows-x86_64.exe
+          (cd artifacts && sha256sum prdt-windows-x86_64.exe > prdt-windows-x86_64.exe.sha256)
+          ls -la artifacts/
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prdt-windows-x86_64
           path: artifacts/
           retention-days: 30
           if-no-files-found: error
