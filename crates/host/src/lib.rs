@@ -4,6 +4,11 @@ mod platform;
 mod status;
 mod watchdog;
 
+#[cfg(all(feature = "ffmpeg-encode-hevc-vaapi", not(target_os = "linux")))]
+compile_error!(
+    "feature 'ffmpeg-encode-hevc-vaapi' is not available on this target (Linux-only in P1)"
+);
+
 use std::fs;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -753,7 +758,8 @@ pub async fn run_host(
             crate::platform::win::supported_codecs_for_encoder_arg(&args.encoder, &adapter)
         };
         #[cfg(target_os = "linux")]
-        let host_supported: Vec<Codec> = vec![Codec::H264];
+        let host_supported: Vec<Codec> =
+            crate::platform::linux::linux_supported_codecs(&args.encoder);
         let hs_result = match host_handshake(
             &*transport,
             &auth_hook,

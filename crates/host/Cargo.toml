@@ -21,11 +21,14 @@ prdt-signaling-client = { path = "../signaling-client" }
 prdt-signaling-proto = { path = "../signaling-proto" }
 prdt-transport = { path = "../transport" }
 prdt-gui-host = { path = "../gui-host" }
+prdt-media-core = { path = "../media-core", optional = true }
+prdt-media-ffmpeg = { path = "../media-ffmpeg", optional = true }
 tokio = { workspace = true, features = ["signal", "fs", "io-util", "time"] }
 url = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+bytes = { workspace = true }
 anyhow = "1"
 thiserror = { workspace = true }
 dirs = { workspace = true }
@@ -36,6 +39,9 @@ subtle = "2"
 serde.workspace = true
 toml.workspace = true
 async-trait = "0.1"
+
+[features]
+ffmpeg-encode-hevc-vaapi = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-vaapi"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
