@@ -12,6 +12,29 @@ FROM rust:1-bookworm
 #   now need the full GTK3 stack + libxdo. Keep this list in sync with
 #   .github/workflows/release.yml's apt list.
 # - Audio (cpal/audiopus): libasound2-dev + cmake.
+# ---- CUDA + NPP dev libs (NVIDIA repo, headers + import libs only) ----
+# Optional dependency for the ffmpeg-encode-hevc-nvenc-npp feature.
+# We pull from NVIDIA's official CUDA apt repo because Debian 12
+# contrib only ships NPP *runtime* libs, not -dev headers.
+# No nvcc / nvrtc / driver pulled — runtime CUDA is exercised only by
+# #[ignore]'d real-HW tests on the smoke runner, never on this image.
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+      ca-certificates curl gnupg \
+ && curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb \
+      -o /tmp/cuda-keyring.deb \
+ && dpkg -i /tmp/cuda-keyring.deb \
+ && rm /tmp/cuda-keyring.deb \
+ && apt-get update -qq \
+ && apt-get install -y -qq --no-install-recommends \
+      cuda-cudart-dev-12-4 \
+      libnpp-dev-12-4 \
+ && rm -rf /var/lib/apt/lists/*
+# Pin to CUDA 12.4 toolkit (matches NVIDIA driver >= 535 floor per
+# P1.5 A8 — driver 535 supports up to CUDA 12.2 forward-compat, and
+# CUDA 12.4 runtime works against driver 535+ via forward compat).
+# If NVIDIA bumps the keyring URL or drops 12-4 packages, bump these
+# two version suffixes; everything else stays put.
+
 RUN apt-get update -qq && \
     apt-get install -y -qq --no-install-recommends \
         libpipewire-0.3-dev \

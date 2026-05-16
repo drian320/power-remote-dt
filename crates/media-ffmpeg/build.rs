@@ -15,4 +15,18 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=avutil");
     println!("cargo:rustc-link-lib=dylib=avformat");
     println!("cargo:rustc-link-search=native=/usr/lib/x86_64-linux-gnu");
+
+    // P2.5: NPP feature pulls in CUDA + NPP runtime libs. Step 0 Dockerfile
+    // installs the official NVIDIA CUDA repo packages cuda-cudart-dev-12-4 +
+    // libnpp-dev-12-4 at /usr/local/cuda-12.4/{lib64,include}. On non-CUDA
+    // build hosts (CI ubuntu-latest without the NVIDIA repo), `cargo check`
+    // is link-free and skips this; `cargo test` needs the libs or the stub
+    // .so at tests/fixtures/libnppicc-stub.so via RUSTFLAGS='-L ...'.
+    if std::env::var("CARGO_FEATURE_FFMPEG_ENCODE_HEVC_NVENC_NPP_ANY").is_ok() {
+        println!("cargo:rustc-link-search=native=/usr/local/cuda-12.4/lib64");
+        println!("cargo:rustc-link-search=native=/usr/local/cuda/lib64");
+        println!("cargo:rustc-link-lib=dylib=cudart");
+        println!("cargo:rustc-link-lib=dylib=nppicc");
+        println!("cargo:rerun-if-env-changed=CARGO_FEATURE_FFMPEG_ENCODE_HEVC_NVENC_NPP_ANY");
+    }
 }

@@ -344,6 +344,94 @@ required; the test exercises only the decoder arm.
 
 ---
 
+## P2.5 — NPP encode path (CUDA NPP BGRA→NV12, closes F4)
+
+**Status:** Proposed (2026-05-16, plan `.omc/plans/2026-05-16-p2-5-cuda-npp-bgra-nv12.md`)
+
+### Decision
+
+Add an opt-in CUDA NPP BGRA→NV12 conversion path for the Linux NVENC encoder
+behind a new `ffmpeg-encode-hevc-nvenc-npp{,-ffmpeg5,-ffmpeg7}` Cargo feature
+family (4 features — each NPP variant transitively enables the matching NVENC
+ABI variant via Cargo's additive feature unification). Implemented as a separate
+`HevcNvencNppFfmpegEncoder` type in
+`crates/media-ffmpeg/src/hevc_nvenc_npp_encoder.rs`, with a thin hand-rolled
+`extern "C"` CUDA runtime API + NPP wrapper in `crates/media-ffmpeg/src/cuda_npp.rs`.
+Shared bookkeeping extracted into `crates/media-ffmpeg/src/nvenc_common.rs`
+(R6 synthesis — eliminates bookkeeping drift by construction).
+
+**F4 CLOSED.** GPU-side BGRA→NV12 for NVENC is now implemented. VAAPI VPP
+BGRA→NV12 remains explicitly out of scope (VAAPI encode latency is larger than
+its CPU-conversion savings; see plan §6 Option B).
+
+### Drivers
+
+1. **CPU budget on NVENC hosts (F4).** At 1080p60, two CPU pixel passes
+   (`bgra_to_i420` + `i420_to_nv12_into`) consume ~1–3 ms per frame; NVENC
+   encode itself runs in ~2–5 ms. NPP moves both passes to the GPU at ~0.3 ms.
+2. **`auto` policy stability.** NPP is explicit opt-in only — `--encoder auto`
+   is byte-stable from P1.6. Use `--encoder ffmpeg-nvenc-hevc-npp` (or alias
+   `--encoder nvenc-npp`) to opt in.
+3. **A13 behavioral regression invariance.** The R6 refactor is mechanical;
+   existing P1.5 NVENC unit tests prove encoded-bytestream equivalence.
+
+### Runtime semantics (R5)
+
+| Build features | Host hardware | `--encoder ffmpeg-nvenc-hevc-npp` | `--encoder auto` |
+|---|---|---|---|
+| `nvenc + npp` | NVIDIA dGPU + libnppicc loaded | NPP path; log emits `convert_path="npp"` | Picks plain NVENC (NPP never auto-selected) |
+| `nvenc + npp` | Non-NVIDIA or libnppicc absent | `HevcNvencNppFfmpegEncoder::new` fails with `FfmpegError::HwDevice` — explicit failure, not silent fallback | Falls through `auto` chain normally |
+| `nvenc` only (no npp) | Any | `normalize_encoder` warns; falls back to openh264 | Plain NVENC selected normally |
+
+### Prerequisites
+
+- **NVIDIA driver ≥ 535** — matches P1.5 A8; provides CUDA 12.x forward-compat.
+- **CUDA runtime ≥ 12.0** — `CudaNppContext::new` probes `cudaDriverGetVersion`
+  and rejects drivers reporting < 12000 with a clear error.
+- **`libcudart.so.12` + `libnppicc.so.12`** at runtime — not linked at build
+  time; binary passes the ldd portability guard.
+
+### A10 carve-out (O1)
+
+`hevc_nvenc_npp_encoder.rs` contains **zero** `hw_(upload|download)()` call
+sites. The NPP path uploads BGRA via `cudaMemcpy2D` (HtoD) and writes NV12
+directly into the AVFrame's CUDA planes — the deliberate by-design replacement
+for `av_hwframe_transfer_data`. New NPP-style sites carry
+`// ci-allow: cuda-direct`. CI grep guard explicitly asserts zero matches in
+the NPP encoder file.
+
+### A11 — Feature-flag ABI unification
+
+`rusty_ffmpeg`'s ABI features form an additive cascade (`ffmpeg6 = ["ffmpeg5"]`,
+`ffmpeg7 = ["ffmpeg6"]`). Cargo unifies features additively; enabling
+`ffmpeg-encode-hevc-nvenc-npp-ffmpeg5` + `ffmpeg-encode-hevc-nvenc-ffmpeg7`
+simultaneously resolves `rusty_ffmpeg` to `ffmpeg7` (highest cascade). Verified
+empirically by CI cell A11.b (`cargo metadata` Python assertion).
+
+### R6 architectural note
+
+`nvenc_common.rs` was extracted as a "second variant pushed the extract"
+refactor — aligned with P1.5's principle. Both encoder files are thin shells
+over shared helpers; drift is impossible by construction.
+
+### F10 tripwire
+
+`cuda_npp.rs` binds **8 symbols** (CUDA runtime API `cuda*` — implementation
+deviation from plan's driver API `cu*`; see module doc). If symbol count grows
+past **12**, re-evaluate `cust`/`cudarc` crate dep (F10). File header carries
+`// CURRENT SYMBOL COUNT: 8` as the human-readable tripwire.
+
+### Follow-ups (P2.5)
+
+- **F5 (next ralplan, HDR)** — P010/10-bit Main10 NPP variant.
+- **F6 (P2.6, optional)** — NPP async + pinned host memory + per-encoder CUDA stream overlap.
+- **F7 (P3)** — Decoder-side GPU zero-copy via wgpu viewer migration; feasibility doc at
+  `.omc/plans/2026-05-16-p3-decoder-zerocopy-feasibility.md`.
+- **F8** — `PRDT_PREFER_NPP=1` env override for `--encoder auto` NPP selection; deferred.
+- **F10** — Symbol count tripwire; see above.
+
+---
+
 ## Follow-ups
 
 - **F1** — When a third backend lands (P4 `hevc_qsv`), revisit `HwDevice<Kind>` generic and/or
@@ -351,8 +439,8 @@ required; the test exercises only the decoder arm.
 - **F2** — NVIDIA hardware smoke (A4) on a developer's NVIDIA Linux box; log in the smoke doc.
 - **F3** — Consider exposing `cuda_device_index` as a CLI flag once multi-GPU Linux hosts become
   a real user complaint.
-- **F4** — GPU-side BGRA→NV12 (CUDA NPP for NVENC; VAAPI `vpp` for VAAPI). **Materially more
-  urgent for NVENC** — see P1.5 note above.
+- **F4** — ~~GPU-side BGRA→NV12 (CUDA NPP for NVENC; VAAPI `vpp` for VAAPI).~~ **CLOSED in P2.5**
+  (NVENC NPP path shipped; VAAPI VPP explicitly out of scope per plan §6 Option B).
 - **F5** — Bench-matrix Linux port (separate side project) gates any perf-regression CI for
   either backend.
 - **F6** — Reconcile default-ABI divergence: flip VAAPI default from `ffmpeg5` to `ffmpeg6` in

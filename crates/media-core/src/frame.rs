@@ -12,6 +12,30 @@ pub struct EncodedPacket {
     pub timestamp_us: u64,
 }
 
+/// Tightly packed BGRA frame on CPU memory (4 bytes/pixel, row stride =
+/// `width * 4` for unpadded captures).
+///
+/// Mirrors `Nv12Frame` / `I420Frame` for symmetry; the carrier lives here
+/// so capture producers (`prdt_media_linux`'s `X11ShmCapturer`,
+/// `prdt_media_win`'s DXGI capturer) and encode consumers
+/// (`prdt_media_ffmpeg`'s P2.5 NPP encoder) reference one shared type
+/// without a circular dep.
+///
+/// Used by the encode-side GPU-residency path
+/// (`HevcNvencNppFfmpegEncoderAdapter`) so the encoder accepts BGRA
+/// straight from `X11ShmCapturer` instead of routing through CPU
+/// `bgra_to_i420` + `i420_to_nv12_into` before uploading.
+#[derive(Debug, Clone)]
+pub struct BgraFrame {
+    pub width: u32,
+    pub height: u32,
+    /// Tightly-packed BGRA, length >= `(width as usize) * 4 * (height as usize)`.
+    pub bgra: Vec<u8>,
+    /// Row stride in bytes. Equals `width * 4` for unpadded captures (the
+    /// only case in P2.5); reserved for future strided/padded sources.
+    pub stride: u32,
+}
+
 /// NV12 (4:2:0, interleaved chroma) frame on CPU memory. Mirrors
 /// `prdt_media_sw::I420Frame` in spirit but for the NV12 layout that
 /// libavcodec's hardware decoders (`hevc_vaapi`, `hevc_cuvid`) emit

@@ -185,6 +185,76 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
+      - name: Install CUDA toolkit (P2.5 — cudart + NPP link-time deps)
+        # The NPP encode path links against -lcudart + -lnppicc at build time
+        # (the symbols are hand-declared in `crates/media-ffmpeg/src/cuda_npp.rs`).
+        # The Dockerfile.dev pulls these from NVIDIA's apt repo for the dev
+        # container; here we install them onto the bare ubuntu-24.04 runner.
+        # The .so.1 SONAMEs are still lazy-loaded at runtime (the ldd guard
+        # below only requires their presence at link time, not runtime — runtime
+        # NVIDIA driver libs stay absent from the artifact).
+        # Pinned to 12-6 (closest patch version to Dockerfile.dev's 12-4 that
+        # NVIDIA's ubuntu2404 repo actually carries — 12-4 is debian12-only).
+        # Driver 535+ supports CUDA 12.6 via forward compat (same constraint
+        # as 12-4 per P1.5 A8). The .so SONAMEs we link (libcudart.so,
+        # libnppicc.so) are ABI-stable across 12.x patches.
+        run: |
+          curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb \
+            -o /tmp/cuda-keyring.deb
+          sudo dpkg -i /tmp/cuda-keyring.deb
+          rm /tmp/cuda-keyring.deb
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cuda-cudart-dev-12-6 \
+            libnpp-dev-12-6
+          # Surface the install location for the rustc linker via LIBRARY_PATH
+          # in the build step (NVIDIA installs to /usr/local/cuda-12.6/lib64
+          # which is not in the default linker search path).
+          ls -la /usr/local/cuda-12.6/lib64/libcudart.so* /usr/local/cuda-12.6/lib64/libnppicc.so* || true
+
+      - name: Build prdt with NVENC + NPP encode path (P2.5 — NVIDIA GPU host smoke)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+          # rustc-link search path for NVIDIA's CUDA toolkit (apt installs into
+          # /usr/local/cuda-12.6/lib64, which isn't on the default ld path).
+          LIBRARY_PATH: /usr/local/cuda-12.6/lib64
+        run: |
+          # ffmpeg-encode-hevc-nvenc-npp transitively enables ffmpeg-encode-hevc-nvenc
+          # (per R4 Cargo dep chain). All three decode backends included so the
+          # artifact can serve as both host and viewer on a NVIDIA Linux box.
+          cargo build \
+            --release \
+            -p prdt-client \
+            --features ffmpeg-encode-hevc-vaapi,ffmpeg-encode-hevc-nvenc-npp,ffmpeg-decode-hevc-sw,ffmpeg-decode-hevc-vaapi,ffmpeg-decode-hevc-nvdec \
+            --target x86_64-unknown-linux-gnu
+
+      - name: Stage HEVC-encode-NPP artifact
+        run: |
+          cp target/x86_64-unknown-linux-gnu/release/prdt artifacts/prdt-linux-x86_64-ffmpeg-hevc-encode-npp
+          chmod +x artifacts/prdt-linux-x86_64-ffmpeg-hevc-encode-npp
+          (cd artifacts && sha256sum prdt-linux-x86_64-ffmpeg-hevc-encode-npp > prdt-linux-x86_64-ffmpeg-hevc-encode-npp.sha256)
+          ls -la artifacts/prdt-linux-x86_64-ffmpeg-hevc-encode-npp*
+          file artifacts/prdt-linux-x86_64-ffmpeg-hevc-encode-npp
+          # ldd portability guard: libcudart.so.12 + libnppicc.so.12 are runtime
+          # deps for the NPP path; libnvidia-encode.so.1 must NOT appear at
+          # link time (lazy-loaded by FFmpeg at runtime, same as plain NVENC).
+          ldd artifacts/prdt-linux-x86_64-ffmpeg-hevc-encode-npp \
+            | grep -E 'libav|libcuda|libnpp|libnvidia' || true
+          if ldd artifacts/prdt-linux-x86_64-ffmpeg-hevc-encode-npp \
+               | grep -q 'libnvidia-encode'; then
+            echo "::error::libnvidia-encode.so.1 in ldd output — linked at build time (must be lazy-loaded)"
+            exit 1
+          fi
+
+      - name: Upload HEVC-encode-NPP workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prdt-linux-x86_64-ffmpeg-hevc-encode-npp
+          path: artifacts/prdt-linux-x86_64-ffmpeg-hevc-encode-npp*
+          retention-days: 30
+          if-no-files-found: error
+
   build-windows:
     name: Build Windows x86_64 prdt (viewer-side, no FFmpeg feature)
     # Windows side decodes HEVC via Media Foundation / NVDEC — it does NOT need

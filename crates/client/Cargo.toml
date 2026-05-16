@@ -44,6 +44,10 @@ ffmpeg-encode-hevc-vaapi-ffmpeg7 = ["prdt-host/ffmpeg-encode-hevc-vaapi-ffmpeg7"
 ffmpeg-encode-hevc-nvenc = ["prdt-host/ffmpeg-encode-hevc-nvenc"]
 ffmpeg-encode-hevc-nvenc-ffmpeg5 = ["prdt-host/ffmpeg-encode-hevc-nvenc-ffmpeg5"]
 ffmpeg-encode-hevc-nvenc-ffmpeg7 = ["prdt-host/ffmpeg-encode-hevc-nvenc-ffmpeg7"]
+# P2.5 — NPP (GPU BGRA→NV12) variants. Shallow forwards onto prdt-host.
+ffmpeg-encode-hevc-nvenc-npp = ["prdt-host/ffmpeg-encode-hevc-nvenc-npp"]
+ffmpeg-encode-hevc-nvenc-npp-ffmpeg5 = ["prdt-host/ffmpeg-encode-hevc-nvenc-npp-ffmpeg5"]
+ffmpeg-encode-hevc-nvenc-npp-ffmpeg7 = ["prdt-host/ffmpeg-encode-hevc-nvenc-npp-ffmpeg7"]
 
 # P2 — HEVC decode forwarded onto prdt-host (which forwards onto
 # prdt-media-linux). The unified `prdt` binary can then be built with e.g.

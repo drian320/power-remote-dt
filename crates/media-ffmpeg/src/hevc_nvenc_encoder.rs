@@ -21,18 +21,15 @@ use prdt_media_sw::{i420_to_nv12_into, I420Frame};
 use rusty_ffmpeg::ffi::{
     av_buffer_ref, av_frame_free, av_frame_get_buffer, av_hwframe_get_buffer,
     av_hwframe_transfer_data as hw_upload, av_opt_set_int, av_packet_alloc, av_packet_free,
-    av_packet_unref, avcodec_alloc_context3, avcodec_find_encoder_by_name, avcodec_free_context,
-    avcodec_open2, avcodec_receive_packet, avcodec_send_frame, AVCodecContext, AVFrame,
-    AV_OPT_SEARCH_CHILDREN, AV_PICTURE_TYPE_I, AV_PKT_FLAG_KEY,
+    av_packet_unref, avcodec_free_context, avcodec_receive_packet, avcodec_send_frame,
+    AVCodecContext, AVFrame, AV_OPT_SEARCH_CHILDREN, AV_PICTURE_TYPE_I, AV_PKT_FLAG_KEY,
 };
 
 use crate::cuda_hwdevice::CudaHwDevice;
 use crate::cuda_hwframes::CudaHwFrames;
 use crate::error::FfmpegError;
-use crate::options::{apply_low_latency_hevc_nvenc, build_priv_data_dict_nvenc, EncoderTunables};
-
-// AVERROR(EAGAIN) = -(EAGAIN) = -11 on Linux.
-const AVERROR_EAGAIN: i32 = -11;
+use crate::nvenc_common::{emit_first_frame_log, open_nvenc_codec_context, AVERROR_EAGAIN};
+use crate::options::EncoderTunables;
 
 pub struct HevcNvencFfmpegEncoderConfig {
     pub width: u32,
@@ -76,14 +73,7 @@ pub struct HevcNvencFfmpegEncoder {
 
 impl HevcNvencFfmpegEncoder {
     pub fn new(cfg: HevcNvencFfmpegEncoderConfig) -> Result<Self, FfmpegError> {
-        // 1. Runtime-probe encoder.
-        // SAFETY: string literal is a valid nul-terminated C string.
-        let codec = unsafe { avcodec_find_encoder_by_name(c"hevc_nvenc".as_ptr()) };
-        if codec.is_null() {
-            return Err(FfmpegError::EncoderNotFound("hevc_nvenc"));
-        }
-
-        // 2. Open HW device + frames.
+        // 1. Open HW device + frames.
         let device = CudaHwDevice::open()?;
         let frames = CudaHwFrames::new(&device, cfg.width, cfg.height)?;
 
@@ -95,44 +85,20 @@ impl HevcNvencFfmpegEncoder {
             gop_size: cfg.gop_size,
         };
 
-        // 3. Allocate codec context + apply tunables.
-        // SAFETY: codec is a valid non-null AVCodec pointer from avcodec_find_encoder_by_name.
-        let codec_ctx_ptr = unsafe { avcodec_alloc_context3(codec) };
-        if codec_ctx_ptr.is_null() {
-            return Err(FfmpegError::OpenCodec(-1));
-        }
-        // SAFETY: codec_ctx_ptr is a freshly allocated, unopened AVCodecContext.
-        unsafe { apply_low_latency_hevc_nvenc(codec_ctx_ptr, &tunables) };
+        // 2. Open codec context (probe encoder, alloc, apply tunables, attach
+        //    hw_frames_ctx, open with priv-data dict). Shared with the NPP
+        //    encoder via nvenc_common to keep both encoders byte-stable on
+        //    libavcodec init order (A13).
+        // SAFETY: frames.raw() is a valid AVBufferRef owned by frames; we
+        // bump its refcount so the helper can consume the new ref.
+        let frames_ref_ptr = unsafe { av_buffer_ref(frames.raw()) };
+        let frames_ref = NonNull::new(frames_ref_ptr)
+            .ok_or_else(|| FfmpegError::HwFrames("av_buffer_ref returned null".into()))?;
+        let codec_ctx = open_nvenc_codec_context(&tunables, frames_ref)?;
 
-        // 4. Set hw_frames_ctx — avcodec_open2 will take ownership of this ref.
-        // SAFETY: frames.raw() is a valid AVBufferRef owned by frames.
-        let frames_ref = unsafe { av_buffer_ref(frames.raw()) };
-        if frames_ref.is_null() {
-            let mut p = codec_ctx_ptr;
-            // SAFETY: codec_ctx_ptr is the unique owner; freeing on error path.
-            unsafe { avcodec_free_context(&mut p) };
-            return Err(FfmpegError::HwFrames("av_buffer_ref returned null".into()));
-        }
-        // SAFETY: codec_ctx_ptr is valid and not yet opened; hw_frames_ctx takes ownership.
-        unsafe { (*codec_ctx_ptr).hw_frames_ctx = frames_ref };
+        // 3. (No BSF chain — hevc_nvenc emits Annex-B natively.)
 
-        // 5. Open codec with priv_data_dict (avcodec_open2 consumes the dict).
-        let dict = build_priv_data_dict_nvenc(cfg.gop_size)?;
-        // SAFETY: codec_ctx_ptr, codec, and dict are all valid; avcodec_open2 frees dict on success.
-        let ret = unsafe { avcodec_open2(codec_ctx_ptr, codec, &mut dict.as_ptr()) };
-        if ret < 0 {
-            let mut p = codec_ctx_ptr;
-            // SAFETY: codec_ctx_ptr is the unique owner at this point.
-            unsafe { avcodec_free_context(&mut p) };
-            return Err(FfmpegError::OpenCodec(ret));
-        }
-
-        // SAFETY: avcodec_alloc_context3 succeeded; pointer is non-null.
-        let codec_ctx = unsafe { NonNull::new_unchecked(codec_ctx_ptr) };
-
-        // 6. (No BSF chain — hevc_nvenc emits Annex-B natively.)
-
-        // 7a. Allocate cpu_frame (NV12, software side).
+        // 4a. Allocate cpu_frame (NV12, software side).
         // SAFETY: av_frame_alloc allocates a zeroed AVFrame; always returns non-null or null on OOM.
         let cpu_ptr = unsafe {
             use rusty_ffmpeg::ffi::{av_frame_alloc, AV_PIX_FMT_NV12};
@@ -158,7 +124,7 @@ impl HevcNvencFfmpegEncoder {
         // SAFETY: cpu_ptr is non-null after successful av_frame_get_buffer.
         let cpu_frame = unsafe { NonNull::new_unchecked(cpu_ptr) };
 
-        // 7b. Allocate hw_frame (CUDA surface from pool).
+        // 4b. Allocate hw_frame (CUDA surface from pool).
         // SAFETY: frames.raw() is the valid frames buffer; hw_ptr is the out-param address.
         let hw_ptr = unsafe {
             use rusty_ffmpeg::ffi::av_frame_alloc;
@@ -186,7 +152,7 @@ impl HevcNvencFfmpegEncoder {
         // SAFETY: hw_ptr is non-null after successful av_hwframe_get_buffer.
         let hw_frame = unsafe { NonNull::new_unchecked(hw_ptr) };
 
-        // 8. Emit encoder_ready event.
+        // 5. Emit encoder_ready event.
         tracing::info!(
             target: "video.pipeline",
             event = "encoder_ready",
@@ -328,20 +294,16 @@ impl HevcNvencFfmpegEncoder {
             (bytes, key)
         };
 
-        // 8. First-frame log.
-        if !self.first_frame_logged.swap(true, Ordering::SeqCst) {
-            tracing::info!(
-                target: "video.pipeline",
-                event = "first_frame_emitted",
-                backend = "ffmpeg-nvenc-hevc",
-                codec = "h265",
-                zero_copy = true,
-                profile = "main",
-                bitdepth = 8,
-                gop = self.tunables.gop_size,
-                "first encoded frame delivered"
-            );
-        }
+        // 8. First-frame log (shared with NPP encoder via nvenc_common).
+        emit_first_frame_log(
+            self.seq,
+            "hevc_nvenc",
+            "cuda",
+            "sw",
+            self.tunables.width,
+            self.tunables.height,
+            &self.first_frame_logged,
+        );
 
         // 9. Advance seq counter and return.
         self.seq += 1;
@@ -452,5 +414,79 @@ mod tests {
         assert_eq!(cfg.width, 1920);
         assert_eq!(cfg.fps, 60);
         assert!(cfg.cuda_device_index.is_none());
+    }
+
+    /// Per P2.5 plan §3 (iter-3 M2) — A13 merge gate. Encodes a deterministic
+    /// 30-frame I420 sequence with the same fixed config used by
+    /// `examples/gen_byte_stable_fixture.rs` and asserts the concatenated
+    /// `EncodedPacket.nal_bytes` is byte-equal to the committed golden
+    /// fixture (`tests/fixtures/byte_stable_nvenc_h265.bin`).
+    ///
+    /// The fixture is generated ONCE on real NVENC hardware against pre-R6
+    /// master via the example binary; this test then proves the R6
+    /// `nvenc_common.rs` extract did not perturb encoded bytestream output.
+    ///
+    /// Marked `#[ignore]` because it requires (a) real NVIDIA NVENC hardware
+    /// and (b) the matching driver/SDK that produced the golden — the
+    /// dev-container's CUDA-less environment skips cleanly. Runs on the
+    /// smoke runner as part of the A5 dev-container test cell.
+    #[test]
+    #[ignore = "requires NVIDIA hevc_nvenc encode + matching driver/SDK; gated to smoke runner"]
+    fn byte_stable_against_master_fixture() {
+        const WIDTH: u32 = 320;
+        const HEIGHT: u32 = 240;
+        const FPS: u32 = 30;
+        const BITRATE: u32 = 4_000_000;
+        const GOP: u32 = 30;
+        const N_FRAMES: u32 = 30;
+        const GOLDEN: &[u8] = include_bytes!("../tests/fixtures/byte_stable_nvenc_h265.bin");
+
+        let cfg = HevcNvencFfmpegEncoderConfig {
+            width: WIDTH,
+            height: HEIGHT,
+            fps: FPS,
+            initial_bitrate_bps: BITRATE,
+            gop_size: GOP,
+            cuda_device_index: None,
+        };
+        let mut enc = HevcNvencFfmpegEncoder::new(cfg).expect("encoder created");
+
+        let mut blob = Vec::new();
+        for i in 0..N_FRAMES {
+            // Same deterministic generator as examples/gen_byte_stable_fixture.rs.
+            let mut frame = I420Frame::new_packed(WIDTH, HEIGHT).expect("frame");
+            let w = WIDTH as usize;
+            let h = HEIGHT as usize;
+            let shift = (i & 0xff) as u8;
+            for y in 0..h {
+                for x in 0..w {
+                    frame.y[y * w + x] = ((x as u8).wrapping_add(y as u8)).wrapping_add(shift);
+                }
+            }
+            let cw = w / 2;
+            let ch = h / 2;
+            for j in 0..(cw * ch) {
+                frame.u[j] = 128;
+                frame.v[j] = 128;
+            }
+            let force_idr = i == 0;
+            let ts_us = (i as u64) * 1_000_000 / (FPS as u64);
+            let pkt = enc.encode(&frame, force_idr, ts_us).expect("encoded");
+            blob.extend_from_slice(&pkt.nal_bytes);
+        }
+
+        assert_eq!(
+            blob.len(),
+            GOLDEN.len(),
+            "encoded blob length differs from golden (encoded={}, golden={}) — \
+             R6 refactor or driver/SDK drift introduced a behavioral change",
+            blob.len(),
+            GOLDEN.len(),
+        );
+        assert_eq!(
+            blob, GOLDEN,
+            "encoded blob differs from golden — R6 refactor introduced a \
+             behavioral regression on the non-NPP NVENC path"
+        );
     }
 }

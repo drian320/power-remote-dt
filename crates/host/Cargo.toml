@@ -59,6 +59,13 @@ ffmpeg-encode-hevc-nvenc-ffmpeg7 = ["dep:prdt-media-core", "dep:prdt-media-ffmpe
 # Marker feature enabled by all three NVENC ABI variants above; use this in
 # cfg() attributes so any ABI choice activates NVENC code paths and tests.
 ffmpeg-encode-hevc-nvenc-any = []
+# P2.5 — NPP (GPU BGRA→NV12) variants. Shallow forwards onto media-ffmpeg;
+# the transitive NVENC enablement happens at the media-ffmpeg layer per the
+# dep chain in that crate's [features] block.
+ffmpeg-encode-hevc-nvenc-npp = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-nvenc-npp", "ffmpeg-encode-hevc-nvenc-npp-any"]
+ffmpeg-encode-hevc-nvenc-npp-ffmpeg5 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-nvenc-npp-ffmpeg5", "ffmpeg-encode-hevc-nvenc-npp-any"]
+ffmpeg-encode-hevc-nvenc-npp-ffmpeg7 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-nvenc-npp-ffmpeg7", "ffmpeg-encode-hevc-nvenc-npp-any"]
+ffmpeg-encode-hevc-nvenc-npp-any = []
 
 # P2 — HEVC decode features forwarded onto prdt-media-linux. The viewer pulls
 # prdt-media-linux transitively (Linux platform consumer construction lives

@@ -27,6 +27,28 @@ compile_error!(
      Windows already has native NVENC via media-win)"
 );
 
+#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-npp-any", not(target_os = "linux")))]
+compile_error!(
+    "feature 'ffmpeg-encode-hevc-nvenc-npp' is not available on this target (Linux-only in P2.5)"
+);
+
+// Per A11: the NPP marker should always be enabled via one of the three
+// -npp{,-ffmpeg5,-ffmpeg7} variants, each of which transitively enables the
+// matching NVENC ABI variant. This arm catches catastrophic feature graph
+// corruption (NPP marker set without an ABI variant).
+#[cfg(all(
+    feature = "ffmpeg-encode-hevc-nvenc-npp-any",
+    not(any(
+        feature = "ffmpeg-encode-hevc-nvenc-npp",
+        feature = "ffmpeg-encode-hevc-nvenc-npp-ffmpeg5",
+        feature = "ffmpeg-encode-hevc-nvenc-npp-ffmpeg7",
+    )),
+))]
+compile_error!(
+    "ffmpeg-encode-hevc-nvenc-npp-any was force-enabled without any NPP ABI variant; \
+     enable one of ffmpeg-encode-hevc-nvenc-npp{,-ffmpeg5,-ffmpeg7}"
+);
+
 #[cfg(all(feature = "ffmpeg-decode-hevc-sw-any", not(target_os = "linux")))]
 compile_error!(
     "feature 'ffmpeg-decode-hevc-sw' is not available on this target (Linux-only in P2; \
@@ -73,6 +95,8 @@ mod cuda_hwdevice;
     target_os = "linux"
 ))]
 mod cuda_hwframes;
+#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-npp-any", target_os = "linux"))]
+pub(crate) mod cuda_npp;
 #[cfg(all(
     any(
         feature = "ffmpeg-decode-hevc-sw-any",
@@ -86,6 +110,8 @@ pub mod decoder_common;
 pub mod hevc_nvdec_decoder;
 #[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-any", target_os = "linux"))]
 pub mod hevc_nvenc_encoder;
+#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-npp-any", target_os = "linux"))]
+pub mod hevc_nvenc_npp_encoder;
 #[cfg(all(feature = "ffmpeg-decode-hevc-sw-any", target_os = "linux"))]
 pub mod hevc_sw_decoder;
 #[cfg(all(feature = "ffmpeg-decode-hevc-vaapi-any", target_os = "linux"))]
@@ -108,6 +134,8 @@ mod hwdevice;
     target_os = "linux"
 ))]
 mod hwframes;
+#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-any", target_os = "linux"))]
+pub(crate) mod nvenc_common;
 #[cfg(all(
     any(
         feature = "ffmpeg-encode-hevc-vaapi-any",
@@ -132,6 +160,8 @@ pub use core_adapter::HevcDecoderAdapter;
 pub use core_adapter::HevcNvdecFfmpegDecoderAdapter;
 #[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-any", target_os = "linux"))]
 pub use core_adapter::HevcNvencFfmpegEncoderAdapter;
+#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-npp-any", target_os = "linux"))]
+pub use core_adapter::HevcNvencNppFfmpegEncoderAdapter;
 #[cfg(all(feature = "ffmpeg-decode-hevc-sw-any", target_os = "linux"))]
 pub use core_adapter::HevcSwFfmpegDecoderAdapter;
 #[cfg(all(feature = "ffmpeg-decode-hevc-vaapi-any", target_os = "linux"))]
@@ -151,6 +181,8 @@ pub use decoder_common::HevcDecoderBackend;
 pub use hevc_nvdec_decoder::{HevcNvdecFfmpegDecoder, HevcNvdecFfmpegDecoderConfig};
 #[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-any", target_os = "linux"))]
 pub use hevc_nvenc_encoder::{HevcNvencFfmpegEncoder, HevcNvencFfmpegEncoderConfig};
+#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-npp-any", target_os = "linux"))]
+pub use hevc_nvenc_npp_encoder::{HevcNvencNppFfmpegEncoder, HevcNvencNppFfmpegEncoderConfig};
 #[cfg(all(feature = "ffmpeg-decode-hevc-sw-any", target_os = "linux"))]
 pub use hevc_sw_decoder::{HevcSwFfmpegDecoder, HevcSwFfmpegDecoderConfig};
 #[cfg(all(feature = "ffmpeg-decode-hevc-vaapi-any", target_os = "linux"))]
