@@ -24,13 +24,23 @@ pub mod error;
 
 #[cfg(all(feature = "ffmpeg-encode-hevc-vaapi", target_os = "linux"))]
 pub mod core_adapter;
+#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc", target_os = "linux"))]
+mod cuda_hwdevice;
+#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc", target_os = "linux"))]
+mod cuda_hwframes;
 #[cfg(all(feature = "ffmpeg-encode-hevc-vaapi", target_os = "linux"))]
 pub mod hevc_vaapi_encoder;
-#[cfg(all(feature = "ffmpeg", target_os = "linux"))]
+#[cfg(all(feature = "ffmpeg-encode-hevc-vaapi", target_os = "linux"))]
 mod hwdevice;
-#[cfg(all(feature = "ffmpeg", target_os = "linux"))]
+#[cfg(all(feature = "ffmpeg-encode-hevc-vaapi", target_os = "linux"))]
 mod hwframes;
-#[cfg(all(feature = "ffmpeg", target_os = "linux"))]
+#[cfg(all(
+    any(
+        feature = "ffmpeg-encode-hevc-vaapi",
+        feature = "ffmpeg-encode-hevc-nvenc"
+    ),
+    target_os = "linux"
+))]
 mod options;
 
 pub use error::FfmpegError;

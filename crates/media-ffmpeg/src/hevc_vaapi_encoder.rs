@@ -18,7 +18,7 @@ use rusty_ffmpeg::ffi::{
 use crate::error::FfmpegError;
 use crate::hwdevice::VaapiHwDevice;
 use crate::hwframes::VaapiHwFrames;
-use crate::options::{apply_low_latency_hevc, build_priv_data_dict, EncoderTunables};
+use crate::options::{apply_low_latency_hevc_vaapi, build_priv_data_dict, EncoderTunables};
 
 // AVERROR(EAGAIN) = -(EAGAIN) = -11 on Linux.
 const AVERROR_EAGAIN: i32 = -11;
@@ -87,7 +87,7 @@ impl HevcVaapiFfmpegEncoder {
             return Err(FfmpegError::OpenCodec(-1));
         }
         // SAFETY: codec_ctx_ptr is a freshly allocated, unopened AVCodecContext.
-        unsafe { apply_low_latency_hevc(codec_ctx_ptr, &tunables) };
+        unsafe { apply_low_latency_hevc_vaapi(codec_ctx_ptr, &tunables) };
 
         // 4. Set hw_frames_ctx — avcodec_open2 will take ownership of this ref.
         // SAFETY: frames.raw() is a valid AVBufferRef owned by frames.
