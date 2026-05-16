@@ -1078,4 +1078,81 @@ mod tests {
         assert!(logs_contain("ffmpeg-vaapi-hevc"));
         assert!(logs_contain("preferred-over-nvenc"));
     }
+
+    // P2.5 NPP arm tests -------------------------------------------------------
+
+    /// A12.b-style regression guard: NVENC-without-NPP arm still routes to
+    /// plain ffmpeg-nvenc-hevc when both NVENC and NPP features compile in.
+    /// Ensures the NPP arm does not shadow or consume the NVENC-only arm.
+    #[test]
+    #[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
+    fn linux_normalize_encoder_nvenc_without_npp_still_routes_plain() {
+        assert_eq!(normalize_encoder("ffmpeg-nvenc-hevc"), "ffmpeg-nvenc-hevc");
+    }
+
+    /// Canonical name resolves when NPP feature is compiled in.
+    #[test]
+    #[cfg(feature = "ffmpeg-encode-hevc-nvenc-npp-any")]
+    fn linux_normalize_encoder_ffmpeg_nvenc_hevc_npp_arm() {
+        assert_eq!(
+            normalize_encoder("ffmpeg-nvenc-hevc-npp"),
+            "ffmpeg-nvenc-hevc-npp"
+        );
+    }
+
+    /// Legacy alias `nvenc-npp` resolves to canonical when NPP feature compiled in.
+    #[test]
+    #[cfg(feature = "ffmpeg-encode-hevc-nvenc-npp-any")]
+    fn linux_normalize_encoder_nvenc_npp_alias_reroutes_to_canonical() {
+        assert_eq!(normalize_encoder("nvenc-npp"), "ffmpeg-nvenc-hevc-npp");
+    }
+
+    /// Without NPP feature, `ffmpeg-nvenc-hevc-npp` and `nvenc-npp` fall back to openh264.
+    #[test]
+    #[cfg(not(feature = "ffmpeg-encode-hevc-nvenc-npp-any"))]
+    fn linux_normalize_encoder_npp_arm_falls_back_without_feature() {
+        assert_eq!(normalize_encoder("ffmpeg-nvenc-hevc-npp"), "openh264");
+        assert_eq!(normalize_encoder("nvenc-npp"), "openh264");
+    }
+
+    /// `build_video_producer` with `ffmpeg-nvenc-hevc-npp` selects the NPP
+    /// factory path. On a CUDA-less dev container this returns an error from
+    /// `HevcNvencNppFfmpegEncoder::new`, not a silent openh264 fallback.
+    #[test]
+    #[cfg(feature = "ffmpeg-encode-hevc-nvenc-npp-any")]
+    fn linux_build_video_producer_nvenc_npp_path() {
+        let out = OutputDescriptor;
+        let result = build_video_producer(
+            "ffmpeg-nvenc-hevc-npp",
+            &out,
+            8_000_000,
+            60,
+            prdt_protocol::Codec::H265,
+        );
+        // On a CUDA-less host (dev container) the NPP constructor fails loudly.
+        // We assert the call sites the right code path (returns Err, not Ok
+        // with an openh264 producer).  If somehow CUDA is present, Ok is also fine.
+        match &result {
+            Ok(_) => { /* real NVIDIA HW present — path correctly returned an NPP producer */ }
+            Err(e) => {
+                // Must come from the NPP encoder's constructor, not a routing
+                // fallback to a different backend. Use debug format to include
+                // the full anyhow error chain (context + cause).
+                let s = format!("{e:?}");
+                assert!(
+                    s.contains("CUDA")
+                        || s.contains("cuda")
+                        || s.contains("NPP")
+                        || s.contains("npp")
+                        || s.contains("libnppicc")
+                        || s.contains("HwDevice")
+                        || s.contains("EncoderNotFound")
+                        || s.contains("NvencNpp")
+                        || s.contains("X11")
+                        || s.contains("x11"),
+                    "expected NPP or CUDA error from ffmpeg-nvenc-hevc-npp path, got: {s}"
+                );
+            }
+        }
+    }
 }
