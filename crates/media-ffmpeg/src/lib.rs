@@ -130,6 +130,8 @@ mod hwdevice;
     target_os = "linux"
 ))]
 mod hwframes;
+#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-any", target_os = "linux"))]
+pub(crate) mod nvenc_common;
 #[cfg(all(
     any(
         feature = "ffmpeg-encode-hevc-vaapi-any",
