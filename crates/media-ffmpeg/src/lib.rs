@@ -95,6 +95,8 @@ mod cuda_hwdevice;
     target_os = "linux"
 ))]
 mod cuda_hwframes;
+#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-npp-any", target_os = "linux"))]
+pub(crate) mod cuda_npp;
 #[cfg(all(
     any(
         feature = "ffmpeg-decode-hevc-sw-any",
