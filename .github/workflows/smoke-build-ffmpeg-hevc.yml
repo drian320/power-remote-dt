@@ -150,6 +150,41 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
+      - name: Build prdt with all three HEVC decoders (P2 — Linux↔Linux viewer)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: |
+          cargo build \
+            --release \
+            -p prdt-client \
+            --features ffmpeg-decode-hevc-sw,ffmpeg-decode-hevc-vaapi,ffmpeg-decode-hevc-nvdec \
+            --target x86_64-unknown-linux-gnu
+
+      - name: Stage HEVC-decode artifact
+        run: |
+          cp target/x86_64-unknown-linux-gnu/release/prdt artifacts/prdt-linux-x86_64-ffmpeg-hevc-decode
+          chmod +x artifacts/prdt-linux-x86_64-ffmpeg-hevc-decode
+          (cd artifacts && sha256sum prdt-linux-x86_64-ffmpeg-hevc-decode > prdt-linux-x86_64-ffmpeg-hevc-decode.sha256)
+          ls -la artifacts/prdt-linux-x86_64-ffmpeg-hevc-decode*
+          file artifacts/prdt-linux-x86_64-ffmpeg-hevc-decode
+          # Show dynamic deps; assert libnvcuvid.so.1 and libnvidia-encode.so.1
+          # are NOT linked at build time (NVDEC + NVENC libs are lazy-loaded by
+          # ffmpeg at runtime so the artifact stays portable to non-NVIDIA hosts).
+          ldd artifacts/prdt-linux-x86_64-ffmpeg-hevc-decode | grep -E 'libav|libva|libcuda|libnvidia|libnvcuvid' || true
+          if ldd artifacts/prdt-linux-x86_64-ffmpeg-hevc-decode | grep -qE 'libnvcuvid|libnvidia-encode'; then
+            echo "::error::libnvcuvid.so.1 / libnvidia-encode.so.1 appears in ldd output — binary was accidentally linked at build time"
+            exit 1
+          fi
+
+      - name: Upload HEVC-decode workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prdt-linux-x86_64-ffmpeg-hevc-decode
+          path: artifacts/prdt-linux-x86_64-ffmpeg-hevc-decode*
+          retention-days: 30
+          if-no-files-found: error
+
   build-windows:
     name: Build Windows x86_64 prdt (viewer-side, no FFmpeg feature)
     # Windows side decodes HEVC via Media Foundation / NVDEC — it does NOT need
