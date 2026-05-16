@@ -27,6 +27,28 @@ compile_error!(
      Windows already has native NVENC via media-win)"
 );
 
+#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-npp-any", not(target_os = "linux")))]
+compile_error!(
+    "feature 'ffmpeg-encode-hevc-nvenc-npp' is not available on this target (Linux-only in P2.5)"
+);
+
+// Per A11: the NPP marker should always be enabled via one of the three
+// -npp{,-ffmpeg5,-ffmpeg7} variants, each of which transitively enables the
+// matching NVENC ABI variant. This arm catches catastrophic feature graph
+// corruption (NPP marker set without an ABI variant).
+#[cfg(all(
+    feature = "ffmpeg-encode-hevc-nvenc-npp-any",
+    not(any(
+        feature = "ffmpeg-encode-hevc-nvenc-npp",
+        feature = "ffmpeg-encode-hevc-nvenc-npp-ffmpeg5",
+        feature = "ffmpeg-encode-hevc-nvenc-npp-ffmpeg7",
+    )),
+))]
+compile_error!(
+    "ffmpeg-encode-hevc-nvenc-npp-any was force-enabled without any NPP ABI variant; \
+     enable one of ffmpeg-encode-hevc-nvenc-npp{,-ffmpeg5,-ffmpeg7}"
+);
+
 #[cfg(all(feature = "ffmpeg-decode-hevc-sw-any", not(target_os = "linux")))]
 compile_error!(
     "feature 'ffmpeg-decode-hevc-sw' is not available on this target (Linux-only in P2; \

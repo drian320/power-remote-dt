@@ -28,9 +28,12 @@ rusty_ffmpeg = { version = "=0.16.7", optional = true, default-features = false 
 [features]
 default = []
 
-# Pick exactly one FFmpeg ABI feature per build. They are mutually exclusive
-# (rusty_ffmpeg's build script rejects multiple) — Cargo merges features
-# across the dep graph so don't enable two simultaneously.
+# rusty_ffmpeg's ABI features (ffmpeg5/ffmpeg6/ffmpeg7) form an additive
+# cascade in its Cargo.toml (ffmpeg6 = ["ffmpeg5"], ffmpeg7 = ["ffmpeg6"]).
+# Cargo unifies features additively across the dep graph; enabling any
+# variant force-enables all lower ones, and bindings target the highest
+# enabled ABI. Pick one ABI per build to keep your intent unambiguous,
+# but the final binary always contains exactly one set of bindings.
 ffmpeg = ["dep:rusty_ffmpeg"]
 
 # Backend × ABI combinations. The unsuffixed `ffmpeg-encode-hevc-vaapi`
@@ -56,6 +59,19 @@ ffmpeg-encode-hevc-nvenc-ffmpeg7 = ["ffmpeg", "rusty_ffmpeg/ffmpeg7", "ffmpeg-en
 # Marker enabled by all three NVENC ABI variants; use in cfg() so any ABI
 # activates NVENC code paths.
 ffmpeg-encode-hevc-nvenc-any = []
+
+# NPP variants (P2.5). Each NPP-ffmpegN feature transitively enables the matching
+# NVENC-ffmpegN feature so downstream crates can opt into a single feature and
+# get the consistent NVENC + NPP pair. ABI consistency is guaranteed by Cargo's
+# additive feature unification over rusty_ffmpeg's ABI cascade
+# (`ffmpeg6 = ["ffmpeg5"]`, `ffmpeg7 = ["ffmpeg6"]`) — enabling any variant
+# force-enables all lower ones, and bindings target the highest enabled ABI.
+ffmpeg-encode-hevc-nvenc-npp = ["ffmpeg-encode-hevc-nvenc", "ffmpeg-encode-hevc-nvenc-npp-any"]
+ffmpeg-encode-hevc-nvenc-npp-ffmpeg5 = ["ffmpeg-encode-hevc-nvenc-ffmpeg5", "ffmpeg-encode-hevc-nvenc-npp-any"]
+ffmpeg-encode-hevc-nvenc-npp-ffmpeg7 = ["ffmpeg-encode-hevc-nvenc-ffmpeg7", "ffmpeg-encode-hevc-nvenc-npp-any"]
+# Marker enabled by all three NPP ABI variants; gates cuda_npp /
+# hevc_nvenc_npp_encoder modules.
+ffmpeg-encode-hevc-nvenc-npp-any = []
 
 # P2 — HEVC decode side. Three backends (sw / vaapi / nvdec) × four ABIs
 # (default unsuffixed = ffmpeg6 to match the Ubuntu 24.04 smoke runner, plus
