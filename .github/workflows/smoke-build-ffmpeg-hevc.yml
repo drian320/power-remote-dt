@@ -185,10 +185,36 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
+      - name: Install CUDA toolkit (P2.5 — cudart + NPP link-time deps)
+        # The NPP encode path links against -lcudart + -lnppicc at build time
+        # (the symbols are hand-declared in `crates/media-ffmpeg/src/cuda_npp.rs`).
+        # The Dockerfile.dev pulls these from NVIDIA's apt repo for the dev
+        # container; here we install them onto the bare ubuntu-24.04 runner.
+        # The .so.1 SONAMEs are still lazy-loaded at runtime (the ldd guard
+        # below only requires their presence at link time, not runtime — runtime
+        # NVIDIA driver libs stay absent from the artifact).
+        # Pinned to 12-4 to match Dockerfile.dev (driver 535+ via forward compat).
+        run: |
+          curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb \
+            -o /tmp/cuda-keyring.deb
+          sudo dpkg -i /tmp/cuda-keyring.deb
+          rm /tmp/cuda-keyring.deb
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cuda-cudart-dev-12-4 \
+            libnpp-dev-12-4
+          # Surface the install location for the rustc linker via LIBRARY_PATH
+          # in the build step (NVIDIA installs to /usr/local/cuda-12.4/lib64
+          # which is not in the default linker search path).
+          ls -la /usr/local/cuda-12.4/lib64/libcudart.so* /usr/local/cuda-12.4/lib64/libnppicc.so* || true
+
       - name: Build prdt with NVENC + NPP encode path (P2.5 — NVIDIA GPU host smoke)
         env:
           FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
           FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+          # rustc-link search path for NVIDIA's CUDA toolkit (apt installs into
+          # /usr/local/cuda-12.4/lib64, which isn't on the default ld path).
+          LIBRARY_PATH: /usr/local/cuda-12.4/lib64
         run: |
           # ffmpeg-encode-hevc-nvenc-npp transitively enables ffmpeg-encode-hevc-nvenc
           # (per R4 Cargo dep chain). All three decode backends included so the
