@@ -47,14 +47,29 @@ async-trait = "0.1"
 # rolling, libva ≥ 2.22).
 default = ["vaapi-h264"]
 vaapi-h264 = ["prdt-media-linux/vaapi-h264"]
-ffmpeg-encode-hevc-vaapi = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-vaapi"]
-ffmpeg-encode-hevc-vaapi-ffmpeg6 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-vaapi-ffmpeg6"]
-ffmpeg-encode-hevc-vaapi-ffmpeg7 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-vaapi-ffmpeg7"]
+ffmpeg-encode-hevc-vaapi = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-vaapi", "ffmpeg-encode-hevc-vaapi-any"]
+ffmpeg-encode-hevc-vaapi-ffmpeg6 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-vaapi-ffmpeg6", "ffmpeg-encode-hevc-vaapi-any"]
+ffmpeg-encode-hevc-vaapi-ffmpeg7 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-vaapi-ffmpeg7", "ffmpeg-encode-hevc-vaapi-any"]
+# Marker feature enabled by all three VAAPI ABI variants; use in cfg() so any
+# ABI choice activates VAAPI code paths and tests.
+ffmpeg-encode-hevc-vaapi-any = []
+ffmpeg-encode-hevc-nvenc = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-nvenc", "ffmpeg-encode-hevc-nvenc-any"]
+ffmpeg-encode-hevc-nvenc-ffmpeg5 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-nvenc-ffmpeg5", "ffmpeg-encode-hevc-nvenc-any"]
+ffmpeg-encode-hevc-nvenc-ffmpeg7 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-nvenc-ffmpeg7", "ffmpeg-encode-hevc-nvenc-any"]
+# Marker feature enabled by all three NVENC ABI variants above; use this in
+# cfg() attributes so any ABI choice activates NVENC code paths and tests.
+ffmpeg-encode-hevc-nvenc-any = []
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
 tempfile = "3"
 clap = { workspace = true }
+# Used by Linux tests that toggle PRDT_PREFER_NVENC to assert auto-encoder
+# resolution; cross-test env-var pollution would otherwise flip the
+# both-features cfg arm in unpredictable ways.
+serial_test = "3"
+# Log-capture assertion for A11 tracing::info! field checks in normalize_encoder tests.
+tracing-test = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 prdt-media-win = { path = "../media-win" }

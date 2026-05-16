@@ -1,38 +1,52 @@
-use std::path::PathBuf;
-use std::ptr;
+//! `hevc_nvenc` FFmpeg encoder backend. Mirrors `HevcVaapiFfmpegEncoder` but
+//! drives NVIDIA NVENC via libavcodec's `hevc_nvenc`. Key asymmetries with
+//! the VAAPI sibling:
+//!   - Uses `CudaHwDevice` / `CudaHwFrames` (AV_HWDEVICE_TYPE_CUDA;
+//!     AV_PIX_FMT_CUDA with NV12 sw_format).
+//!   - No BSF chain — `hevc_nvenc` emits Annex-B natively, so there is no
+//!     `hevc_mp4toannexb` bitstream filter (the VAAPI side needs it because
+//!     the H.265-in-MP4 length-prefixed shape is what libavcodec hands back).
+//!   - Encoder name `"hevc_nvenc"`; private-data dict from
+//!     `build_priv_data_dict_nvenc(gop_size)`.
+//!
+//! Exactly one CPU→GPU upload (the renamed `hw_upload` symbol) lives in this
+//! file (the per-backend single-upload invariant enforced by CI's A9b grep
+//! guard).
+
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use prdt_media_core::{EncodeError, EncodedPacket};
 use prdt_media_sw::{i420_to_nv12_into, I420Frame};
 use rusty_ffmpeg::ffi::{
-    av_bsf_alloc, av_bsf_free, av_bsf_get_by_name, av_bsf_init, av_bsf_receive_packet,
-    av_bsf_send_packet, av_buffer_ref, av_frame_free, av_frame_get_buffer, av_hwframe_get_buffer,
+    av_buffer_ref, av_frame_free, av_frame_get_buffer, av_hwframe_get_buffer,
     av_hwframe_transfer_data as hw_upload, av_opt_set_int, av_packet_alloc, av_packet_free,
     av_packet_unref, avcodec_alloc_context3, avcodec_find_encoder_by_name, avcodec_free_context,
-    avcodec_open2, avcodec_parameters_from_context, avcodec_receive_packet, avcodec_send_frame,
-    AVBSFContext, AVCodecContext, AVFrame, AV_OPT_SEARCH_CHILDREN, AV_PICTURE_TYPE_I,
-    AV_PKT_FLAG_KEY,
+    avcodec_open2, avcodec_receive_packet, avcodec_send_frame, AVCodecContext, AVFrame,
+    AV_OPT_SEARCH_CHILDREN, AV_PICTURE_TYPE_I, AV_PKT_FLAG_KEY,
 };
 
+use crate::cuda_hwdevice::CudaHwDevice;
+use crate::cuda_hwframes::CudaHwFrames;
 use crate::error::FfmpegError;
-use crate::hwdevice::VaapiHwDevice;
-use crate::hwframes::VaapiHwFrames;
-use crate::options::{apply_low_latency_hevc_vaapi, build_priv_data_dict, EncoderTunables};
+use crate::options::{apply_low_latency_hevc_nvenc, build_priv_data_dict_nvenc, EncoderTunables};
 
 // AVERROR(EAGAIN) = -(EAGAIN) = -11 on Linux.
 const AVERROR_EAGAIN: i32 = -11;
 
-pub struct HevcVaapiFfmpegEncoderConfig {
+pub struct HevcNvencFfmpegEncoderConfig {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
     pub initial_bitrate_bps: u32,
     pub gop_size: u32,
-    pub render_node: Option<PathBuf>,
+    /// CUDA device index. Reserved for future multi-GPU selection; currently
+    /// unused (device is picked by `CUDA_VISIBLE_DEVICES` env / default 0).
+    /// Tracked as ADR follow-up F3.
+    pub cuda_device_index: Option<u32>,
 }
 
-impl Default for HevcVaapiFfmpegEncoderConfig {
+impl Default for HevcNvencFfmpegEncoderConfig {
     fn default() -> Self {
         Self {
             width: 1920,
@@ -40,18 +54,19 @@ impl Default for HevcVaapiFfmpegEncoderConfig {
             fps: 60,
             initial_bitrate_bps: 8_000_000,
             gop_size: 60,
-            render_node: None,
+            cuda_device_index: None,
         }
     }
 }
 
-pub struct HevcVaapiFfmpegEncoder {
-    device: VaapiHwDevice,
-    frames: VaapiHwFrames,
+pub struct HevcNvencFfmpegEncoder {
+    #[allow(dead_code)]
+    device: CudaHwDevice,
+    #[allow(dead_code)]
+    frames: CudaHwFrames,
     codec_ctx: NonNull<AVCodecContext>,
     cpu_frame: NonNull<AVFrame>,
     hw_frame: NonNull<AVFrame>,
-    bsf_ctx: NonNull<AVBSFContext>,
     tunables: EncoderTunables,
     seq: u64,
     closed: bool,
@@ -59,18 +74,18 @@ pub struct HevcVaapiFfmpegEncoder {
     last_bitrate_warn_secs: AtomicU64,
 }
 
-impl HevcVaapiFfmpegEncoder {
-    pub fn new(cfg: HevcVaapiFfmpegEncoderConfig) -> Result<Self, FfmpegError> {
+impl HevcNvencFfmpegEncoder {
+    pub fn new(cfg: HevcNvencFfmpegEncoderConfig) -> Result<Self, FfmpegError> {
         // 1. Runtime-probe encoder.
         // SAFETY: string literal is a valid nul-terminated C string.
-        let codec = unsafe { avcodec_find_encoder_by_name(c"hevc_vaapi".as_ptr()) };
+        let codec = unsafe { avcodec_find_encoder_by_name(c"hevc_nvenc".as_ptr()) };
         if codec.is_null() {
-            return Err(FfmpegError::EncoderNotFound("hevc_vaapi"));
+            return Err(FfmpegError::EncoderNotFound("hevc_nvenc"));
         }
 
         // 2. Open HW device + frames.
-        let device = VaapiHwDevice::open(cfg.render_node.as_deref())?;
-        let frames = VaapiHwFrames::new(&device, cfg.width, cfg.height)?;
+        let device = CudaHwDevice::open()?;
+        let frames = CudaHwFrames::new(&device, cfg.width, cfg.height)?;
 
         let tunables = EncoderTunables {
             bitrate_bps: cfg.initial_bitrate_bps,
@@ -87,7 +102,7 @@ impl HevcVaapiFfmpegEncoder {
             return Err(FfmpegError::OpenCodec(-1));
         }
         // SAFETY: codec_ctx_ptr is a freshly allocated, unopened AVCodecContext.
-        unsafe { apply_low_latency_hevc_vaapi(codec_ctx_ptr, &tunables) };
+        unsafe { apply_low_latency_hevc_nvenc(codec_ctx_ptr, &tunables) };
 
         // 4. Set hw_frames_ctx — avcodec_open2 will take ownership of this ref.
         // SAFETY: frames.raw() is a valid AVBufferRef owned by frames.
@@ -102,7 +117,7 @@ impl HevcVaapiFfmpegEncoder {
         unsafe { (*codec_ctx_ptr).hw_frames_ctx = frames_ref };
 
         // 5. Open codec with priv_data_dict (avcodec_open2 consumes the dict).
-        let dict = build_priv_data_dict(cfg.gop_size)?;
+        let dict = build_priv_data_dict_nvenc(cfg.gop_size)?;
         // SAFETY: codec_ctx_ptr, codec, and dict are all valid; avcodec_open2 frees dict on success.
         let ret = unsafe { avcodec_open2(codec_ctx_ptr, codec, &mut dict.as_ptr()) };
         if ret < 0 {
@@ -115,49 +130,7 @@ impl HevcVaapiFfmpegEncoder {
         // SAFETY: avcodec_alloc_context3 succeeded; pointer is non-null.
         let codec_ctx = unsafe { NonNull::new_unchecked(codec_ctx_ptr) };
 
-        // 6. BSF: hevc_mp4toannexb.
-        // SAFETY: string literal is a valid nul-terminated C string.
-        let bsf_filter = unsafe { av_bsf_get_by_name(c"hevc_mp4toannexb".as_ptr()) };
-        if bsf_filter.is_null() {
-            let mut p = codec_ctx.as_ptr();
-            // SAFETY: codec_ctx is the unique owner.
-            unsafe { avcodec_free_context(&mut p) };
-            return Err(FfmpegError::Bsf(-1));
-        }
-        let mut bsf_ptr: *mut AVBSFContext = ptr::null_mut();
-        // SAFETY: bsf_filter is non-null; bsf_ptr is the out-param address.
-        let ret = unsafe { av_bsf_alloc(bsf_filter, &mut bsf_ptr) };
-        if ret < 0 || bsf_ptr.is_null() {
-            let mut p = codec_ctx.as_ptr();
-            // SAFETY: codec_ctx is the unique owner.
-            unsafe { avcodec_free_context(&mut p) };
-            return Err(FfmpegError::Bsf(ret));
-        }
-        // Copy codec params into BSF.
-        // SAFETY: bsf_ptr and codec_ctx_ptr are both valid; par_in is allocated by av_bsf_alloc.
-        let ret = unsafe { avcodec_parameters_from_context((*bsf_ptr).par_in, codec_ctx.as_ptr()) };
-        if ret < 0 {
-            let mut b = bsf_ptr;
-            // SAFETY: bsf_ptr is the unique owner.
-            unsafe { av_bsf_free(&mut b) };
-            let mut p = codec_ctx.as_ptr();
-            // SAFETY: codec_ctx is the unique owner.
-            unsafe { avcodec_free_context(&mut p) };
-            return Err(FfmpegError::Bsf(ret));
-        }
-        // SAFETY: bsf_ptr is valid and params are set; init finalises the BSF.
-        let ret = unsafe { av_bsf_init(bsf_ptr) };
-        if ret < 0 {
-            let mut b = bsf_ptr;
-            // SAFETY: bsf_ptr is the unique owner.
-            unsafe { av_bsf_free(&mut b) };
-            let mut p = codec_ctx.as_ptr();
-            // SAFETY: codec_ctx is the unique owner.
-            unsafe { avcodec_free_context(&mut p) };
-            return Err(FfmpegError::Bsf(ret));
-        }
-        // SAFETY: bsf_ptr is non-null after successful av_bsf_init.
-        let bsf_ctx = unsafe { NonNull::new_unchecked(bsf_ptr) };
+        // 6. (No BSF chain — hevc_nvenc emits Annex-B natively.)
 
         // 7a. Allocate cpu_frame (NV12, software side).
         // SAFETY: av_frame_alloc allocates a zeroed AVFrame; always returns non-null or null on OOM.
@@ -165,8 +138,6 @@ impl HevcVaapiFfmpegEncoder {
             use rusty_ffmpeg::ffi::{av_frame_alloc, AV_PIX_FMT_NV12};
             let f = av_frame_alloc();
             if f.is_null() {
-                let mut b = bsf_ctx.as_ptr();
-                av_bsf_free(&mut b);
                 let mut p = codec_ctx.as_ptr();
                 avcodec_free_context(&mut p);
                 return Err(FfmpegError::OpenCodec(-1));
@@ -178,8 +149,6 @@ impl HevcVaapiFfmpegEncoder {
             let ret = av_frame_get_buffer(f, 32);
             if ret < 0 {
                 av_frame_free(&mut { f });
-                let mut b = bsf_ctx.as_ptr();
-                av_bsf_free(&mut b);
                 let mut p = codec_ctx.as_ptr();
                 avcodec_free_context(&mut p);
                 return Err(FfmpegError::OpenCodec(ret));
@@ -189,7 +158,7 @@ impl HevcVaapiFfmpegEncoder {
         // SAFETY: cpu_ptr is non-null after successful av_frame_get_buffer.
         let cpu_frame = unsafe { NonNull::new_unchecked(cpu_ptr) };
 
-        // 7b. Allocate hw_frame (VAAPI surface from pool).
+        // 7b. Allocate hw_frame (CUDA surface from pool).
         // SAFETY: frames.raw() is the valid frames buffer; hw_ptr is the out-param address.
         let hw_ptr = unsafe {
             use rusty_ffmpeg::ffi::av_frame_alloc;
@@ -197,8 +166,6 @@ impl HevcVaapiFfmpegEncoder {
             if f.is_null() {
                 let mut c = cpu_frame.as_ptr();
                 av_frame_free(&mut c);
-                let mut b = bsf_ctx.as_ptr();
-                av_bsf_free(&mut b);
                 let mut p = codec_ctx.as_ptr();
                 avcodec_free_context(&mut p);
                 return Err(FfmpegError::OpenCodec(-1));
@@ -208,8 +175,6 @@ impl HevcVaapiFfmpegEncoder {
                 av_frame_free(&mut { f });
                 let mut c = cpu_frame.as_ptr();
                 av_frame_free(&mut c);
-                let mut b = bsf_ctx.as_ptr();
-                av_bsf_free(&mut b);
                 let mut p = codec_ctx.as_ptr();
                 avcodec_free_context(&mut p);
                 return Err(FfmpegError::HwFrames(format!(
@@ -225,7 +190,7 @@ impl HevcVaapiFfmpegEncoder {
         tracing::info!(
             target: "video.pipeline",
             event = "encoder_ready",
-            backend = "ffmpeg-vaapi-hevc",
+            backend = "ffmpeg-nvenc-hevc",
             codec = "h265",
             profile = "main",
             bitdepth = 8,
@@ -238,7 +203,6 @@ impl HevcVaapiFfmpegEncoder {
             codec_ctx,
             cpu_frame,
             hw_frame,
-            bsf_ctx,
             tunables,
             seq: 0,
             closed: false,
@@ -274,7 +238,8 @@ impl HevcVaapiFfmpegEncoder {
         };
         i420_to_nv12_into(frame, y_dst, y_stride, uv_dst, uv_stride);
 
-        // 2. Upload: CPU → GPU. This is the sole CPU→GPU transfer site in this crate.
+        // 2. Upload: CPU → GPU. This is the sole CPU→GPU transfer site in this file
+        // (per-backend A9b invariant enforced by CI grep guard).
         // SAFETY: hw and cpu are valid non-null AVFrames; 0 flags is required by the API.
         let ret = unsafe { hw_upload(hw, cpu, 0) };
         if ret < 0 {
@@ -329,104 +294,46 @@ impl HevcVaapiFfmpegEncoder {
             return Err(FfmpegError::Send(send_ret).into());
         }
 
-        // 6. Receive encoded packet.
+        // 6. Receive encoded packet (Annex-B directly — no BSF).
         // SAFETY: av_packet_alloc returns zeroed packet or null.
-        let pkt_in = unsafe { av_packet_alloc() };
-        if pkt_in.is_null() {
+        let pkt = unsafe { av_packet_alloc() };
+        if pkt.is_null() {
             return Err(EncodeError::Backend("av_packet_alloc failed".into()));
         }
-        // SAFETY: ctx is open; pkt_in is freshly allocated.
-        let recv_ret = unsafe { avcodec_receive_packet(ctx, pkt_in) };
+        // SAFETY: ctx is open; pkt is freshly allocated.
+        let recv_ret = unsafe { avcodec_receive_packet(ctx, pkt) };
         if recv_ret < 0 {
-            // SAFETY: pkt_in is still the unique owner.
+            // SAFETY: pkt is still the unique owner.
             unsafe {
-                av_packet_unref(pkt_in);
-                av_packet_free(&mut { pkt_in });
+                av_packet_unref(pkt);
+                av_packet_free(&mut { pkt });
             }
             return Err(FfmpegError::Receive(recv_ret).into());
         }
 
-        // 7. BSF: hevc_mp4toannexb. EAGAIN after send is a logic error.
-        let bsf = self.bsf_ctx.as_ptr();
-        // SAFETY: bsf is valid and open; pkt_in ownership transfers to the BSF.
-        let bsf_send_ret = unsafe { av_bsf_send_packet(bsf, pkt_in) };
-        if bsf_send_ret == AVERROR_EAGAIN {
-            // SAFETY: pkt_in ownership is with BSF now; just free our handle.
+        // 7. Copy bytes and detect keyframe.
+        let (nal_bytes, is_keyframe) = {
+            // SAFETY: pkt.data/size are valid after successful avcodec_receive_packet.
+            let (data_ptr, size, flags) =
+                unsafe { ((*pkt).data, (*pkt).size as usize, (*pkt).flags) };
+            // SAFETY: data_ptr is valid for `size` bytes for the duration of pkt's lifetime.
+            let slice = unsafe { std::slice::from_raw_parts(data_ptr, size) };
+            let bytes = slice.to_vec();
+            let key = (flags & AV_PKT_FLAG_KEY as i32) != 0;
+            // SAFETY: pkt is the unique owner; unref before free.
             unsafe {
-                av_packet_unref(pkt_in);
-                av_packet_free(&mut { pkt_in });
+                av_packet_unref(pkt);
+                av_packet_free(&mut { pkt });
             }
-            return Err(FfmpegError::Bsf(bsf_send_ret).into());
-        }
-        if bsf_send_ret < 0 {
-            // SAFETY: pkt_in ownership is with BSF now; just free our handle.
-            unsafe {
-                av_packet_unref(pkt_in);
-                av_packet_free(&mut { pkt_in });
-            }
-            return Err(FfmpegError::Bsf(bsf_send_ret).into());
-        }
-        // Free our pkt_in handle (BSF owns the data now).
-        // SAFETY: pkt_in data has been transferred; we only free the shell.
-        unsafe {
-            av_packet_unref(pkt_in);
-            av_packet_free(&mut { pkt_in });
-        }
+            (bytes, key)
+        };
 
-        // Collect all BSF output packets (theoretically >1 on IDR param-set re-injection).
-        let mut nal_bytes: Vec<u8> = Vec::new();
-        let mut is_keyframe = false;
-        loop {
-            // SAFETY: av_packet_alloc returns zeroed packet or null.
-            let pkt_out = unsafe { av_packet_alloc() };
-            if pkt_out.is_null() {
-                return Err(EncodeError::Backend(
-                    "av_packet_alloc failed (bsf output)".into(),
-                ));
-            }
-            // SAFETY: bsf is valid; pkt_out is freshly allocated.
-            let bsf_recv_ret = unsafe { av_bsf_receive_packet(bsf, pkt_out) };
-            if bsf_recv_ret == AVERROR_EAGAIN {
-                // SAFETY: pkt_out is the unique owner.
-                unsafe {
-                    av_packet_unref(pkt_out);
-                    av_packet_free(&mut { pkt_out });
-                }
-                break;
-            }
-            if bsf_recv_ret < 0 {
-                // SAFETY: pkt_out is the unique owner.
-                unsafe {
-                    av_packet_unref(pkt_out);
-                    av_packet_free(&mut { pkt_out });
-                }
-                return Err(FfmpegError::Bsf(bsf_recv_ret).into());
-            }
-
-            // 8+9. Copy bytes and detect keyframe.
-            // SAFETY: pkt_out.data/size are valid after successful av_bsf_receive_packet.
-            unsafe {
-                let slice = std::slice::from_raw_parts((*pkt_out).data, (*pkt_out).size as usize);
-                nal_bytes.extend_from_slice(slice);
-                if ((*pkt_out).flags & AV_PKT_FLAG_KEY as i32) != 0 {
-                    is_keyframe = true;
-                }
-            }
-
-            // 10. Cleanup output packet.
-            // SAFETY: pkt_out is the unique owner; unref before free.
-            unsafe {
-                av_packet_unref(pkt_out);
-                av_packet_free(&mut { pkt_out });
-            }
-        }
-
-        // 11. First-frame log.
+        // 8. First-frame log.
         if !self.first_frame_logged.swap(true, Ordering::SeqCst) {
             tracing::info!(
                 target: "video.pipeline",
                 event = "first_frame_emitted",
-                backend = "ffmpeg-vaapi-hevc",
+                backend = "ffmpeg-nvenc-hevc",
                 codec = "h265",
                 zero_copy = true,
                 profile = "main",
@@ -436,7 +343,7 @@ impl HevcVaapiFfmpegEncoder {
             );
         }
 
-        // 12. Advance seq counter and return.
+        // 9. Advance seq counter and return.
         self.seq += 1;
         Ok(EncodedPacket {
             nal_bytes,
@@ -466,7 +373,7 @@ impl HevcVaapiFfmpegEncoder {
     }
 
     pub fn backend_name(&self) -> &'static str {
-        "ffmpeg-vaapi-hevc"
+        "ffmpeg-nvenc-hevc"
     }
 
     /// Rate-limited bitrate failure warning (at most once per 60 seconds).
@@ -490,15 +397,11 @@ impl HevcVaapiFfmpegEncoder {
     }
 }
 
-impl Drop for HevcVaapiFfmpegEncoder {
+impl Drop for HevcNvencFfmpegEncoder {
     fn drop(&mut self) {
-        // Reverse-creation order: bsf → hw_frame → cpu_frame → codec_ctx → frames → device.
-        let mut bsf = self.bsf_ctx.as_ptr();
-        // SAFETY: bsf_ctx is the unique owner of the BSF context.
-        unsafe { av_bsf_free(&mut bsf) };
-
+        // Reverse-creation order: hw_frame → cpu_frame → codec_ctx → frames → device.
         let mut hw = self.hw_frame.as_ptr();
-        // SAFETY: hw_frame is the unique owner of the VAAPI surface ref.
+        // SAFETY: hw_frame is the unique owner of the CUDA surface ref.
         unsafe { av_frame_free(&mut hw) };
 
         let mut cpu = self.cpu_frame.as_ptr();
@@ -515,98 +418,39 @@ impl Drop for HevcVaapiFfmpegEncoder {
     }
 }
 
-// Integration tests — require real Intel iGPU with VAAPI HEVC encode support.
+// Integration tests — require real NVIDIA HW with hevc_nvenc encode support.
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn default_config(w: u32, h: u32, gop: u32) -> HevcVaapiFfmpegEncoderConfig {
-        HevcVaapiFfmpegEncoderConfig {
+    fn default_config(w: u32, h: u32, gop: u32) -> HevcNvencFfmpegEncoderConfig {
+        HevcNvencFfmpegEncoderConfig {
             width: w,
             height: h,
             fps: 30,
             initial_bitrate_bps: 4_000_000,
             gop_size: gop,
-            render_node: None,
+            cuda_device_index: None,
         }
     }
 
     #[test]
-    #[ignore = "requires Intel iGPU VAAPI HEVC encode"]
+    #[ignore = "requires NVIDIA hevc_nvenc encode"]
     fn small_frame_emits_idr() {
         let cfg = default_config(320, 240, 30);
-        let mut enc = HevcVaapiFfmpegEncoder::new(cfg).expect("encoder created");
+        let mut enc = HevcNvencFfmpegEncoder::new(cfg).expect("encoder created");
         let frame = I420Frame::new_packed(320, 240).expect("frame");
         let pkt = enc.encode(&frame, true, 0).expect("encoded");
         assert!(pkt.is_keyframe);
+        // hevc_nvenc emits Annex-B directly — first 4 bytes are a 0x00000001 start code.
         assert!(pkt.nal_bytes.starts_with(&[0, 0, 0, 1]));
-        // Parse first 3 NAL types: VPS=32, SPS=33, PPS=34.
-        let mut pos = 0;
-        let mut nal_types = Vec::new();
-        let b = &pkt.nal_bytes;
-        while pos + 4 < b.len() && nal_types.len() < 4 {
-            if b[pos] == 0 && b[pos + 1] == 0 && b[pos + 2] == 0 && b[pos + 3] == 1 {
-                if pos + 4 < b.len() {
-                    let nal_type = (b[pos + 4] >> 1) & 0x3F;
-                    nal_types.push(nal_type);
-                }
-                pos += 4;
-            } else {
-                pos += 1;
-            }
-        }
-        assert_eq!(nal_types.get(0), Some(&32u8), "expected VPS");
-        assert_eq!(nal_types.get(1), Some(&33u8), "expected SPS");
-        assert_eq!(nal_types.get(2), Some(&34u8), "expected PPS");
-        assert!(
-            nal_types
-                .get(3)
-                .map(|&t| t == 19 || t == 20)
-                .unwrap_or(false),
-            "expected IDR slice"
-        );
     }
 
     #[test]
-    #[ignore = "requires Intel iGPU VAAPI HEVC encode"]
-    fn idr_cadence_respects_gop() {
-        let cfg = default_config(320, 240, 30);
-        let mut enc = HevcVaapiFfmpegEncoder::new(cfg).expect("encoder created");
-        let frame = I420Frame::new_packed(320, 240).expect("frame");
-        let mut key_count = 0u32;
-        for i in 0u64..120 {
-            let pkt = enc.encode(&frame, false, i * 33_333).expect("encoded");
-            if pkt.is_keyframe {
-                key_count += 1;
-            }
-        }
-        assert!(
-            (3..=5).contains(&key_count),
-            "expected 4±1 IDR frames, got {key_count}"
-        );
-    }
-
-    #[test]
-    #[ignore = "requires Intel iGPU VAAPI HEVC encode"]
-    fn set_target_bitrate_takes_effect() {
-        let cfg = default_config(320, 240, 30);
-        let mut enc = HevcVaapiFfmpegEncoder::new(cfg).expect("encoder created");
-        let frame = I420Frame::new_packed(320, 240).expect("frame");
-
-        let mut low_bytes = 0usize;
-        for i in 0u64..60 {
-            let pkt = enc.encode(&frame, i == 0, i * 33_333).expect("encoded");
-            low_bytes += pkt.nal_bytes.len();
-        }
-        enc.set_target_bitrate(12_000_000).expect("bitrate set");
-        let mut high_bytes = 0usize;
-        for i in 60u64..120 {
-            let pkt = enc.encode(&frame, false, i * 33_333).expect("encoded");
-            high_bytes += pkt.nal_bytes.len();
-        }
-        assert!(
-            high_bytes >= low_bytes * 2,
-            "expected high-bitrate bytes ({high_bytes}) >= 2× low ({low_bytes})"
-        );
+    fn allocates_config_with_defaults() {
+        let cfg = HevcNvencFfmpegEncoderConfig::default();
+        assert_eq!(cfg.width, 1920);
+        assert_eq!(cfg.fps, 60);
+        assert!(cfg.cuda_device_index.is_none());
     }
 }

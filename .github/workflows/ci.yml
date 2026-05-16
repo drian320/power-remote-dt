@@ -23,11 +23,12 @@ jobs:
         run: cargo test -p prdt-protocol -p prdt-transport --all-targets
       - name: build
         run: cargo build --workspace
-      # A2b gate: ffmpeg-encode-hevc-vaapi feature must emit compile_error! on Windows
-      # (Linux-only feature guard). Runs on the same windows-latest runner because
-      # cross-compiling to windows-msvc from a Linux dev-container requires cargo-xwin
-      # or mingw which are not available in Dockerfile.dev.
-      - name: Cross-target compile_error! assertion (A2b gate)
+      # A2b gate: ffmpeg-encode-hevc-vaapi and ffmpeg-encode-hevc-nvenc features
+      # must both emit compile_error! on Windows (Linux-only feature guards).
+      # Runs on the same windows-latest runner because cross-compiling to
+      # windows-msvc from a Linux dev-container requires cargo-xwin / mingw
+      # which are not available in Dockerfile.dev.
+      - name: Cross-target compile_error! assertion — VAAPI (A2b gate)
         # Two PowerShell gotchas:
         # 1. `$output = cargo ... 2>&1` is a string array. `-notmatch` against
         #    an array returns the non-matching elements (truthy if any line
@@ -46,20 +47,82 @@ jobs:
           }
           Write-Output "PASS: compile_error! contains 'Linux-only'"
           exit 0
+      - name: Cross-target compile_error! assertion — NVENC (A2b gate P1.5)
+        run: |
+          $output = (cargo check -p prdt-host --features ffmpeg-encode-hevc-nvenc 2>&1) | Out-String
+          Write-Output $output
+          if ($output -notmatch 'Linux-only') {
+            Write-Error "FAIL: expected compile_error! containing 'Linux-only' for NVENC feature"
+            exit 1
+          }
+          Write-Output "PASS: NVENC compile_error! contains 'Linux-only'"
+          exit 0
 
   media-ffmpeg-compile:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build with FFmpeg feature
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install FFmpeg dev libs (for native ffmpeg6 ABI cells)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libavcodec-dev libavutil-dev libavfilter-dev libavformat-dev \
+            libavdevice-dev libswresample-dev libswscale-dev \
+            clang libclang-dev
+      # --- VAAPI cells (dev-container, ffmpeg5 bookworm headers) ---
+      - name: VAAPI — cargo check (ffmpeg5 default ABI, dev-container)
         run: ./scripts/dev-container.sh bash -c 'cargo check -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-vaapi --target x86_64-unknown-linux-gnu'
-      - name: Clippy with FFmpeg feature (deny warnings)
+      - name: VAAPI — clippy (deny warnings, default ABI, dev-container)
         run: ./scripts/dev-container.sh bash -c 'cargo clippy -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-vaapi --target x86_64-unknown-linux-gnu -- -D warnings'
-      - name: Unit tests (no GPU)
+      - name: VAAPI — unit tests (no GPU, default ABI, dev-container)
         run: ./scripts/dev-container.sh bash -c 'cargo test -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-vaapi --lib --target x86_64-unknown-linux-gnu'
+      # --- NVENC cells (P1.5, A2) ---
+      # ffmpeg5 explicit ABI: via dev-container (bookworm headers).
+      # ffmpeg6 default ABI: native ubuntu-latest (system libavcodec = ffmpeg6).
+      # ffmpeg7 ABI: check-only; ubuntu-latest ffmpeg6 headers close enough for
+      # compile check (rusty_ffmpeg 0.16.7 ffmpeg7 bindings are pre-generated).
+      - name: NVENC — cargo check (ffmpeg5 explicit ABI, dev-container)
+        run: ./scripts/dev-container.sh bash -c 'cargo check -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-nvenc-ffmpeg5 --target x86_64-unknown-linux-gnu'
+      - name: NVENC — clippy (deny warnings, ffmpeg5 ABI, dev-container)
+        run: ./scripts/dev-container.sh bash -c 'cargo clippy -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-nvenc-ffmpeg5 --target x86_64-unknown-linux-gnu -- -D warnings'
+      - name: NVENC — unit tests (no GPU, ffmpeg5 ABI, dev-container)
+        run: ./scripts/dev-container.sh bash -c 'cargo test -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-nvenc-ffmpeg5 --lib --target x86_64-unknown-linux-gnu'
+      - name: NVENC — cargo check (ffmpeg6 default ABI, native runner)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: cargo check -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-nvenc --target x86_64-unknown-linux-gnu
+      - name: NVENC — cargo check (ffmpeg7 explicit ABI, native runner, check-only)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: cargo check -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-nvenc-ffmpeg7 --target x86_64-unknown-linux-gnu
+      # --- Both-features clippy cell (W1): validates the all(vaapi,nvenc) cfg cascade ---
+      # Use matching ABI (vaapi=ffmpeg5 default + nvenc-ffmpeg5) via dev-container to
+      # avoid rusty_ffmpeg ABI conflict (vaapi defaults ffmpeg5, nvenc defaults ffmpeg6).
+      - name: Both-features clippy — prdt-host (vaapi + nvenc-ffmpeg5, dev-container)
+        run: ./scripts/dev-container.sh bash -c 'cargo clippy -p prdt-host --features ffmpeg-encode-hevc-vaapi,ffmpeg-encode-hevc-nvenc-ffmpeg5 --target x86_64-unknown-linux-gnu -- -D warnings'
+      - name: Both-features tests — prdt-host (vaapi + nvenc-ffmpeg5, dev-container)
+        run: ./scripts/dev-container.sh bash -c 'cargo test -p prdt-host --features ffmpeg-encode-hevc-vaapi,ffmpeg-encode-hevc-nvenc-ffmpeg5 --lib --target x86_64-unknown-linux-gnu'
+      # --- Safety + grep guards ---
       - name: Safety-comment lint
         run: ./scripts/dev-container.sh bash -c 'python3 scripts/check-safety-comments.py crates/media-ffmpeg/src/'
-      - name: No-implicit-roundtrip grep guards
+      - name: No-implicit-roundtrip grep guard
         run: |
           ! grep -rE 'hwdownload|swscale|hwupload' crates/media-ffmpeg/src/
-          grep -rc 'av_hwframe_transfer_data' crates/media-ffmpeg/src/ | awk -F: '{s+=$2} END{exit !(s==1)}'
+      - name: Per-backend hwframe upload invariant (A9b — ≤ 1 av_hwframe_transfer_data per encoder file)
+        run: |
+          set -euo pipefail
+          fail=0
+          shopt -s nullglob
+          for f in crates/media-ffmpeg/src/hevc_*_encoder.rs; do
+            count=$(grep -c -E '\bav_hwframe_transfer_data\b' "$f" || true)
+            echo "$f: $count"
+            if [ "$count" -gt 1 ]; then
+              echo "::error file=$f::More than one av_hwframe_transfer_data call site (got $count, max 1)"
+              fail=1
+            fi
+          done
+          exit $fail

@@ -9,6 +9,12 @@ compile_error!(
     "feature 'ffmpeg-encode-hevc-vaapi' is not available on this target (Linux-only in P1)"
 );
 
+#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc", not(target_os = "linux")))]
+compile_error!(
+    "feature 'ffmpeg-encode-hevc-nvenc' is not available on this target \
+     (Linux-only in P1.5; Windows already has native NVENC via media-win)"
+);
+
 use std::fs;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -136,12 +142,17 @@ pub struct Args {
     #[arg(long)]
     turn_url: Option<url::Url>,
 
-    /// Encoder backend: auto (default) | nvenc | mf | openh264.
-    /// "auto" picks the best available: nvenc > mf > openh264. On NVIDIA
-    /// boxes nvenc wins; on Intel/AMD it falls back to the MF H.265 MFT;
-    /// if neither is available the cross-platform OpenH264 software path
-    /// kicks in (advertises H.264 in HelloAck instead of H.265).
-    /// Specifying a non-"auto" value enables Strict mode (no failover).
+    /// Encoder backend selector. Default: `auto`.
+    ///
+    /// On Linux: `auto | ffmpeg-vaapi-hevc | ffmpeg-nvenc-hevc | openh264`.
+    /// `auto` prefers VAAPI when compiled (Intel iGPU / AMD APU); set
+    /// `PRDT_PREFER_NVENC=1` (any value in `{1,true,yes,on}`, case-insensitive)
+    /// to prefer NVENC instead.
+    ///
+    /// On Windows: `auto | nvenc | mf | openh264`. `auto` picks
+    /// `nvenc > mf > openh264`.
+    ///
+    /// Available choices depend on Cargo features compiled into this binary.
     #[arg(long, default_value = "auto")]
     encoder: String,
 

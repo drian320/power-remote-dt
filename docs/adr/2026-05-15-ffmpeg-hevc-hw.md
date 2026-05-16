@@ -246,8 +246,61 @@ The FFmpeg encoder/decoder paths therefore:
 - **−** LGPL compliance documentation must be added to `docs/` and to the MSI's license file.
 - **−** CCG/Codex flagged: `rusty_ffmpeg` is a thinner wrapper → more `unsafe` blocks in our crate. We accept this for HW-control precision; balanced by keeping the surface small (one trait impl per backend file).
 
+## P1.5 — NVENC variant added
+
+**Status:** Proposed (unchanged — hardware smoke not yet run)
+
+A second hardware encode backend `HevcNvencFfmpegEncoder` was added in `crates/media-ffmpeg`
+gated by the `ffmpeg-encode-hevc-nvenc` feature triplet (default ABI `ffmpeg6` to match the
+Ubuntu 24.04 smoke runner, diverging temporarily from VAAPI's `ffmpeg5` default — see F6).
+
+### `auto` preference policy
+
+When both VAAPI and NVENC compile in, `--encoder auto` prefers VAAPI (Intel iGPU is the more
+common deployment). The `PRDT_PREFER_NVENC` env-var override flips the preference for users
+on dGPU-equipped hosts:
+
+```
+PRDT_PREFER_NVENC=1   # accepted: 1, true, yes, on (case-insensitive); anything else = unset
+```
+
+A structured `tracing::info!` line at the resolution site records which backend was chosen
+and why (`selected_by`, `reason` fields).
+
+### Annex-B asymmetry
+
+`hevc_nvenc` emits Annex-B by default — **no** `hevc_mp4toannexb` BSF chain on the NVENC
+side. The VAAPI BSF chain remains unchanged. This asymmetry is documented in the encoder
+doc-comment and in the smoke doc.
+
+### Minimum driver requirement
+
+NVENC path requires NVIDIA driver **≥ 535** for reliable HEVC NVENC on Pascal/Turing/Ampere.
+
+### Follow-up F4 — CPU BGRA→NV12 conversion urgency
+
+CUDA NPP BGRA→NV12 is **materially more urgent for NVENC than VAAPI** because NVENC encode
+latency is much lower (~1–2 ms on modern GPUs vs. ~3–6 ms for VAAPI on iGPU), so CPU-side
+BGRA→NV12 conversion is a larger fraction of the per-frame budget. Tracked separately as F4.
+
+---
+
 ## Follow-ups
 
+- **F1** — When a third backend lands (P4 `hevc_qsv`), revisit `HwDevice<Kind>` generic and/or
+  `HwBackend` trait extraction; design against three concrete backend constraints.
+- **F2** — NVIDIA hardware smoke (A4) on a developer's NVIDIA Linux box; log in the smoke doc.
+- **F3** — Consider exposing `cuda_device_index` as a CLI flag once multi-GPU Linux hosts become
+  a real user complaint.
+- **F4** — GPU-side BGRA→NV12 (CUDA NPP for NVENC; VAAPI `vpp` for VAAPI). **Materially more
+  urgent for NVENC** — see P1.5 note above.
+- **F5** — Bench-matrix Linux port (separate side project) gates any perf-regression CI for
+  either backend.
+- **F6** — Reconcile default-ABI divergence: flip VAAPI default from `ffmpeg5` to `ffmpeg6` in
+  a separate cleanup PR. Separate concern from NVENC-add; deserves its own changelog entry.
+- **F7** — `zero_copy=true` log-line naming is misleading (path is CPU-NV12-upload); fix in the
+  broader log-line audit when F4 adds a real zero-copy path.
+- **F8** — P1.6 PR for legacy `--encoder nvenc` alias rerouting to `ffmpeg-nvenc-hevc`.
 - **Promote `media-vaapi/annexb.rs` → `media-core`** (or a `media-bitstream` util) so `media-ffmpeg` does not depend on `media-vaapi`.
 - **`HevcCapability` protocol bump** — required when 10-bit / HDR work begins (post-P1).
 - **GPU-accel CI lane** — self-hosted runner with Intel iGPU for VAAPI; NVIDIA runner for `hevc_nvenc`-via-FFmpeg if P0 scaffold proves valuable.

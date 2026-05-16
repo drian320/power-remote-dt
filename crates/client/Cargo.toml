@@ -41,6 +41,9 @@ vaapi-h264 = ["prdt-host/vaapi-h264"]
 ffmpeg-encode-hevc-vaapi = ["prdt-host/ffmpeg-encode-hevc-vaapi"]
 ffmpeg-encode-hevc-vaapi-ffmpeg6 = ["prdt-host/ffmpeg-encode-hevc-vaapi-ffmpeg6"]
 ffmpeg-encode-hevc-vaapi-ffmpeg7 = ["prdt-host/ffmpeg-encode-hevc-vaapi-ffmpeg7"]
+ffmpeg-encode-hevc-nvenc = ["prdt-host/ffmpeg-encode-hevc-nvenc"]
+ffmpeg-encode-hevc-nvenc-ffmpeg5 = ["prdt-host/ffmpeg-encode-hevc-nvenc-ffmpeg5"]
+ffmpeg-encode-hevc-nvenc-ffmpeg7 = ["prdt-host/ffmpeg-encode-hevc-nvenc-ffmpeg7"]
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
