@@ -20,6 +20,23 @@ compile_error!(
      Windows already has native NVENC via media-win)"
 );
 
+#[cfg(all(feature = "ffmpeg-decode-hevc-sw-any", not(target_os = "linux")))]
+compile_error!(
+    "feature 'ffmpeg-decode-hevc-sw' is not available on this target (Linux-only in P2; \
+     Windows already has Media Foundation HEVC decode via media-win)"
+);
+
+#[cfg(all(feature = "ffmpeg-decode-hevc-vaapi-any", not(target_os = "linux")))]
+compile_error!(
+    "feature 'ffmpeg-decode-hevc-vaapi' is not available on this target (Linux-only in P2)"
+);
+
+#[cfg(all(feature = "ffmpeg-decode-hevc-nvdec-any", not(target_os = "linux")))]
+compile_error!(
+    "feature 'ffmpeg-decode-hevc-nvdec' is not available on this target (Linux-only in P2; \
+     Windows already has NVDEC HEVC decode via media-win)"
+);
+
 pub mod error;
 
 #[cfg(all(

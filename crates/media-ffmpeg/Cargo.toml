@@ -56,3 +56,24 @@ ffmpeg-encode-hevc-nvenc-ffmpeg7 = ["ffmpeg", "rusty_ffmpeg/ffmpeg7", "ffmpeg-en
 # Marker enabled by all three NVENC ABI variants; use in cfg() so any ABI
 # activates NVENC code paths.
 ffmpeg-encode-hevc-nvenc-any = []
+
+# P2 — HEVC decode side. Three backends (sw / vaapi / nvdec) × four ABIs
+# (default unsuffixed = ffmpeg6 to match the Ubuntu 24.04 smoke runner, plus
+# explicit -ffmpeg5 for the Debian bookworm dev container, -ffmpeg6, and
+# -ffmpeg7). The `-any` marker per backend is what cfg() gates check so
+# the modules compile under any ABI variant.
+ffmpeg-decode-hevc-sw = ["ffmpeg", "rusty_ffmpeg/ffmpeg6", "ffmpeg-decode-hevc-sw-any"]
+ffmpeg-decode-hevc-sw-ffmpeg5 = ["ffmpeg", "rusty_ffmpeg/ffmpeg5", "ffmpeg-decode-hevc-sw-any"]
+ffmpeg-decode-hevc-sw-ffmpeg6 = ["ffmpeg", "rusty_ffmpeg/ffmpeg6", "ffmpeg-decode-hevc-sw-any"]
+ffmpeg-decode-hevc-sw-ffmpeg7 = ["ffmpeg", "rusty_ffmpeg/ffmpeg7", "ffmpeg-decode-hevc-sw-any"]
+ffmpeg-decode-hevc-sw-any = []
+ffmpeg-decode-hevc-vaapi = ["ffmpeg", "rusty_ffmpeg/ffmpeg6", "ffmpeg-decode-hevc-vaapi-any"]
+ffmpeg-decode-hevc-vaapi-ffmpeg5 = ["ffmpeg", "rusty_ffmpeg/ffmpeg5", "ffmpeg-decode-hevc-vaapi-any"]
+ffmpeg-decode-hevc-vaapi-ffmpeg6 = ["ffmpeg", "rusty_ffmpeg/ffmpeg6", "ffmpeg-decode-hevc-vaapi-any"]
+ffmpeg-decode-hevc-vaapi-ffmpeg7 = ["ffmpeg", "rusty_ffmpeg/ffmpeg7", "ffmpeg-decode-hevc-vaapi-any"]
+ffmpeg-decode-hevc-vaapi-any = []
+ffmpeg-decode-hevc-nvdec = ["ffmpeg", "rusty_ffmpeg/ffmpeg6", "ffmpeg-decode-hevc-nvdec-any"]
+ffmpeg-decode-hevc-nvdec-ffmpeg5 = ["ffmpeg", "rusty_ffmpeg/ffmpeg5", "ffmpeg-decode-hevc-nvdec-any"]
+ffmpeg-decode-hevc-nvdec-ffmpeg6 = ["ffmpeg", "rusty_ffmpeg/ffmpeg6", "ffmpeg-decode-hevc-nvdec-any"]
+ffmpeg-decode-hevc-nvdec-ffmpeg7 = ["ffmpeg", "rusty_ffmpeg/ffmpeg7", "ffmpeg-decode-hevc-nvdec-any"]
+ffmpeg-decode-hevc-nvdec-any = []
