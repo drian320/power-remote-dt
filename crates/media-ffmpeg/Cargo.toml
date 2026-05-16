@@ -39,3 +39,14 @@ ffmpeg = ["dep:rusty_ffmpeg"]
 ffmpeg-encode-hevc-vaapi = ["ffmpeg", "rusty_ffmpeg/ffmpeg5"]
 ffmpeg-encode-hevc-vaapi-ffmpeg6 = ["ffmpeg", "rusty_ffmpeg/ffmpeg6"]
 ffmpeg-encode-hevc-vaapi-ffmpeg7 = ["ffmpeg", "rusty_ffmpeg/ffmpeg7"]
+
+# NVENC backend × ABI combinations. The unsuffixed `ffmpeg-encode-hevc-nvenc`
+# defaults to ffmpeg6 (Ubuntu 24.04 smoke runner) — this deliberately diverges
+# from VAAPI's ffmpeg5 default to minimize "works locally, breaks in smoke"
+# surprises. The divergence is temporary and tracked as ADR follow-up F6 (flip
+# VAAPI's default to ffmpeg6 in a separate cleanup PR). NVENC and VAAPI may
+# compile together provided they agree on the ABI variant (matrix is `vaapi ×
+# abi` and `nvenc × abi`, not `vaapi-ffmpeg5 + nvenc-ffmpeg7`).
+ffmpeg-encode-hevc-nvenc = ["ffmpeg", "rusty_ffmpeg/ffmpeg6"]
+ffmpeg-encode-hevc-nvenc-ffmpeg5 = ["ffmpeg", "rusty_ffmpeg/ffmpeg5"]
+ffmpeg-encode-hevc-nvenc-ffmpeg7 = ["ffmpeg", "rusty_ffmpeg/ffmpeg7"]

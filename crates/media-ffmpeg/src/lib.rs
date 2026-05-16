@@ -14,6 +14,12 @@ compile_error!(
     "feature 'ffmpeg-encode-hevc-vaapi' is not available on this target (Linux-only in P1)"
 );
 
+#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc", not(target_os = "linux")))]
+compile_error!(
+    "feature 'ffmpeg-encode-hevc-nvenc' is not available on this target (Linux-only in P1.5; \
+     Windows already has native NVENC via media-win)"
+);
+
 pub mod error;
 
 #[cfg(all(feature = "ffmpeg-encode-hevc-vaapi", target_os = "linux"))]
