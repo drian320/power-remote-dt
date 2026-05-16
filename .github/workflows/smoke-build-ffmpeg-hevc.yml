@@ -185,6 +185,46 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
+      - name: Build prdt with NVENC + NPP encode path (P2.5 — NVIDIA GPU host smoke)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: |
+          # ffmpeg-encode-hevc-nvenc-npp transitively enables ffmpeg-encode-hevc-nvenc
+          # (per R4 Cargo dep chain). All three decode backends included so the
+          # artifact can serve as both host and viewer on a NVIDIA Linux box.
+          cargo build \
+            --release \
+            -p prdt-client \
+            --features ffmpeg-encode-hevc-vaapi,ffmpeg-encode-hevc-nvenc-npp,ffmpeg-decode-hevc-sw,ffmpeg-decode-hevc-vaapi,ffmpeg-decode-hevc-nvdec \
+            --target x86_64-unknown-linux-gnu
+
+      - name: Stage HEVC-encode-NPP artifact
+        run: |
+          cp target/x86_64-unknown-linux-gnu/release/prdt artifacts/prdt-linux-x86_64-ffmpeg-hevc-encode-npp
+          chmod +x artifacts/prdt-linux-x86_64-ffmpeg-hevc-encode-npp
+          (cd artifacts && sha256sum prdt-linux-x86_64-ffmpeg-hevc-encode-npp > prdt-linux-x86_64-ffmpeg-hevc-encode-npp.sha256)
+          ls -la artifacts/prdt-linux-x86_64-ffmpeg-hevc-encode-npp*
+          file artifacts/prdt-linux-x86_64-ffmpeg-hevc-encode-npp
+          # ldd portability guard: libcudart.so.12 + libnppicc.so.12 are runtime
+          # deps for the NPP path; libnvidia-encode.so.1 must NOT appear at
+          # link time (lazy-loaded by FFmpeg at runtime, same as plain NVENC).
+          ldd artifacts/prdt-linux-x86_64-ffmpeg-hevc-encode-npp \
+            | grep -E 'libav|libcuda|libnpp|libnvidia' || true
+          if ldd artifacts/prdt-linux-x86_64-ffmpeg-hevc-encode-npp \
+               | grep -q 'libnvidia-encode'; then
+            echo "::error::libnvidia-encode.so.1 in ldd output — linked at build time (must be lazy-loaded)"
+            exit 1
+          fi
+
+      - name: Upload HEVC-encode-NPP workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prdt-linux-x86_64-ffmpeg-hevc-encode-npp
+          path: artifacts/prdt-linux-x86_64-ffmpeg-hevc-encode-npp*
+          retention-days: 30
+          if-no-files-found: error
+
   build-windows:
     name: Build Windows x86_64 prdt (viewer-side, no FFmpeg feature)
     # Windows side decodes HEVC via Media Foundation / NVDEC — it does NOT need
