@@ -89,3 +89,63 @@ pub fn build_vaapi_video_producer_with(
 pub fn build_video_decoder() -> anyhow::Result<sw_pipeline::LinuxSwDecoder> {
     sw_pipeline::LinuxSwDecoder::new().map_err(Into::into)
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// P2 — FFmpeg HEVC decode factories. Mirror the encoder-side build
+// functions; gated per backend so the viewer crate can subscribe to any
+// subset (sw-only, vaapi-only, nvdec-only, all three) without dragging
+// in unused FFI symbols. Each returns the `*Adapter` type from
+// prdt-media-ffmpeg so the viewer doesn't need a direct dep on the
+// crate behind these forwards.
+// ────────────────────────────────────────────────────────────────────────────
+
+#[cfg(all(target_os = "linux", feature = "ffmpeg-decode-hevc-sw-any"))]
+pub fn build_ffmpeg_sw_hevc_decoder(
+    width: u32,
+    height: u32,
+) -> anyhow::Result<prdt_media_ffmpeg::HevcSwFfmpegDecoderAdapter> {
+    use anyhow::Context as _;
+    let dec =
+        prdt_media_ffmpeg::HevcSwFfmpegDecoder::new(prdt_media_ffmpeg::HevcSwFfmpegDecoderConfig {
+            width,
+            height,
+        })
+        .context("HevcSwFfmpegDecoder::new")?;
+    // HevcSwFfmpegDecoderAdapter is a type alias for HevcDecoderAdapter<B>;
+    // construct the generic directly because type aliases aren't callable.
+    Ok(prdt_media_ffmpeg::HevcDecoderAdapter(dec))
+}
+
+#[cfg(all(target_os = "linux", feature = "ffmpeg-decode-hevc-vaapi-any"))]
+pub fn build_ffmpeg_vaapi_hevc_decoder(
+    width: u32,
+    height: u32,
+) -> anyhow::Result<prdt_media_ffmpeg::HevcVaapiFfmpegDecoderAdapter> {
+    use anyhow::Context as _;
+    let dec = prdt_media_ffmpeg::HevcVaapiFfmpegDecoder::new(
+        prdt_media_ffmpeg::HevcVaapiFfmpegDecoderConfig {
+            width,
+            height,
+            render_node: None,
+        },
+    )
+    .context("HevcVaapiFfmpegDecoder::new")?;
+    Ok(prdt_media_ffmpeg::HevcDecoderAdapter(dec))
+}
+
+#[cfg(all(target_os = "linux", feature = "ffmpeg-decode-hevc-nvdec-any"))]
+pub fn build_ffmpeg_nvdec_hevc_decoder(
+    width: u32,
+    height: u32,
+) -> anyhow::Result<prdt_media_ffmpeg::HevcNvdecFfmpegDecoderAdapter> {
+    use anyhow::Context as _;
+    let dec = prdt_media_ffmpeg::HevcNvdecFfmpegDecoder::new(
+        prdt_media_ffmpeg::HevcNvdecFfmpegDecoderConfig {
+            width,
+            height,
+            cuda_device_index: None,
+        },
+    )
+    .context("HevcNvdecFfmpegDecoder::new")?;
+    Ok(prdt_media_ffmpeg::HevcDecoderAdapter(dec))
+}
