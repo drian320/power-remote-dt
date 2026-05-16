@@ -436,6 +436,157 @@ INFO video.pipeline decoder="ffmpeg-nvdec-hevc" selected_by="auto" reason="prefe
 
 ---
 
+## NVENC + NPP variant (P2.5 — NVIDIA GPU hosts, GPU-side BGRA→NV12)
+
+This section covers the `ffmpeg-encode-hevc-nvenc-npp` encoder path (P2.5). It
+replaces the CPU `bgra_to_i420` + `i420_to_nv12_into` chain with a single CUDA
+NPP conversion on the GPU, uploading BGRA once via `cudaMemcpy2D` and writing
+NV12 directly into the NVENC hwframe surface.
+
+### Prerequisites (NVENC + NPP)
+
+**Minimum NVIDIA driver: ≥ 535** (same floor as P1.5 NVENC plain path; matches
+CUDA 12.x forward-compat requirement).
+
+**CUDA runtime: ≥ 12.0** — verified at startup via `cudaDriverGetVersion`.
+`libcudart.so.12` and `libnppicc.so.12` must be present on the host at runtime:
+
+```bash
+nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
+# Expected: <GPU name>, 535.x.x or higher
+
+ldconfig -p | grep -E 'libcudart|libnppicc'
+# Expected: at least one line each for libcudart.so.12 and libnppicc.so.12
+```
+
+If `libnppicc.so.12` is absent, install the matching CUDA NPP runtime package.
+On Ubuntu 22.04 with the NVIDIA apt repo:
+
+```bash
+sudo apt-get install libnpp-12-4
+```
+
+### Build (Arch FFmpeg 7 — recommended for NVIDIA hosts running Arch Linux)
+
+```bash
+# ffmpeg-encode-hevc-nvenc-npp transitively enables ffmpeg-encode-hevc-nvenc.
+cargo build -p prdt-client --release \
+  --no-default-features \
+  --features ffmpeg-encode-hevc-nvenc-npp-ffmpeg7 \
+  --target x86_64-unknown-linux-gnu
+```
+
+Or download the `prdt-linux-x86_64-ffmpeg-hevc-encode-npp` artifact from the
+`smoke-build-ffmpeg-hevc.yml` workflow run (built with ffmpeg6 default ABI +
+VAAPI + all 3 decoders).
+
+### Start host (NVENC + NPP)
+
+```bash
+prdt host \
+    --encoder ffmpeg-nvenc-hevc-npp \
+    --bind 0.0.0.0:9000 \
+    --monitor 0 \
+    --bitrate-mbps 8 \
+    --key-file host-key.bin \
+    --silent-allow --headless \
+    2>&1 | tee host-npp.log
+```
+
+Expected startup log line (confirms NPP path active):
+
+```
+INFO video.pipeline event="encoder_ready" backend="ffmpeg-nvenc-hevc-npp" codec="h265" profile="main" bitdepth=8
+INFO video.pipeline event="first_frame_emitted" codec="hevc_nvenc" hw_path="cuda" convert_path="npp" ...
+```
+
+The `convert_path="npp"` field distinguishes the NPP path from plain NVENC
+(`convert_path="sw"`).
+
+### Runtime semantics (R5 — build feature × host hardware matrix)
+
+| Build features | Host hardware | `--encoder ffmpeg-nvenc-hevc-npp` | `--encoder auto` |
+|---|---|---|---|
+| `nvenc + npp` | NVIDIA dGPU + libnppicc loaded | NPP path runs; log emits `convert_path="npp"` | Picks plain NVENC (`auto` never selects NPP — opt-in only per Step 4 decision) |
+| `nvenc + npp` | Non-NVIDIA host or libnppicc absent | `HevcNvencNppFfmpegEncoder::new` fails; exits with `FfmpegError::HwDevice` — **NOT** silent fallback | Falls through `auto` chain normally (VAAPI > NVENC > openh264) |
+| `nvenc` only (no npp) | Any | `normalize_encoder` warns and falls back to openh264; log emits `WARN ffmpeg-nvenc-hevc-npp not compiled in` | Plain NVENC selected normally |
+
+`--encoder auto` **never** selects NPP — the policy is byte-stable from P1.6.
+Use `--encoder ffmpeg-nvenc-hevc-npp` (or the legacy alias `--encoder nvenc-npp`)
+to explicitly opt in. A `PRDT_PREFER_NPP` env override is deferred as ADR F8.
+
+### Monitor GPU utilization (NVENC + NPP)
+
+```bash
+# NVENC encoder utilization (enc column should be non-zero):
+nvidia-smi dmon -s u -d 2
+
+# CUDA memory activity (correlated to fps × frame size):
+nvidia-smi dmon -s mu -d 2
+
+# CPU usage delta vs plain NVENC — bgra_to_i420 + i420_to_nv12_into
+# should no longer appear in perf top:
+perf top -p $(pgrep -f 'prdt host') 2>/dev/null | head -20
+```
+
+### 5-grep verification (after ≥ 5-min soak)
+
+```bash
+# 1. encoder= field confirms NPP backend
+grep 'convert_path' host-npp.log | head -3
+
+# 2. First frame used NPP path
+grep -c 'convert_path="npp"' host-npp.log
+# Expected: >= 1
+
+# 3. No CPU readback warnings
+grep -c 'cpu_readback' host-npp.log
+# Expected: 0
+
+# 4. Frame count (≥ 17000 for 5-min @ ~57 fps)
+grep -c 'frame_decoded seq=' viewer.log
+# Expected: >= 17000
+
+# 5. Sequence gap check
+grep -oE 'frame_decoded seq=[0-9]+' viewer.log | awk -F= '{print $2}' | sort -n | \
+  awk 'NR==1{min=$1} {max=$1; count++} END{if (max-min == count-1) print "OK"; else print "GAPS"}'
+# Expected: OK
+```
+
+### Per-frame CPU usage delta vs plain NVENC
+
+Run back-to-back 5-min sessions: one with `--encoder ffmpeg-nvenc-hevc` and one
+with `--encoder ffmpeg-nvenc-hevc-npp`. Capture `perf stat -e task-clock` for
+both. At 1080p60 the NPP path eliminates ~1–3 ms of CPU conversion per frame;
+expect `task-clock` to drop by ≥ 10% on the encode thread.
+
+### Common failure modes (NVENC + NPP)
+
+| Symptom | Likely cause | Fix |
+|---------|-------------|-----|
+| `HwDevice("cudaDriverGetVersion returned ... not loadable")` | libcudart.so.12 absent | Install `cuda-cudart-12-4` runtime package |
+| `HwDevice("CUDA driver too old: ... < 12000")` | Driver < 535 | Upgrade NVIDIA driver to ≥ 535 |
+| `Transfer(-9999)` (NPP_NOT_IMPLEMENTED_ERROR) | libnppicc.so.12 stub loaded instead of real lib | Install `libnpp-12-4` runtime; check `ldconfig -p \| grep libnppicc` |
+| `EncoderNotFound("hevc_nvenc")` | libnvidia-encode.so.1 absent | Install NVIDIA driver ≥ 535 |
+| High CPU still in `perf top` | BGRA capture overhead (not conversion) | Expected; X11ShmCapturer CPU is separate from NPP conversion CPU |
+
+### NVENC + NPP run log
+
+**Date:** `<YYYY-MM-DD>`
+**GPU SKU:** `<RTX ...>`
+**Driver version:** `<535.x.x>`
+**CUDA version:** `<12.x>`
+**libnppicc version:** `<12.x>`
+**Viewer:** `<machine>`
+**Result:** PASS / FAIL
+**convert_path="npp" confirmed:** Y / N
+**`nvidia-smi dmon enc` non-zero:** Y / N
+**CPU usage delta vs plain NVENC:** `<N>%`
+**CPU readback warnings:** `<N>`
+**Notes:**
+
+---
+
 ## Pre-merge regression-guard (A12)
 
 **Mandatory before any PR touching `crates/viewer/src/lib.rs` or
