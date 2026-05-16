@@ -112,16 +112,20 @@ jobs:
       - name: No-implicit-roundtrip grep guard
         run: |
           ! grep -rE 'hwdownload|swscale|hwupload' crates/media-ffmpeg/src/
-      - name: Per-backend hwframe upload invariant (A9b — ≤ 1 av_hwframe_transfer_data per encoder file)
+      - name: Per-backend hwframe upload invariant (A9b — ≤ 1 av_hwframe_transfer_data call site per encoder file)
         run: |
           set -euo pipefail
+          # Each encoder file imports `av_hwframe_transfer_data as hw_upload`
+          # and must invoke `hw_upload(...)` at most once. Matching the call
+          # form (`hw_upload\(`) instead of the bare symbol avoids the false-
+          # pass where the import statement alone satisfies the old guard.
           fail=0
           shopt -s nullglob
           for f in crates/media-ffmpeg/src/hevc_*_encoder.rs; do
-            count=$(grep -c -E '\bav_hwframe_transfer_data\b' "$f" || true)
-            echo "$f: $count"
+            count=$(grep -c -E '\bhw_upload\(' "$f" || true)
+            echo "$f: $count hw_upload() call site(s)"
             if [ "$count" -gt 1 ]; then
-              echo "::error file=$f::More than one av_hwframe_transfer_data call site (got $count, max 1)"
+              echo "::error file=$f::More than one hw_upload() call site (got $count, max 1)"
               fail=1
             fi
           done
