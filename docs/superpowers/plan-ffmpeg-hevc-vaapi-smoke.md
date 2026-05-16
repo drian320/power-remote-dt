@@ -231,3 +231,111 @@ While the session runs:
 **Sequence gap check:** OK / GAPS
 **CPU readback warnings:** `<N>`
 **Notes:**
+
+---
+
+## NVENC variant (P1.5 — NVIDIA GPU hosts)
+
+This section covers the `ffmpeg-encode-hevc-nvenc` encoder path. It mirrors the VAAPI
+procedure above but targets a Linux host with a consumer or prosumer NVIDIA GPU.
+
+### Prerequisites (NVENC)
+
+**Minimum NVIDIA driver: ≥ 535** (required for reliable HEVC NVENC on Pascal/Turing/Ampere
+and later consumer GPUs; older drivers may have session-count limits or missing codec support).
+
+Verify:
+```bash
+nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
+# Expected: <GPU name>, 535.x.x or higher
+```
+
+Check that `libnvidia-encode.so.1` is present on the host (loaded lazily by ffmpeg at runtime):
+```bash
+ldconfig -p | grep libnvidia-encode
+# Expected: at least one line containing libnvidia-encode.so.1
+```
+
+If absent, install the matching NVIDIA driver package (e.g. `nvidia-driver-535` on Ubuntu).
+
+### `auto` policy and `PRDT_PREFER_NVENC` override
+
+When the binary is compiled with **both** `ffmpeg-encode-hevc-vaapi` and
+`ffmpeg-encode-hevc-nvenc`, the `--encoder auto` policy prefers VAAPI by default
+(Intel iGPU is the more common deployment). To flip the preference to NVENC, set the
+environment variable before starting the host:
+
+```bash
+export PRDT_PREFER_NVENC=1   # accepted truthy values: 1, true, yes, on (case-insensitive)
+                              # any other value (including empty) is treated as unset
+prdt host --encoder auto ...
+```
+
+The startup log will confirm which backend was selected:
+```
+INFO video encoder selected encoder="ffmpeg-nvenc-hevc" selected_by="auto" reason="preferred-over-vaapi-by-env"
+```
+
+Without the override, the log will show:
+```
+INFO video encoder selected encoder="ffmpeg-vaapi-hevc" selected_by="auto" reason="preferred-over-nvenc"
+```
+
+On a binary compiled with **only** `ffmpeg-encode-hevc-nvenc` (no VAAPI), `auto` resolves
+to NVENC unconditionally:
+```
+INFO video encoder selected encoder="ffmpeg-nvenc-hevc" selected_by="auto" reason="only-backend-compiled"
+```
+
+### Get the binary (NVENC)
+
+Download the `prdt-linux-x86_64-ffmpeg-nvenc-hevc` artifact from the
+`smoke-build-ffmpeg-hevc.yml` workflow run (same run as the VAAPI artifact).
+
+Runtime deps (apt): `libavcodec60 libavutil58 libavfilter9 libavformat60` (Ubuntu 24.04 names).
+`libnvidia-encode.so.1` is loaded lazily by ffmpeg — it does **not** appear in `ldd` output
+of the binary itself; it is resolved at runtime from the NVIDIA driver installation.
+
+### Start host (NVENC)
+
+```bash
+prdt host \
+    --encoder ffmpeg-nvenc-hevc \
+    --bind 0.0.0.0:9000 \
+    --monitor 0 \
+    --bitrate-mbps 8 \
+    --key-file host-key.bin \
+    --silent-allow --headless \
+    2>&1 | tee host-nvenc.log
+```
+
+### Monitor GPU utilization
+
+While the session runs, confirm NVENC encode is active:
+
+```bash
+nvidia-smi dmon -s u -d 2
+# Expected: non-zero values in the `enc` column for your GPU index
+```
+
+### Common failure modes (NVENC)
+
+| Symptom | Likely cause | Fix |
+|---------|-------------|-----|
+| `EncoderNotFound("hevc_nvenc")` in log | `libnvidia-encode.so.1` not found at runtime | Install NVIDIA driver ≥ 535 |
+| `av_hwdevice_ctx_create(CUDA) returned -1` | No `/dev/nvidia0` device node or CUDA not initialized | `sudo modprobe nvidia`; verify with `nvidia-smi` |
+| `HwDevice` error at startup, `nvidia-smi` shows GPU | Driver/CUDA version mismatch | Reinstall driver matching CUDA runtime |
+| Consumer GPU session limit hit (silent drop) | Some consumer GPUs limit concurrent NVENC sessions | Close other NVENC consumers (OBS, browser HW accel) |
+| High CPU usage despite NVENC | CPU-side BGRA→NV12 conversion (tracked as ADR follow-up F4) | Expected in P1.5; CUDA NPP path is out of scope here |
+
+### NVENC run log
+
+**Date:** `<YYYY-MM-DD>`
+**GPU SKU:** `<RTX ...>`
+**Driver version:** `<535.x.x>`
+**Viewer:** `<machine>`
+**Result:** PASS / FAIL
+**Encoder selected log line confirmed:** Y / N
+**`nvidia-smi dmon enc` non-zero:** Y / N
+**CPU readback warnings:** `<N>`
+**Notes:**

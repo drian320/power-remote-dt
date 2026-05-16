@@ -1,18 +1,20 @@
-name: Smoke build — FFmpeg HEVC VAAPI
+name: Smoke build — FFmpeg HEVC (VAAPI + NVENC)
 
-# Builds the unified `prdt` binary for Linux x86_64 WITH the
-# `ffmpeg-encode-hevc-vaapi` feature enabled, for manual smoke testing of
-# `docs/superpowers/plan-ffmpeg-hevc-vaapi-smoke.md` on real iGPU hardware.
+# Builds the unified `prdt` binary for Linux x86_64 WITH FFmpeg HEVC features
+# enabled, for manual smoke testing on real hardware:
+#   - `ffmpeg-encode-hevc-vaapi`: iGPU host smoke (Intel/AMD VAAPI)
+#   - `ffmpeg-encode-hevc-nvenc`: NVIDIA GPU host smoke (NVENC via CUDA)
+# See `docs/superpowers/plan-ffmpeg-hevc-vaapi-smoke.md` for the full procedure.
 #
 # This workflow is intentionally separate from `release.yml` because:
 #   1. The FFmpeg feature pulls a new runtime dep (system libavcodec.so etc.)
 #      that's heavier than the default `prdt` distribution targets.
-#   2. P1 is in flight; we don't want every release tag to start shipping the
-#      feature until the ADR is `Accepted` and the hardware smoke is logged.
+#   2. P1/P1.5 are in flight; we don't want every release tag to start shipping
+#      the feature until the ADR is `Accepted` and hardware smoke is logged.
 #
-# Triggered manually from the Actions UI (`workflow_dispatch`). The built
-# binary is uploaded as a workflow artifact (no GitHub Release attached),
-# downloadable from the run page for 30 days.
+# Triggered manually from the Actions UI (`workflow_dispatch`). Built binaries
+# are uploaded as workflow artifacts (no GitHub Release attached), downloadable
+# from the run page for 30 days.
 
 on:
   # workflow_dispatch requires the workflow file to live on the default branch
@@ -106,11 +108,45 @@ jobs:
           # ldd shows the libavcodec runtime dep — verifies dynamic link landed.
           ldd  artifacts/prdt-linux-x86_64-ffmpeg-hevc | grep -E 'libav|libva' || true
 
-      - name: Upload workflow artifact
+      - name: Upload VAAPI workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: prdt-linux-x86_64-ffmpeg-hevc
-          path: artifacts/
+          path: artifacts/prdt-linux-x86_64-ffmpeg-hevc*
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Build prdt with ffmpeg-encode-hevc-nvenc feature (P1.5)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: |
+          cargo build \
+            --release \
+            -p prdt-client \
+            --features ffmpeg-encode-hevc-nvenc \
+            --target x86_64-unknown-linux-gnu
+
+      - name: Stage NVENC artifact
+        run: |
+          cp target/x86_64-unknown-linux-gnu/release/prdt artifacts/prdt-linux-x86_64-ffmpeg-nvenc-hevc
+          chmod +x artifacts/prdt-linux-x86_64-ffmpeg-nvenc-hevc
+          (cd artifacts && sha256sum prdt-linux-x86_64-ffmpeg-nvenc-hevc > prdt-linux-x86_64-ffmpeg-nvenc-hevc.sha256)
+          ls -la artifacts/prdt-linux-x86_64-ffmpeg-nvenc-hevc*
+          file artifacts/prdt-linux-x86_64-ffmpeg-nvenc-hevc
+          # Show dynamic deps; assert libnvidia-encode.so.1 is NOT linked at
+          # build time (it is lazy-loaded at runtime by ffmpeg, not link-time).
+          ldd artifacts/prdt-linux-x86_64-ffmpeg-nvenc-hevc | grep -E 'libav|libcuda|libnvidia' || true
+          if ldd artifacts/prdt-linux-x86_64-ffmpeg-nvenc-hevc | grep -q 'libnvidia-encode'; then
+            echo "::error::libnvidia-encode.so.1 appears in ldd output — binary was accidentally linked at build time"
+            exit 1
+          fi
+
+      - name: Upload NVENC workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prdt-linux-x86_64-ffmpeg-nvenc-hevc
+          path: artifacts/prdt-linux-x86_64-ffmpeg-nvenc-hevc*
           retention-days: 30
           if-no-files-found: error
 
