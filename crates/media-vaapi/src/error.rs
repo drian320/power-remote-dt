@@ -20,6 +20,12 @@ pub enum VaapiError {
     Closed,
 }
 
+impl From<prdt_media_core::AnnexBError> for VaapiError {
+    fn from(e: prdt_media_core::AnnexBError) -> Self {
+        VaapiError::Bitstream(format!("annex-b: {e}"))
+    }
+}
+
 /// Classifier for raw VAStatus codes. Only handles error mapping at the
 /// boundary; success codes return Ok at the FFI call site directly.
 #[allow(dead_code)]

@@ -25,6 +25,7 @@ members = [
     "crates/viewer-overlay",
     "crates/media-sw",
     "crates/media-vaapi",
+    "crates/media-ffmpeg",
     "crates/client",
     "crates/gui-client",
     "crates/media-policy",

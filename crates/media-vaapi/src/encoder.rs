@@ -36,11 +36,11 @@
 //! Achieved by storing each handle in `Option<T>` on `EncoderState` and
 //! taking them in this exact order inside `impl Drop for VaapiH264Encoder`.
 
-use crate::annexb::normalize_to_annexb;
 use crate::error::VaapiError;
 use crate::rc::RateControlParams;
 use bytes::Bytes;
 use cros_libva as libva;
+use prdt_media_core::annexb::normalize_to_annexb;
 use prdt_protocol::frame::{Codec, EncodedFrame};
 use std::path::PathBuf;
 use std::rc::Rc;

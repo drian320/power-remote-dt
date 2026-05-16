@@ -14,6 +14,7 @@ pub mod i420_to_bgra;
 pub mod linux_sw_producer;
 pub mod policy;
 pub mod sw_pipeline;
+#[cfg(feature = "vaapi-h264")]
 pub mod vaapi_pipeline;
 pub mod wayland_portal;
 pub mod x11_capture;
@@ -21,6 +22,7 @@ pub mod x11_capture;
 pub use capture_source::{CaptureSource, CaptureSourceError};
 pub use error::LinuxMediaError;
 pub use frame::BgraFrame;
+#[cfg(feature = "vaapi-h264")]
 pub use vaapi_pipeline::{LinuxVaapiEncoder, VaapiVideoProducer};
 
 /// Production wiring entry point — host calls this to obtain a boxed
@@ -68,7 +70,7 @@ pub fn build_video_producer(
 /// the viewer requested). If the compositor later negotiates a different
 /// frame size, the producer's `resize_warned` path logs it; full
 /// renegotiation lands in a follow-up.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "vaapi-h264"))]
 pub fn build_vaapi_video_producer_with(
     capture: Box<dyn CaptureSource>,
     width: u32,

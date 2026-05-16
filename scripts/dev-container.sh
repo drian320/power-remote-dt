@@ -39,11 +39,23 @@ if [ -t 0 ] && [ -t 1 ]; then
     TTY_FLAGS=(-it)
 fi
 
+# rusty_ffmpeg 0.13.0's build script (used by crates/media-ffmpeg when the
+# `ffmpeg-encode-hevc-vaapi` feature is active) reads these to invoke
+# bindgen against the apt-installed FFmpeg headers and to set the rustc
+# link-search path for libavcodec.so. The paths are the standard Debian
+# bookworm multiarch locations (libavcodec-dev installs them inside the
+# image — see scripts/Dockerfile.dev). They are harmless when the feature
+# is off (cargo ignores env vars not read by any build script).
+FFMPEG_INCLUDE_DIR="${FFMPEG_INCLUDE_DIR:-/usr/include/x86_64-linux-gnu}"
+FFMPEG_DLL_PATH="${FFMPEG_DLL_PATH:-/usr/lib/x86_64-linux-gnu/libavcodec.so}"
+
 exec docker run --rm "${TTY_FLAGS[@]}" \
     --user "$(id -u):$(id -g)" \
     -v "$(pwd):$WORKDIR" \
     -w "$WORKDIR" \
     -e CARGO_HOME="$WORKDIR/target-docker/cargo-home" \
     -e CARGO_TARGET_DIR="$WORKDIR/target-docker" \
+    -e FFMPEG_INCLUDE_DIR="$FFMPEG_INCLUDE_DIR" \
+    -e FFMPEG_DLL_PATH="$FFMPEG_DLL_PATH" \
     "$TAG" \
     "$@"

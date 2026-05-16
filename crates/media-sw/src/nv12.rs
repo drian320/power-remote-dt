@@ -226,6 +226,40 @@ pub fn i420_to_nv12(i420: &I420Frame) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Write I420 into a pre-allocated NV12 buffer (Y then interleaved UV).
+///
+/// `y_dst` must be at least `width * height` bytes.
+/// `uv_dst` must be at least `width * (height / 2)` bytes (interleaved UV).
+/// Both `y_stride` and `uv_stride` are the destination row pitches in bytes.
+pub fn i420_to_nv12_into(
+    i420: &I420Frame,
+    y_dst: &mut [u8],
+    y_stride: usize,
+    uv_dst: &mut [u8],
+    uv_stride: usize,
+) {
+    let w = i420.width as usize;
+    let h = i420.height as usize;
+    let src_stride_y = i420.stride_y as usize;
+    let src_stride_uv = i420.stride_uv as usize;
+
+    for row in 0..h {
+        let src = &i420.y[row * src_stride_y..row * src_stride_y + w];
+        let dst = &mut y_dst[row * y_stride..row * y_stride + w];
+        dst.copy_from_slice(src);
+    }
+
+    for row in 0..(h / 2) {
+        let u_src = &i420.u[row * src_stride_uv..row * src_stride_uv + w / 2];
+        let v_src = &i420.v[row * src_stride_uv..row * src_stride_uv + w / 2];
+        let dst = &mut uv_dst[row * uv_stride..row * uv_stride + w];
+        for i in 0..(w / 2) {
+            dst[i * 2] = u_src[i];
+            dst[i * 2 + 1] = v_src[i];
+        }
+    }
+}
+
 /// Build a synthetic counter I420 frame matching the BGRA-counter pattern
 /// produced by `prdt_media_win::synthetic::bgra_with_counter` (BT.601
 /// limited range). The first 64 luma columns of row 0 carry the four bytes

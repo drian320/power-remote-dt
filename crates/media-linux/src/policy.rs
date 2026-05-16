@@ -23,6 +23,7 @@ pub struct LinuxSwProbe;
 
 impl CapabilityProbe for LinuxSwProbe {
     fn list_encoders(&self) -> Vec<EncoderCapability> {
+        #[cfg_attr(not(feature = "vaapi-h264"), allow(unused_mut))]
         let mut out = vec![EncoderCapability {
             backend: BackendKind::Openh264,
             codec: Codec::H264,
@@ -31,6 +32,7 @@ impl CapabilityProbe for LinuxSwProbe {
             zero_copy: false,
             priority: 10,
         }];
+        #[cfg(feature = "vaapi-h264")]
         if prdt_media_vaapi::display::vaapi_runtime_present() {
             out.push(EncoderCapability {
                 backend: BackendKind::Vaapi,
@@ -258,11 +260,13 @@ impl ProducerFactory for LinuxSwFactory {
         cfg: &ProducerConfig,
     ) -> Result<Box<dyn VideoProducer>, FactoryError> {
         match kind {
-            BackendKind::Openh264 | BackendKind::Vaapi => {}
+            BackendKind::Openh264 => {}
+            #[cfg(feature = "vaapi-h264")]
+            BackendKind::Vaapi => {}
             _ => {
                 return Err(FactoryError::Unavailable(
                     kind,
-                    "Linux only supports Openh264 and Vaapi; other backends N/A".into(),
+                    "Linux only supports Openh264 (and Vaapi when feature `vaapi-h264` is enabled); other backends N/A".into(),
                 ));
             }
         }
@@ -345,6 +349,7 @@ impl ProducerFactory for LinuxSwFactory {
                         .map_err(|e| FactoryError::InvalidConfig(kind, e.to_string()))?;
                 Ok(Box::new(producer))
             }
+            #[cfg(feature = "vaapi-h264")]
             BackendKind::Vaapi => {
                 let producer = crate::build_vaapi_video_producer_with(
                     capture,

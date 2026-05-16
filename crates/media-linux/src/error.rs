@@ -20,6 +20,7 @@ pub enum LinuxMediaError {
     /// on `VaapiError::HardwareBusy` and surface `ProducerError::DeviceLost`
     /// for the SelectionPolicy fail-over path. All other variants flow through
     /// as `ProducerError::Encode`.
+    #[cfg(feature = "vaapi-h264")]
     #[error("vaapi backend error: {0}")]
     Vaapi(#[from] prdt_media_vaapi::VaapiError),
 }

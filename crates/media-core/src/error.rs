@@ -29,3 +29,11 @@ pub enum DecodeError {
     #[error("bitstream parse error: {0}")]
     Bitstream(String),
 }
+
+#[derive(Debug, Error, PartialEq)]
+pub enum AnnexBError {
+    #[error("coded buffer empty")]
+    Empty,
+    #[error("no Annex-B start code found in {len} byte coded buffer")]
+    NoStartCode { len: usize },
+}

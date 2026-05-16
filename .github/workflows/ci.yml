@@ -23,3 +23,43 @@ jobs:
         run: cargo test -p prdt-protocol -p prdt-transport --all-targets
       - name: build
         run: cargo build --workspace
+      # A2b gate: ffmpeg-encode-hevc-vaapi feature must emit compile_error! on Windows
+      # (Linux-only feature guard). Runs on the same windows-latest runner because
+      # cross-compiling to windows-msvc from a Linux dev-container requires cargo-xwin
+      # or mingw which are not available in Dockerfile.dev.
+      - name: Cross-target compile_error! assertion (A2b gate)
+        # Two PowerShell gotchas:
+        # 1. `$output = cargo ... 2>&1` is a string array. `-notmatch` against
+        #    an array returns the non-matching elements (truthy if any line
+        #    doesn't match — almost always). Pipe through Out-String so the
+        #    regex match runs against the joined single string.
+        # 2. `cargo check` exits 101 when the compile_error! fires, and the
+        #    GH-Actions PowerShell wrapper appends `exit $LASTEXITCODE` at
+        #    the end of the script — so the step exits with cargo's failure
+        #    code even after our PASS prints. Explicitly `exit 0` overrides.
+        run: |
+          $output = (cargo check -p prdt-host --features ffmpeg-encode-hevc-vaapi 2>&1) | Out-String
+          Write-Output $output
+          if ($output -notmatch 'Linux-only') {
+            Write-Error "FAIL: expected compile_error! containing 'Linux-only'"
+            exit 1
+          }
+          Write-Output "PASS: compile_error! contains 'Linux-only'"
+          exit 0
+
+  media-ffmpeg-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build with FFmpeg feature
+        run: ./scripts/dev-container.sh bash -c 'cargo check -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-vaapi --target x86_64-unknown-linux-gnu'
+      - name: Clippy with FFmpeg feature (deny warnings)
+        run: ./scripts/dev-container.sh bash -c 'cargo clippy -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-vaapi --target x86_64-unknown-linux-gnu -- -D warnings'
+      - name: Unit tests (no GPU)
+        run: ./scripts/dev-container.sh bash -c 'cargo test -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-vaapi --lib --target x86_64-unknown-linux-gnu'
+      - name: Safety-comment lint
+        run: ./scripts/dev-container.sh bash -c 'python3 scripts/check-safety-comments.py crates/media-ffmpeg/src/'
+      - name: No-implicit-roundtrip grep guards
+        run: |
+          ! grep -rE 'hwdownload|swscale|hwupload' crates/media-ffmpeg/src/
+          grep -rc 'av_hwframe_transfer_data' crates/media-ffmpeg/src/ | awk -F: '{s+=$2} END{exit !(s==1)}'

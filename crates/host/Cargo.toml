@@ -21,11 +21,14 @@ prdt-signaling-client = { path = "../signaling-client" }
 prdt-signaling-proto = { path = "../signaling-proto" }
 prdt-transport = { path = "../transport" }
 prdt-gui-host = { path = "../gui-host" }
+prdt-media-core = { path = "../media-core", optional = true }
+prdt-media-ffmpeg = { path = "../media-ffmpeg", optional = true }
 tokio = { workspace = true, features = ["signal", "fs", "io-util", "time"] }
 url = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+bytes = { workspace = true }
 anyhow = "1"
 thiserror = { workspace = true }
 dirs = { workspace = true }
@@ -36,6 +39,17 @@ subtle = "2"
 serde.workspace = true
 toml.workspace = true
 async-trait = "0.1"
+
+[features]
+# Default keeps existing CI / release behaviour: pulls cros-libva for the
+# legacy VAAPI H.264 encoder. Disable via `--no-default-features` on systems
+# where cros-libva 0.0.13 can't build against the system libva (e.g. Arch
+# rolling, libva ≥ 2.22).
+default = ["vaapi-h264"]
+vaapi-h264 = ["prdt-media-linux/vaapi-h264"]
+ffmpeg-encode-hevc-vaapi = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-vaapi"]
+ffmpeg-encode-hevc-vaapi-ffmpeg6 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-vaapi-ffmpeg6"]
+ffmpeg-encode-hevc-vaapi-ffmpeg7 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-vaapi-ffmpeg7"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
@@ -53,7 +67,7 @@ prdt-gui-common = { path = "../gui-common" }
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(prdt_nvdec_bindings)', 'cfg(prdt_nvenc_bindings)'] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-prdt-media-linux = { path = "../media-linux" }
+prdt-media-linux = { path = "../media-linux", default-features = false }
 prdt-input-linux = { path = "../input-linux" }
 prdt-media-sw = { path = "../media-sw" }
 tokio-util = { version = "0.7", features = ["rt"] }

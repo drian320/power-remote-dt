@@ -33,8 +33,38 @@ pub fn output_display_name(_d: &OutputDescriptor) -> &'static str {
     "x11-root"
 }
 
-/// Build a boxed `VideoProducer` for the Linux SW path. Args from the
-/// CLI that name HW backends are normalized to openh264 with a warn-log.
+/// Dispatch enum over the active Linux encoder variant.
+#[allow(dead_code)]
+pub enum LinuxEncoder {
+    Openh264(prdt_media_sw::Openh264Encoder),
+    #[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+    FfmpegVaapiHevc(prdt_media_ffmpeg::HevcVaapiFfmpegEncoderAdapter),
+}
+
+#[allow(dead_code)]
+impl LinuxEncoder {
+    pub fn codec(&self) -> prdt_protocol::Codec {
+        match self {
+            LinuxEncoder::Openh264(_) => prdt_protocol::Codec::H264,
+            #[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+            LinuxEncoder::FfmpegVaapiHevc(_) => prdt_protocol::Codec::H265,
+        }
+    }
+}
+
+/// Advertised codecs for the Linux encoder selection (used in host handshake).
+pub fn linux_supported_codecs(encoder_arg: &str) -> Vec<prdt_protocol::Codec> {
+    match normalize_encoder(encoder_arg) {
+        #[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+        "ffmpeg-vaapi-hevc" => vec![prdt_protocol::Codec::H265],
+        _ => vec![prdt_protocol::Codec::H264],
+    }
+}
+
+/// Build a boxed `VideoProducer` for the Linux path. When the
+/// `ffmpeg-encode-hevc-vaapi` feature is enabled and `args_encoder` resolves
+/// to `"ffmpeg-vaapi-hevc"`, constructs the FFmpeg VAAPI path; otherwise falls
+/// back to the SW OpenH264 path.
 pub fn build_video_producer(
     args_encoder: &str,
     _output: &OutputDescriptor,
@@ -42,20 +72,212 @@ pub fn build_video_producer(
     fps: u32,
     _negotiated_codec: prdt_protocol::Codec,
 ) -> anyhow::Result<Box<dyn VideoProducer>> {
-    let _ = normalize_encoder(args_encoder); // warn-log if the user passed nvenc/mf
+    let _backend = normalize_encoder(args_encoder);
+    #[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+    if _backend == "ffmpeg-vaapi-hevc" {
+        use anyhow::Context as _;
+        use prdt_media_ffmpeg::{
+            HevcVaapiFfmpegEncoder, HevcVaapiFfmpegEncoderAdapter, HevcVaapiFfmpegEncoderConfig,
+        };
+        let cfg = HevcVaapiFfmpegEncoderConfig {
+            width: 1920,
+            height: 1080,
+            fps,
+            initial_bitrate_bps: bitrate_bps,
+            gop_size: fps,
+            render_node: None,
+        };
+        let enc = HevcVaapiFfmpegEncoder::new(cfg).context("HevcVaapiFfmpegEncoder::new")?;
+        let adapter = HevcVaapiFfmpegEncoderAdapter(enc);
+        let cap = prdt_media_linux::x11_capture::X11ShmCapturer::new()
+            .context("X11ShmCapturer::new for ffmpeg path")?;
+        let producer = FfmpegVaapiProducer::new(Box::new(cap), adapter, fps);
+        return Ok(Box::new(producer));
+    }
     let producer = prdt_media_linux::build_video_producer(bitrate_bps, fps)?;
     Ok(Box::new(producer))
 }
 
-/// Map any encoder CLI arg to "openh264" on Linux; warn-log when the
-/// user requested an HW backend that we don't yet support.
+/// `VideoProducer` that wires an X11 BGRA capture source into the
+/// FFmpeg VAAPI HEVC encoder. Mirrors `LinuxSwProducer` but substitutes
+/// `HevcVaapiFfmpegEncoderAdapter` (takes `I420Frame`) and emits `Codec::H265`.
+#[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+struct FfmpegVaapiProducer {
+    capture: Option<Box<dyn prdt_media_linux::capture_source::CaptureSource>>,
+    encoder: Option<prdt_media_ffmpeg::HevcVaapiFfmpegEncoderAdapter>,
+    bgra_buf: Vec<u8>,
+    pacer: tokio::time::Interval,
+    seq: u64,
+    idr_pending: bool,
+    width: u32,
+    height: u32,
+    poisoned: bool,
+}
+
+#[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+impl FfmpegVaapiProducer {
+    fn new(
+        capture: Box<dyn prdt_media_linux::capture_source::CaptureSource>,
+        encoder: prdt_media_ffmpeg::HevcVaapiFfmpegEncoderAdapter,
+        fps: u32,
+    ) -> Self {
+        let (width, height) = capture.geometry();
+        let micros = if fps == 0 {
+            16_667
+        } else {
+            1_000_000 / fps as u64
+        };
+        let mut pacer = tokio::time::interval(std::time::Duration::from_micros(micros));
+        pacer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        Self {
+            capture: Some(capture),
+            encoder: Some(encoder),
+            bgra_buf: vec![0u8; (width * height * 4) as usize],
+            pacer,
+            seq: 0,
+            idr_pending: true,
+            width,
+            height,
+            poisoned: false,
+        }
+    }
+}
+
+#[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+#[async_trait::async_trait]
+impl VideoProducer for FfmpegVaapiProducer {
+    async fn next_frame(
+        &mut self,
+    ) -> Result<prdt_protocol::EncodedFrame, prdt_protocol::ProducerError> {
+        if self.poisoned {
+            return Err(prdt_protocol::ProducerError::Capture(
+                "producer poisoned; drop and recreate".into(),
+            ));
+        }
+
+        self.pacer.tick().await;
+
+        let mut bgra = std::mem::take(&mut self.bgra_buf);
+        let mut capture = self
+            .capture
+            .take()
+            .expect("capture taken twice; producer state corrupted");
+        let capture_join = tokio::task::spawn_blocking(move || {
+            let r = capture.capture_into(&mut bgra);
+            (bgra, capture, r)
+        })
+        .await;
+        let (bgra, capture, capture_result) = match capture_join {
+            Ok(triple) => triple,
+            Err(e) => {
+                self.poisoned = true;
+                return Err(prdt_protocol::ProducerError::Capture(format!(
+                    "producer poisoned by inner panic: {e}"
+                )));
+            }
+        };
+        self.bgra_buf = bgra;
+        self.capture = Some(capture);
+
+        use prdt_media_linux::capture_source::CaptureSourceError;
+        match capture_result {
+            Ok(()) => {}
+            Err(CaptureSourceError::WouldBlock(reason)) => {
+                return Err(prdt_protocol::ProducerError::Capture(format!(
+                    "would_block: {reason}"
+                )));
+            }
+            Err(CaptureSourceError::Terminal { backend, reason }) => {
+                return Err(prdt_protocol::ProducerError::Capture(format!(
+                    "{backend}: {reason}"
+                )));
+            }
+        }
+
+        let bgra = std::mem::take(&mut self.bgra_buf);
+        let width = self.width;
+        let height = self.height;
+        let force_idr = std::mem::take(&mut self.idr_pending);
+        let ts_us = prdt_protocol::now_monotonic_us();
+
+        let mut enc = self
+            .encoder
+            .take()
+            .expect("encoder taken twice; producer state corrupted");
+        let encode_join = tokio::task::spawn_blocking(move || {
+            let i420 = prdt_media_sw::bgra_to_i420(&bgra, width, height, width * 4)
+                .map_err(|e| prdt_protocol::ProducerError::Encode(e.to_string()))?;
+            use prdt_media_core::Encoder as _;
+            let pkt = enc
+                .encode(&i420, force_idr, ts_us)
+                .map_err(|e| prdt_protocol::ProducerError::Encode(e.to_string()))?;
+            Ok::<_, prdt_protocol::ProducerError>((enc, bgra, pkt))
+        })
+        .await;
+        let (enc_back, bgra_back, pkt) = match encode_join {
+            Ok(Ok(triple)) => triple,
+            Ok(Err(e)) => {
+                return Err(e);
+            }
+            Err(e) => {
+                self.poisoned = true;
+                return Err(prdt_protocol::ProducerError::Capture(format!(
+                    "producer poisoned by inner panic: {e}"
+                )));
+            }
+        };
+        self.encoder = Some(enc_back);
+        self.bgra_buf = bgra_back;
+
+        let seq = self.seq;
+        self.seq += 1;
+        Ok(prdt_protocol::EncodedFrame {
+            seq,
+            timestamp_host_us: pkt.timestamp_us,
+            is_keyframe: pkt.is_keyframe,
+            nal_units: bytes::Bytes::from(pkt.nal_bytes),
+            width: self.width,
+            height: self.height,
+            codec: prdt_protocol::Codec::H265,
+        })
+    }
+
+    fn request_idr(&mut self) {
+        self.idr_pending = true;
+    }
+
+    fn set_target_bitrate(&mut self, bps: u32) {
+        if let Some(e) = self.encoder.as_mut() {
+            use prdt_media_core::Encoder as _;
+            e.set_target_bitrate(bps);
+        }
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "ffmpeg-vaapi-hevc"
+    }
+}
+
+/// Map any encoder CLI arg to the canonical backend name on Linux.
 fn normalize_encoder(arg: &str) -> &'static str {
     match arg {
-        "openh264" | "auto" => "openh264",
-        "nvenc" | "mf" => {
+        "openh264" => "openh264",
+        #[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+        "ffmpeg-vaapi-hevc" => "ffmpeg-vaapi-hevc",
+        "auto" => {
+            #[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+            {
+                "ffmpeg-vaapi-hevc"
+            }
+            #[cfg(not(feature = "ffmpeg-encode-hevc-vaapi"))]
+            {
+                "openh264"
+            }
+        }
+        "nvenc" | "mf" | "vaapi" => {
             tracing::warn!(
                 requested = arg,
-                "Linux SW codec only; falling back to openh264"
+                "Linux HW codec only via 'ffmpeg-vaapi-hevc'; falling back to openh264"
             );
             "openh264"
         }
@@ -162,9 +384,27 @@ mod tests {
     #[test]
     fn linux_normalize_encoder_falls_back_for_hw() {
         assert_eq!(normalize_encoder("openh264"), "openh264");
-        assert_eq!(normalize_encoder("auto"), "openh264");
         assert_eq!(normalize_encoder("nvenc"), "openh264");
         assert_eq!(normalize_encoder("mf"), "openh264");
+        assert_eq!(normalize_encoder("vaapi"), "openh264");
         assert_eq!(normalize_encoder("bogus"), "openh264");
+    }
+
+    #[test]
+    #[cfg(not(feature = "ffmpeg-encode-hevc-vaapi"))]
+    fn linux_normalize_encoder_auto_fallback_without_feature() {
+        assert_eq!(normalize_encoder("auto"), "openh264");
+    }
+
+    #[test]
+    #[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+    fn linux_normalize_encoder_ffmpeg_vaapi_hevc_arm() {
+        assert_eq!(normalize_encoder("ffmpeg-vaapi-hevc"), "ffmpeg-vaapi-hevc");
+    }
+
+    #[test]
+    #[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+    fn linux_normalize_encoder_auto_prefers_hw_with_feature() {
+        assert_eq!(normalize_encoder("auto"), "ffmpeg-vaapi-hevc");
     }
 }
