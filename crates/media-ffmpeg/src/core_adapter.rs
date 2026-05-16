@@ -1,3 +1,5 @@
+#[cfg(feature = "ffmpeg-encode-hevc-nvenc-npp-any")]
+use prdt_media_core::BgraFrame;
 #[cfg(any(
     feature = "ffmpeg-encode-hevc-vaapi-any",
     feature = "ffmpeg-encode-hevc-nvenc-any"
@@ -26,6 +28,8 @@ use crate::decoder_common::HevcDecoderBackend;
 use crate::hevc_nvdec_decoder::HevcNvdecFfmpegDecoder;
 #[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
 use crate::hevc_nvenc_encoder::HevcNvencFfmpegEncoder;
+#[cfg(feature = "ffmpeg-encode-hevc-nvenc-npp-any")]
+use crate::hevc_nvenc_npp_encoder::HevcNvencNppFfmpegEncoder;
 #[cfg(feature = "ffmpeg-decode-hevc-sw-any")]
 use crate::hevc_sw_decoder::HevcSwFfmpegDecoder;
 #[cfg(feature = "ffmpeg-decode-hevc-vaapi-any")]
@@ -82,6 +86,43 @@ impl Encoder for HevcNvencFfmpegEncoderAdapter {
     fn encode(
         &mut self,
         frame: &I420Frame,
+        force_idr: bool,
+        ts_us: u64,
+    ) -> Result<EncodedPacket, EncodeError> {
+        self.0.encode(frame, force_idr, ts_us)
+    }
+
+    fn set_target_bitrate(&mut self, bps: u32) {
+        if let Err(e) = self.0.set_target_bitrate(bps) {
+            self.0.maybe_warn_bitrate_failure(&e, bps);
+        }
+    }
+
+    fn backend_name(&self) -> &'static str {
+        self.0.backend_name()
+    }
+}
+
+#[cfg(feature = "ffmpeg-encode-hevc-nvenc-npp-any")]
+pub struct HevcNvencNppFfmpegEncoderAdapter(pub HevcNvencNppFfmpegEncoder);
+
+// SAFETY: HevcNvencNppFfmpegEncoder owns all its FFmpeg + CUDA resources
+// via NonNull pointers + CudaDevicePtr newtype wrappers; never aliased;
+// pipeline is single-threaded. Same Send-safety argument as
+// HevcNvencFfmpegEncoderAdapter above. Required by the producer spawn at
+// crates/host/src/platform/linux.rs (host code moves the encoder into a
+// tokio task at startup, then per-frame encode calls happen on a single
+// owner thread).
+#[cfg(feature = "ffmpeg-encode-hevc-nvenc-npp-any")]
+unsafe impl Send for HevcNvencNppFfmpegEncoderAdapter {}
+
+#[cfg(feature = "ffmpeg-encode-hevc-nvenc-npp-any")]
+impl Encoder for HevcNvencNppFfmpegEncoderAdapter {
+    type Frame = BgraFrame;
+
+    fn encode(
+        &mut self,
+        frame: &BgraFrame,
         force_idr: bool,
         ts_us: u64,
     ) -> Result<EncodedPacket, EncodeError> {
@@ -164,6 +205,14 @@ mod tests {
         // Compile-time assertion: HevcNvencFfmpegEncoderAdapter implements Encoder<Frame=I420Frame>.
         fn _accepts_encoder<E: Encoder<Frame = I420Frame>>(_e: &mut E) {}
         let _ = std::marker::PhantomData::<HevcNvencFfmpegEncoderAdapter>;
+    }
+
+    #[cfg(feature = "ffmpeg-encode-hevc-nvenc-npp-any")]
+    #[test]
+    fn nvenc_npp_adapter_satisfies_encoder_trait_bound() {
+        // Compile-time assertion: HevcNvencNppFfmpegEncoderAdapter implements Encoder<Frame=BgraFrame>.
+        fn _accepts_encoder<E: Encoder<Frame = BgraFrame>>(_e: &mut E) {}
+        let _ = std::marker::PhantomData::<HevcNvencNppFfmpegEncoderAdapter>;
     }
 
     #[cfg(feature = "ffmpeg-decode-hevc-sw-any")]
