@@ -415,4 +415,78 @@ mod tests {
         assert_eq!(cfg.fps, 60);
         assert!(cfg.cuda_device_index.is_none());
     }
+
+    /// Per P2.5 plan §3 (iter-3 M2) — A13 merge gate. Encodes a deterministic
+    /// 30-frame I420 sequence with the same fixed config used by
+    /// `examples/gen_byte_stable_fixture.rs` and asserts the concatenated
+    /// `EncodedPacket.nal_bytes` is byte-equal to the committed golden
+    /// fixture (`tests/fixtures/byte_stable_nvenc_h265.bin`).
+    ///
+    /// The fixture is generated ONCE on real NVENC hardware against pre-R6
+    /// master via the example binary; this test then proves the R6
+    /// `nvenc_common.rs` extract did not perturb encoded bytestream output.
+    ///
+    /// Marked `#[ignore]` because it requires (a) real NVIDIA NVENC hardware
+    /// and (b) the matching driver/SDK that produced the golden — the
+    /// dev-container's CUDA-less environment skips cleanly. Runs on the
+    /// smoke runner as part of the A5 dev-container test cell.
+    #[test]
+    #[ignore = "requires NVIDIA hevc_nvenc encode + matching driver/SDK; gated to smoke runner"]
+    fn byte_stable_against_master_fixture() {
+        const WIDTH: u32 = 320;
+        const HEIGHT: u32 = 240;
+        const FPS: u32 = 30;
+        const BITRATE: u32 = 4_000_000;
+        const GOP: u32 = 30;
+        const N_FRAMES: u32 = 30;
+        const GOLDEN: &[u8] = include_bytes!("../tests/fixtures/byte_stable_nvenc_h265.bin");
+
+        let cfg = HevcNvencFfmpegEncoderConfig {
+            width: WIDTH,
+            height: HEIGHT,
+            fps: FPS,
+            initial_bitrate_bps: BITRATE,
+            gop_size: GOP,
+            cuda_device_index: None,
+        };
+        let mut enc = HevcNvencFfmpegEncoder::new(cfg).expect("encoder created");
+
+        let mut blob = Vec::new();
+        for i in 0..N_FRAMES {
+            // Same deterministic generator as examples/gen_byte_stable_fixture.rs.
+            let mut frame = I420Frame::new_packed(WIDTH, HEIGHT).expect("frame");
+            let w = WIDTH as usize;
+            let h = HEIGHT as usize;
+            let shift = (i & 0xff) as u8;
+            for y in 0..h {
+                for x in 0..w {
+                    frame.y[y * w + x] = ((x as u8).wrapping_add(y as u8)).wrapping_add(shift);
+                }
+            }
+            let cw = w / 2;
+            let ch = h / 2;
+            for j in 0..(cw * ch) {
+                frame.u[j] = 128;
+                frame.v[j] = 128;
+            }
+            let force_idr = i == 0;
+            let ts_us = (i as u64) * 1_000_000 / (FPS as u64);
+            let pkt = enc.encode(&frame, force_idr, ts_us).expect("encoded");
+            blob.extend_from_slice(&pkt.nal_bytes);
+        }
+
+        assert_eq!(
+            blob.len(),
+            GOLDEN.len(),
+            "encoded blob length differs from golden (encoded={}, golden={}) — \
+             R6 refactor or driver/SDK drift introduced a behavioral change",
+            blob.len(),
+            GOLDEN.len(),
+        );
+        assert_eq!(
+            blob, GOLDEN,
+            "encoded blob differs from golden — R6 refactor introduced a \
+             behavioral regression on the non-NPP NVENC path"
+        );
+    }
 }
