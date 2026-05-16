@@ -41,6 +41,8 @@ pub enum LinuxEncoder {
     FfmpegVaapiHevc(prdt_media_ffmpeg::HevcVaapiFfmpegEncoderAdapter),
     #[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
     FfmpegNvencHevc(prdt_media_ffmpeg::HevcNvencFfmpegEncoderAdapter),
+    #[cfg(feature = "ffmpeg-encode-hevc-nvenc-npp-any")]
+    FfmpegNvencHevcNpp(prdt_media_ffmpeg::HevcNvencNppFfmpegEncoderAdapter),
 }
 
 #[allow(dead_code)]
@@ -52,6 +54,8 @@ impl LinuxEncoder {
             LinuxEncoder::FfmpegVaapiHevc(_) => prdt_protocol::Codec::H265,
             #[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
             LinuxEncoder::FfmpegNvencHevc(_) => prdt_protocol::Codec::H265,
+            #[cfg(feature = "ffmpeg-encode-hevc-nvenc-npp-any")]
+            LinuxEncoder::FfmpegNvencHevcNpp(_) => prdt_protocol::Codec::H265,
         }
     }
 }
@@ -63,6 +67,8 @@ pub fn linux_supported_codecs(encoder_arg: &str) -> Vec<prdt_protocol::Codec> {
         "ffmpeg-vaapi-hevc" => vec![prdt_protocol::Codec::H265],
         #[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
         "ffmpeg-nvenc-hevc" => vec![prdt_protocol::Codec::H265],
+        #[cfg(feature = "ffmpeg-encode-hevc-nvenc-npp-any")]
+        "ffmpeg-nvenc-hevc-npp" => vec![prdt_protocol::Codec::H265],
         _ => vec![prdt_protocol::Codec::H264],
     }
 }
@@ -118,6 +124,28 @@ pub fn build_video_producer(
         let cap = prdt_media_linux::x11_capture::X11ShmCapturer::new()
             .context("X11ShmCapturer::new for ffmpeg path")?;
         let producer = FfmpegNvencProducer::new(Box::new(cap), adapter, fps);
+        return Ok(Box::new(producer));
+    }
+    #[cfg(feature = "ffmpeg-encode-hevc-nvenc-npp-any")]
+    if _backend == "ffmpeg-nvenc-hevc-npp" {
+        use anyhow::Context as _;
+        use prdt_media_ffmpeg::{
+            HevcNvencNppFfmpegEncoder, HevcNvencNppFfmpegEncoderAdapter,
+            HevcNvencNppFfmpegEncoderConfig,
+        };
+        let cfg = HevcNvencNppFfmpegEncoderConfig {
+            width: 1920,
+            height: 1080,
+            fps,
+            initial_bitrate_bps: bitrate_bps,
+            gop_size: fps,
+            cuda_device_index: None,
+        };
+        let enc = HevcNvencNppFfmpegEncoder::new(cfg).context("HevcNvencNppFfmpegEncoder::new")?;
+        let adapter = HevcNvencNppFfmpegEncoderAdapter(enc);
+        let cap = prdt_media_linux::x11_capture::X11ShmCapturer::new()
+            .context("X11ShmCapturer::new for ffmpeg-nvenc-hevc-npp path")?;
+        let producer = FfmpegNvencNppProducer::new(Box::new(cap), adapter, fps);
         return Ok(Box::new(producer));
     }
     let producer = prdt_media_linux::build_video_producer(bitrate_bps, fps)?;
@@ -445,6 +473,175 @@ impl VideoProducer for FfmpegNvencProducer {
     }
 }
 
+/// `VideoProducer` that wires an X11 BGRA capture source into the FFmpeg
+/// NVENC HEVC encoder with the P2.5 GPU-side NPP BGRA→NV12 path. Mirrors
+/// [`FfmpegNvencProducer`] but constructs a `BgraFrame` instead of going
+/// through CPU `bgra_to_i420` + `i420_to_nv12_into`; the encoder uploads
+/// once via `cudaMemcpy2D` and runs NPP color conversion entirely on the
+/// GPU. The duplication with `FfmpegNvencProducer` stays below the +40
+/// LoC threshold (the encode-signature divergence to `BgraFrame` makes a
+/// generic infeasible).
+#[cfg(feature = "ffmpeg-encode-hevc-nvenc-npp-any")]
+struct FfmpegNvencNppProducer {
+    capture: Option<Box<dyn prdt_media_linux::capture_source::CaptureSource>>,
+    encoder: Option<prdt_media_ffmpeg::HevcNvencNppFfmpegEncoderAdapter>,
+    bgra_buf: Vec<u8>,
+    pacer: tokio::time::Interval,
+    seq: u64,
+    idr_pending: bool,
+    width: u32,
+    height: u32,
+    poisoned: bool,
+}
+
+#[cfg(feature = "ffmpeg-encode-hevc-nvenc-npp-any")]
+impl FfmpegNvencNppProducer {
+    fn new(
+        capture: Box<dyn prdt_media_linux::capture_source::CaptureSource>,
+        encoder: prdt_media_ffmpeg::HevcNvencNppFfmpegEncoderAdapter,
+        fps: u32,
+    ) -> Self {
+        let (width, height) = capture.geometry();
+        let micros = if fps == 0 {
+            16_667
+        } else {
+            1_000_000 / fps as u64
+        };
+        let mut pacer = tokio::time::interval(std::time::Duration::from_micros(micros));
+        pacer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        Self {
+            capture: Some(capture),
+            encoder: Some(encoder),
+            bgra_buf: vec![0u8; (width * height * 4) as usize],
+            pacer,
+            seq: 0,
+            idr_pending: true,
+            width,
+            height,
+            poisoned: false,
+        }
+    }
+}
+
+#[cfg(feature = "ffmpeg-encode-hevc-nvenc-npp-any")]
+#[async_trait::async_trait]
+impl VideoProducer for FfmpegNvencNppProducer {
+    async fn next_frame(
+        &mut self,
+    ) -> Result<prdt_protocol::EncodedFrame, prdt_protocol::ProducerError> {
+        if self.poisoned {
+            return Err(prdt_protocol::ProducerError::Capture(
+                "producer poisoned; drop and recreate".into(),
+            ));
+        }
+
+        self.pacer.tick().await;
+
+        let mut bgra = std::mem::take(&mut self.bgra_buf);
+        let mut capture = self
+            .capture
+            .take()
+            .expect("capture taken twice; producer state corrupted");
+        let capture_join = tokio::task::spawn_blocking(move || {
+            let r = capture.capture_into(&mut bgra);
+            (bgra, capture, r)
+        })
+        .await;
+        let (bgra, capture, capture_result) = match capture_join {
+            Ok(triple) => triple,
+            Err(e) => {
+                self.poisoned = true;
+                return Err(prdt_protocol::ProducerError::Capture(format!(
+                    "producer poisoned by inner panic: {e}"
+                )));
+            }
+        };
+        self.bgra_buf = bgra;
+        self.capture = Some(capture);
+
+        use prdt_media_linux::capture_source::CaptureSourceError;
+        match capture_result {
+            Ok(()) => {}
+            Err(CaptureSourceError::WouldBlock(reason)) => {
+                return Err(prdt_protocol::ProducerError::Capture(format!(
+                    "would_block: {reason}"
+                )));
+            }
+            Err(CaptureSourceError::Terminal { backend, reason }) => {
+                return Err(prdt_protocol::ProducerError::Capture(format!(
+                    "{backend}: {reason}"
+                )));
+            }
+        }
+
+        let bgra = std::mem::take(&mut self.bgra_buf);
+        let width = self.width;
+        let height = self.height;
+        let force_idr = std::mem::take(&mut self.idr_pending);
+        let ts_us = prdt_protocol::now_monotonic_us();
+
+        let mut enc = self
+            .encoder
+            .take()
+            .expect("encoder taken twice; producer state corrupted");
+        let encode_join = tokio::task::spawn_blocking(move || {
+            let frame = prdt_media_core::BgraFrame {
+                width,
+                height,
+                bgra,
+                stride: width * 4,
+            };
+            use prdt_media_core::Encoder as _;
+            let pkt = enc
+                .encode(&frame, force_idr, ts_us)
+                .map_err(|e| prdt_protocol::ProducerError::Encode(e.to_string()))?;
+            Ok::<_, prdt_protocol::ProducerError>((enc, frame.bgra, pkt))
+        })
+        .await;
+        let (enc_back, bgra_back, pkt) = match encode_join {
+            Ok(Ok(triple)) => triple,
+            Ok(Err(e)) => {
+                return Err(e);
+            }
+            Err(e) => {
+                self.poisoned = true;
+                return Err(prdt_protocol::ProducerError::Capture(format!(
+                    "producer poisoned by inner panic: {e}"
+                )));
+            }
+        };
+        self.encoder = Some(enc_back);
+        self.bgra_buf = bgra_back;
+
+        let seq = self.seq;
+        self.seq += 1;
+        Ok(prdt_protocol::EncodedFrame {
+            seq,
+            timestamp_host_us: pkt.timestamp_us,
+            is_keyframe: pkt.is_keyframe,
+            nal_units: bytes::Bytes::from(pkt.nal_bytes),
+            width: self.width,
+            height: self.height,
+            codec: prdt_protocol::Codec::H265,
+        })
+    }
+
+    fn request_idr(&mut self) {
+        self.idr_pending = true;
+    }
+
+    fn set_target_bitrate(&mut self, bps: u32) {
+        if let Some(e) = self.encoder.as_mut() {
+            use prdt_media_core::Encoder as _;
+            e.set_target_bitrate(bps);
+        }
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "ffmpeg-nvenc-hevc-npp"
+    }
+}
+
 /// Map any encoder CLI arg to the canonical backend name on Linux.
 fn normalize_encoder(arg: &str) -> &'static str {
     match arg {
@@ -468,6 +665,41 @@ fn normalize_encoder(arg: &str) -> &'static str {
                 "video encoder selected"
             );
             "ffmpeg-nvenc-hevc"
+        }
+        // P2.5 — NPP-accelerated NVENC path. Explicit opt-in only;
+        // `auto` resolution NEVER selects this (Step 4 decision: keep the
+        // auto policy byte-stable from P1.6). On a build without the
+        // NPP feature, the arm is absent and the request falls through to
+        // the generic warn → openh264 fallback below.
+        #[cfg(feature = "ffmpeg-encode-hevc-nvenc-npp-any")]
+        "ffmpeg-nvenc-hevc-npp" => {
+            tracing::info!(
+                encoder = %arg,
+                selected_by = "explicit-flag",
+                reason = "user-requested",
+                "video encoder selected"
+            );
+            "ffmpeg-nvenc-hevc-npp"
+        }
+        #[cfg(feature = "ffmpeg-encode-hevc-nvenc-npp-any")]
+        "nvenc-npp" => {
+            tracing::info!(
+                encoder = "ffmpeg-nvenc-hevc-npp",
+                selected_by = "explicit-flag",
+                reason = "legacy-alias",
+                requested = "nvenc-npp",
+                "video encoder selected"
+            );
+            "ffmpeg-nvenc-hevc-npp"
+        }
+        #[cfg(not(feature = "ffmpeg-encode-hevc-nvenc-npp-any"))]
+        "ffmpeg-nvenc-hevc-npp" | "nvenc-npp" => {
+            tracing::warn!(
+                requested = arg,
+                hint = "rebuild with --features ffmpeg-encode-hevc-nvenc-npp",
+                "NVENC HEVC NPP backend not compiled in; falling back to openh264"
+            );
+            "openh264"
         }
         "auto" => resolve_auto_encoder(),
         // P1.6: reroute legacy aliases to the canonical backend when that
