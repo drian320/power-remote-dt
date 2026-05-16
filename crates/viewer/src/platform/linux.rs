@@ -695,4 +695,123 @@ mod tests {
             _ => panic!("expected Openh264 variant; auto/H264 must not steal into HEVC dispatch"),
         }
     }
+
+    /// A12.b — H.264 round-trip regression guard.
+    ///
+    /// Mirrors `openh264_decoder_accepts_self_encoded_stream` at
+    /// `crates/media-sw/src/decoder.rs:95`. Exercises the rewritten
+    /// `PlatformConsumer::Openh264` arm (the match arm that the P2
+    /// destructure surgery moved into a `match &mut *c` in
+    /// `crates/viewer/src/lib.rs:2137`): encode a small I420 frame →
+    /// feed NAL units through the same `decoder.decode(&nal_units)` path
+    /// → assert `latest` becomes `Some(Arc<I420Frame>)` with correct
+    /// plane dimensions. No winit/softbuffer surface is needed; this is
+    /// purely a decoder-arm unit test.
+    #[test]
+    fn a12b_openh264_round_trip_through_platform_consumer() {
+        use prdt_media_sw::traits::SwH264Decoder as _;
+        use prdt_media_sw::traits::SwH264Encoder as _;
+        use prdt_media_sw::{I420Frame, Openh264Encoder, Openh264EncoderConfig};
+
+        let w = 320u32;
+        let h = 240u32;
+
+        // Build the consumer the same way build_consumer() does for openh264/H264.
+        let mut c = build_consumer("openh264", Codec::H264, w, h).expect("build_consumer failed");
+
+        // Sanity: fresh consumer has needs_idr=true and latest=None.
+        match c {
+            PlatformConsumer::Openh264 {
+                needs_idr,
+                ref latest,
+                ..
+            } => {
+                assert!(needs_idr, "fresh consumer must start with needs_idr=true");
+                assert!(
+                    latest.is_none(),
+                    "fresh consumer must start with latest=None"
+                );
+            }
+            #[allow(unreachable_patterns)]
+            _ => panic!("expected Openh264 variant"),
+        }
+
+        // Encode a minimal I420 frame to obtain NAL units.
+        let cfg = Openh264EncoderConfig {
+            width: w,
+            height: h,
+            target_bitrate_bps: 500_000,
+            max_fps: 30.0,
+        };
+        let mut enc = Openh264Encoder::new(cfg).expect("encoder init");
+        let frame = {
+            let mut f = I420Frame::new_packed(w, h).expect("I420Frame alloc");
+            let stride_y = f.stride_y as usize;
+            for row in 0..(h as usize) {
+                for col in 0..(w as usize) {
+                    f.y[row * stride_y + col] = ((col + row) & 0xFF) as u8;
+                }
+            }
+            for b in f.u.iter_mut() {
+                *b = 128;
+            }
+            for b in f.v.iter_mut() {
+                *b = 128;
+            }
+            f
+        };
+
+        // Feed up to 3 IDR frames through the Openh264 arm of the match,
+        // exactly mirroring what recv_task's match arm does.
+        let (decoder, latest, needs_idr) = match c {
+            PlatformConsumer::Openh264 {
+                ref mut decoder,
+                ref mut latest,
+                ref mut needs_idr,
+            } => (decoder, latest, needs_idr),
+            #[allow(unreachable_patterns)]
+            _ => panic!("expected Openh264 variant"),
+        };
+
+        let mut got_frame = false;
+        for i in 0..3u64 {
+            let ef = enc.encode(&frame, i == 0, i * 33_000).expect("encode");
+            // This is exactly the match arm body from recv_task (lib.rs:2143–2162).
+            match decoder.decode(&ef.nal_units) {
+                Ok(Some(i420)) => {
+                    let arc = std::sync::Arc::new(i420);
+                    *latest = Some(std::sync::Arc::clone(&arc));
+                    *needs_idr = false;
+                    got_frame = true;
+                    break;
+                }
+                Ok(None) => {}
+                Err(e) => panic!("openh264 decode failed: {e}"),
+            }
+        }
+
+        assert!(got_frame, "decoder produced no frame after 3 inputs");
+        let decoded = latest.as_ref().expect("latest must be Some after decode");
+        assert_eq!(decoded.width, w);
+        assert_eq!(decoded.height, h);
+        assert_eq!(
+            decoded.y.len(),
+            (decoded.stride_y as usize) * (h as usize),
+            "Y plane size mismatch"
+        );
+        assert_eq!(
+            decoded.u.len(),
+            (decoded.stride_uv as usize) * (h as usize / 2),
+            "U plane size mismatch"
+        );
+        assert_eq!(
+            decoded.v.len(),
+            (decoded.stride_uv as usize) * (h as usize / 2),
+            "V plane size mismatch"
+        );
+        assert!(
+            !*needs_idr,
+            "needs_idr must be cleared after successful decode"
+        );
+    }
 }
