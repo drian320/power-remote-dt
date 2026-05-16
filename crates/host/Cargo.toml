@@ -58,6 +58,10 @@ ffmpeg-encode-hevc-nvenc-ffmpeg7 = ["dep:prdt-media-core", "dep:prdt-media-ffmpe
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
 tempfile = "3"
 clap = { workspace = true }
+# Used by Linux tests that toggle PRDT_PREFER_NVENC to assert auto-encoder
+# resolution; cross-test env-var pollution would otherwise flip the
+# both-features cfg arm in unpredictable ways.
+serial_test = "3"
 
 [target.'cfg(windows)'.dependencies]
 prdt-media-win = { path = "../media-win" }
