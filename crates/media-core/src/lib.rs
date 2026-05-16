@@ -15,5 +15,5 @@ pub mod traits;
 
 pub use annexb::normalize_to_annexb;
 pub use error::{AnnexBError, CaptureError, DecodeError, EncodeError};
-pub use frame::EncodedPacket;
+pub use frame::{DecodedFrame, EncodedPacket, Nv12Frame};
 pub use traits::{Capturer, Decoder, Encoder};
