@@ -186,13 +186,91 @@ jobs:
         run: ./scripts/dev-container.sh bash -c 'cargo clippy -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-nvenc-ffmpeg5,ffmpeg-decode-hevc-nvdec-ffmpeg5 --target x86_64-unknown-linux-gnu -- -D warnings'
       - name: Both-features decode-triple clippy — SW+VAAPI+NVDEC (ffmpeg5, dev-container)
         run: ./scripts/dev-container.sh bash -c 'cargo clippy -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-sw-ffmpeg5,ffmpeg-decode-hevc-vaapi-ffmpeg5,ffmpeg-decode-hevc-nvdec-ffmpeg5 --target x86_64-unknown-linux-gnu -- -D warnings'
+      # ── P2.5 NPP cells ──────────────────────────────────────────────────────
+      # A13 regression cell: NVENC WITHOUT NPP must still compile after the
+      # R6 nvenc_common.rs refactor (behavioral invariance, not byte-stability).
+      - name: NVENC-without-NPP regression (A13) — cargo check (ffmpeg5, dev-container)
+        run: ./scripts/dev-container.sh bash -c 'cargo check -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-nvenc-ffmpeg5 --target x86_64-unknown-linux-gnu'
+      # NPP ffmpeg5 — dev-container (bookworm headers + libnpp-dev-12-4).
+      # Per R4 the NPP feature transitively enables the matching NVENC feature;
+      # only the NPP feature is passed. clippy and lib tests run here too.
+      - name: NPP — cargo check (ffmpeg5, dev-container)
+        run: ./scripts/dev-container.sh bash -c 'cargo check -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-nvenc-npp-ffmpeg5 --target x86_64-unknown-linux-gnu'
+      - name: NPP — clippy (deny warnings, ffmpeg5, dev-container)
+        run: ./scripts/dev-container.sh bash -c 'cargo clippy -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-nvenc-npp-ffmpeg5 --target x86_64-unknown-linux-gnu -- -D warnings'
+      - name: NPP — unit tests (no GPU, ffmpeg5, dev-container)
+        run: ./scripts/dev-container.sh bash -c 'cargo test -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-nvenc-npp-ffmpeg5 --lib --target x86_64-unknown-linux-gnu'
+      # NPP unsuffixed default (ffmpeg6 ABI) — native ubuntu-latest runner.
+      # Step 0 installs libnpp-dev-12-4 on the runner; fallback to stub path.
+      - name: Install CUDA + NPP dev libs (native runner, NPP cells)
+        run: |
+          set -euo pipefail
+          curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb \
+            -o /tmp/cuda-keyring.deb
+          sudo dpkg -i /tmp/cuda-keyring.deb
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            cuda-cudart-dev-12-4 libnpp-dev-12-4 \
+          || {
+            echo "NVIDIA repo unavailable; building stub fallback"
+            gcc -shared -fPIC \
+              -o "$GITHUB_WORKSPACE/tests/fixtures/libnppicc-stub.so" \
+              "$GITHUB_WORKSPACE/tests/fixtures/libnppicc-stub.c"
+            echo "RUSTFLAGS=-L $GITHUB_WORKSPACE/tests/fixtures" >> "$GITHUB_ENV"
+          }
+      - name: NPP — cargo check (ffmpeg6 default ABI, native runner)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: cargo check -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-nvenc-npp --target x86_64-unknown-linux-gnu
+      # NPP ffmpeg7 check-only — native runner.
+      - name: NPP — cargo check (ffmpeg7 explicit ABI, native runner, check-only)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: cargo check -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-nvenc-npp-ffmpeg7 --target x86_64-unknown-linux-gnu
+      # A11.b — Cargo unification proof: enabling a mismatched ABI pair must
+      # succeed (no compile_error!) and resolve rusty_ffmpeg to ffmpeg7 (highest
+      # cascade). Proves additive unification per plan iter-3 C1 correction.
+      - name: A11.b Cargo unification proof (NPP-ffmpeg5 + NVENC-ffmpeg7 → unifies to ffmpeg7)
+        run: |
+          ./scripts/dev-container.sh bash -c '
+            cargo build -p prdt-media-ffmpeg \
+              --features ffmpeg-encode-hevc-nvenc-npp-ffmpeg5,ffmpeg-encode-hevc-nvenc-ffmpeg7 \
+              --target x86_64-unknown-linux-gnu
+          ' || { echo "::error::A11.b build failed (expected success — Cargo should unify to ffmpeg7)"; exit 1; }
+          ./scripts/dev-container.sh bash -c '
+            cargo metadata --format-version 1 \
+              --features ffmpeg-encode-hevc-nvenc-npp-ffmpeg5,ffmpeg-encode-hevc-nvenc-ffmpeg7 \
+              --manifest-path crates/media-ffmpeg/Cargo.toml \
+            | python3 -c "
+          import json, sys
+          m = json.load(sys.stdin)
+          for node in m[\"resolve\"][\"nodes\"]:
+              if node[\"id\"].startswith(\"rusty_ffmpeg \"):
+                  enabled = set(node[\"features\"])
+                  assert \"ffmpeg7\" in enabled, f\"expected ffmpeg7 in unified rusty_ffmpeg features, got {enabled}\"
+                  print(f\"OK: rusty_ffmpeg unified features = {sorted(enabled)}\")
+                  sys.exit(0)
+          sys.exit(\"rusty_ffmpeg not found in resolved graph\")
+          "
+          ' || { echo "::error::A11.b: rusty_ffmpeg did not resolve to ffmpeg7 (Cargo unification broken)"; exit 1; }
+      # 6-way mega-cell clippy: all encode + decode NPP features together on prdt-host.
+      - name: NPP 6-way mega-cell clippy — prdt-host (vaapi+nvenc-ffmpeg5+npp-ffmpeg5+3 decoders, dev-container)
+        run: |
+          ./scripts/dev-container.sh bash -c '
+            cargo clippy -p prdt-host \
+              --features ffmpeg-encode-hevc-vaapi,ffmpeg-encode-hevc-nvenc-ffmpeg5,ffmpeg-encode-hevc-nvenc-npp-ffmpeg5,ffmpeg-decode-hevc-vaapi-ffmpeg5,ffmpeg-decode-hevc-nvdec-ffmpeg5,ffmpeg-decode-hevc-sw-ffmpeg5 \
+              --target x86_64-unknown-linux-gnu \
+              -- -D warnings
+          '
       # --- Safety + grep guards ---
       - name: Safety-comment lint
         run: ./scripts/dev-container.sh bash -c 'python3 scripts/check-safety-comments.py crates/media-ffmpeg/src/'
       - name: No-implicit-roundtrip grep guard
         run: |
           ! grep -rE 'hwdownload|swscale|hwupload' crates/media-ffmpeg/src/
-      - name: Per-backend hw_upload/hw_download invariant (A10 — O2 combined regex, ≤ 1 call site per encoder/decoder file)
+      - name: Per-backend hw_upload/hw_download invariant (A10 — O1 carve-out updated, ≤ 1 call site per encoder/decoder file; NPP file must have 0)
         run: |
           set -euo pipefail
           # Each encoder/decoder file that does HW↔CPU transfer aliases
@@ -201,6 +279,11 @@ jobs:
           # regex `hw_(upload|download)\(` catches both so AV1/VP9 additions
           # don't need a separate guard. File glob covers both encoder and
           # decoder files (O2).
+          #
+          # O1 carve-out (P2.5): hevc_nvenc_npp_encoder.rs uses cudaMemcpy2DAsync
+          # (cuda-direct) instead of av_hwframe_transfer_data — it must have ZERO
+          # hw_(upload|download) call sites. The general ≤1 guard still holds for
+          # all other encoder/decoder files.
           fail=0
           shopt -s nullglob
           for f in crates/media-ffmpeg/src/hevc_*_encoder.rs crates/media-ffmpeg/src/hevc_*_decoder.rs; do
@@ -211,4 +294,10 @@ jobs:
               fail=1
             fi
           done
+          # NPP encoder specifically must have zero (A10 O1 assertion).
+          npp_count=$(grep -c -E '\bhw_(upload|download)\(' crates/media-ffmpeg/src/hevc_nvenc_npp_encoder.rs || true)
+          if [ "$npp_count" -ne 0 ]; then
+            echo "::error file=crates/media-ffmpeg/src/hevc_nvenc_npp_encoder.rs::NPP encoder must have 0 hw_(upload|download) call sites (got $npp_count); NPP uses cuda-direct (cudaMemcpy2DAsync) per O1 carve-out"
+            fail=1
+          fi
           exit $fail
