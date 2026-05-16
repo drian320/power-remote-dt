@@ -470,12 +470,58 @@ fn normalize_encoder(arg: &str) -> &'static str {
             "ffmpeg-nvenc-hevc"
         }
         "auto" => resolve_auto_encoder(),
-        "nvenc" | "mf" | "vaapi" => {
-            // Legacy alias arm — unchanged in P1.5. Rerouting `"nvenc"` to
-            // the NVENC backend is deferred to P1.6 (separate PR).
+        // P1.6: reroute legacy aliases to the canonical backend when that
+        // backend is compiled in. Users typing `--encoder nvenc` mean "give
+        // me NVENC if you have it"; silently falling back to openh264 hid
+        // intent. When the corresponding feature is absent we still fall
+        // back, with a louder hint about which Cargo feature would have
+        // satisfied the request.
+        #[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
+        "nvenc" => {
+            tracing::info!(
+                encoder = "ffmpeg-nvenc-hevc",
+                selected_by = "explicit-flag",
+                reason = "legacy-alias",
+                requested = "nvenc",
+                "video encoder selected"
+            );
+            "ffmpeg-nvenc-hevc"
+        }
+        #[cfg(not(feature = "ffmpeg-encode-hevc-nvenc-any"))]
+        "nvenc" => {
             tracing::warn!(
-                requested = arg,
-                "Linux HW codec only via 'ffmpeg-vaapi-hevc'; falling back to openh264"
+                requested = "nvenc",
+                hint = "rebuild with --features ffmpeg-encode-hevc-nvenc",
+                "NVENC HEVC backend not compiled in; falling back to openh264"
+            );
+            "openh264"
+        }
+        #[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
+        "vaapi" => {
+            tracing::info!(
+                encoder = "ffmpeg-vaapi-hevc",
+                selected_by = "explicit-flag",
+                reason = "legacy-alias",
+                requested = "vaapi",
+                "video encoder selected"
+            );
+            "ffmpeg-vaapi-hevc"
+        }
+        #[cfg(not(feature = "ffmpeg-encode-hevc-vaapi-any"))]
+        "vaapi" => {
+            tracing::warn!(
+                requested = "vaapi",
+                hint = "rebuild with --features ffmpeg-encode-hevc-vaapi",
+                "VAAPI HEVC backend not compiled in; falling back to openh264"
+            );
+            "openh264"
+        }
+        "mf" => {
+            // `mf` is Windows-only (Media Foundation). On Linux it never has
+            // a real path; warn and fall back.
+            tracing::warn!(
+                requested = "mf",
+                "Media Foundation encoder is Windows-only on Linux; falling back to openh264"
             );
             "openh264"
         }
@@ -675,12 +721,34 @@ mod tests {
     use serial_test::serial;
 
     #[test]
-    fn linux_normalize_encoder_falls_back_for_hw() {
+    fn linux_normalize_encoder_always_falls_back_for_mf_and_unknown() {
         assert_eq!(normalize_encoder("openh264"), "openh264");
-        assert_eq!(normalize_encoder("nvenc"), "openh264");
         assert_eq!(normalize_encoder("mf"), "openh264");
-        assert_eq!(normalize_encoder("vaapi"), "openh264");
         assert_eq!(normalize_encoder("bogus"), "openh264");
+    }
+
+    #[test]
+    #[cfg(not(feature = "ffmpeg-encode-hevc-nvenc-any"))]
+    fn linux_normalize_encoder_nvenc_alias_falls_back_without_feature() {
+        assert_eq!(normalize_encoder("nvenc"), "openh264");
+    }
+
+    #[test]
+    #[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
+    fn linux_normalize_encoder_nvenc_alias_reroutes_to_canonical() {
+        assert_eq!(normalize_encoder("nvenc"), "ffmpeg-nvenc-hevc");
+    }
+
+    #[test]
+    #[cfg(not(feature = "ffmpeg-encode-hevc-vaapi-any"))]
+    fn linux_normalize_encoder_vaapi_alias_falls_back_without_feature() {
+        assert_eq!(normalize_encoder("vaapi"), "openh264");
+    }
+
+    #[test]
+    #[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
+    fn linux_normalize_encoder_vaapi_alias_reroutes_to_canonical() {
+        assert_eq!(normalize_encoder("vaapi"), "ffmpeg-vaapi-hevc");
     }
 
     #[test]
