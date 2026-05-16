@@ -62,32 +62,49 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # --- VAAPI cells (unchanged from P1) ---
-      - name: VAAPI — cargo check (ffmpeg5 default ABI)
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install FFmpeg dev libs (for native ffmpeg6 ABI cells)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libavcodec-dev libavutil-dev libavfilter-dev libavformat-dev \
+            libavdevice-dev libswresample-dev libswscale-dev \
+            clang libclang-dev
+      # --- VAAPI cells (dev-container, ffmpeg5 bookworm headers) ---
+      - name: VAAPI — cargo check (ffmpeg5 default ABI, dev-container)
         run: ./scripts/dev-container.sh bash -c 'cargo check -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-vaapi --target x86_64-unknown-linux-gnu'
-      - name: VAAPI — clippy (deny warnings, default ABI)
+      - name: VAAPI — clippy (deny warnings, default ABI, dev-container)
         run: ./scripts/dev-container.sh bash -c 'cargo clippy -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-vaapi --target x86_64-unknown-linux-gnu -- -D warnings'
-      - name: VAAPI — unit tests (no GPU, default ABI)
+      - name: VAAPI — unit tests (no GPU, default ABI, dev-container)
         run: ./scripts/dev-container.sh bash -c 'cargo test -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-vaapi --lib --target x86_64-unknown-linux-gnu'
       # --- NVENC cells (P1.5, A2) ---
-      # check-only for the -ffmpeg5 and -ffmpeg7 ABI variants (no GPU available);
-      # test + clippy only for the default ABI cell (ffmpeg6 = unsuffixed).
-      - name: NVENC — cargo check (ffmpeg5 explicit ABI)
+      # ffmpeg5 explicit ABI: via dev-container (bookworm headers).
+      # ffmpeg6 default ABI: native ubuntu-latest (system libavcodec = ffmpeg6).
+      # ffmpeg7 ABI: check-only; ubuntu-latest ffmpeg6 headers close enough for
+      # compile check (rusty_ffmpeg 0.16.7 ffmpeg7 bindings are pre-generated).
+      - name: NVENC — cargo check (ffmpeg5 explicit ABI, dev-container)
         run: ./scripts/dev-container.sh bash -c 'cargo check -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-nvenc-ffmpeg5 --target x86_64-unknown-linux-gnu'
-      - name: NVENC — cargo check (ffmpeg6 default ABI)
-        run: ./scripts/dev-container.sh bash -c 'cargo check -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-nvenc --target x86_64-unknown-linux-gnu'
-      - name: NVENC — cargo check (ffmpeg7 explicit ABI)
-        run: ./scripts/dev-container.sh bash -c 'cargo check -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-nvenc-ffmpeg7 --target x86_64-unknown-linux-gnu'
-      - name: NVENC — clippy (deny warnings, ffmpeg5 ABI for dev-container compat)
+      - name: NVENC — clippy (deny warnings, ffmpeg5 ABI, dev-container)
         run: ./scripts/dev-container.sh bash -c 'cargo clippy -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-nvenc-ffmpeg5 --target x86_64-unknown-linux-gnu -- -D warnings'
-      - name: NVENC — unit tests (no GPU, ffmpeg5 ABI)
+      - name: NVENC — unit tests (no GPU, ffmpeg5 ABI, dev-container)
         run: ./scripts/dev-container.sh bash -c 'cargo test -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-nvenc-ffmpeg5 --lib --target x86_64-unknown-linux-gnu'
+      - name: NVENC — cargo check (ffmpeg6 default ABI, native runner)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: cargo check -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-nvenc --target x86_64-unknown-linux-gnu
+      - name: NVENC — cargo check (ffmpeg7 explicit ABI, native runner, check-only)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: cargo check -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-nvenc-ffmpeg7 --target x86_64-unknown-linux-gnu
       # --- Both-features clippy cell (W1): validates the all(vaapi,nvenc) cfg cascade ---
-      # Use matching ABI (vaapi=ffmpeg5 default + nvenc-ffmpeg5) to avoid rusty_ffmpeg
-      # ABI conflict (vaapi defaults ffmpeg5, nvenc defaults ffmpeg6 — mismatched).
-      - name: Both-features clippy — prdt-host (vaapi + nvenc, ffmpeg5 ABI)
+      # Use matching ABI (vaapi=ffmpeg5 default + nvenc-ffmpeg5) via dev-container to
+      # avoid rusty_ffmpeg ABI conflict (vaapi defaults ffmpeg5, nvenc defaults ffmpeg6).
+      - name: Both-features clippy — prdt-host (vaapi + nvenc-ffmpeg5, dev-container)
         run: ./scripts/dev-container.sh bash -c 'cargo clippy -p prdt-host --features ffmpeg-encode-hevc-vaapi,ffmpeg-encode-hevc-nvenc-ffmpeg5 --target x86_64-unknown-linux-gnu -- -D warnings'
-      - name: Both-features tests — prdt-host (vaapi + nvenc, ffmpeg5 ABI)
+      - name: Both-features tests — prdt-host (vaapi + nvenc-ffmpeg5, dev-container)
         run: ./scripts/dev-container.sh bash -c 'cargo test -p prdt-host --features ffmpeg-encode-hevc-vaapi,ffmpeg-encode-hevc-nvenc-ffmpeg5 --lib --target x86_64-unknown-linux-gnu'
       # --- Safety + grep guards ---
       - name: Safety-comment lint
