@@ -22,12 +22,20 @@ compile_error!(
 
 pub mod error;
 
-#[cfg(all(feature = "ffmpeg-encode-hevc-vaapi", target_os = "linux"))]
+#[cfg(all(
+    any(
+        feature = "ffmpeg-encode-hevc-vaapi",
+        feature = "ffmpeg-encode-hevc-nvenc"
+    ),
+    target_os = "linux"
+))]
 pub mod core_adapter;
 #[cfg(all(feature = "ffmpeg-encode-hevc-nvenc", target_os = "linux"))]
 mod cuda_hwdevice;
 #[cfg(all(feature = "ffmpeg-encode-hevc-nvenc", target_os = "linux"))]
 mod cuda_hwframes;
+#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc", target_os = "linux"))]
+pub mod hevc_nvenc_encoder;
 #[cfg(all(feature = "ffmpeg-encode-hevc-vaapi", target_os = "linux"))]
 pub mod hevc_vaapi_encoder;
 #[cfg(all(feature = "ffmpeg-encode-hevc-vaapi", target_os = "linux"))]
@@ -45,7 +53,11 @@ mod options;
 
 pub use error::FfmpegError;
 
+#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc", target_os = "linux"))]
+pub use core_adapter::HevcNvencFfmpegEncoderAdapter;
 #[cfg(all(feature = "ffmpeg-encode-hevc-vaapi", target_os = "linux"))]
 pub use core_adapter::HevcVaapiFfmpegEncoderAdapter;
+#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc", target_os = "linux"))]
+pub use hevc_nvenc_encoder::{HevcNvencFfmpegEncoder, HevcNvencFfmpegEncoderConfig};
 #[cfg(all(feature = "ffmpeg-encode-hevc-vaapi", target_os = "linux"))]
 pub use hevc_vaapi_encoder::{HevcVaapiFfmpegEncoder, HevcVaapiFfmpegEncoderConfig};
