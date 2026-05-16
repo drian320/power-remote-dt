@@ -89,3 +89,110 @@ pub fn build_vaapi_video_producer_with(
 pub fn build_video_decoder() -> anyhow::Result<sw_pipeline::LinuxSwDecoder> {
     sw_pipeline::LinuxSwDecoder::new().map_err(Into::into)
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// P2 — FFmpeg HEVC decode factories. Mirror the encoder-side build
+// functions; gated per backend so the viewer crate can subscribe to any
+// subset (sw-only, vaapi-only, nvdec-only, all three) without dragging
+// in unused FFI symbols. Each returns the `*Adapter` type from
+// prdt-media-ffmpeg so the viewer doesn't need a direct dep on the
+// crate behind these forwards.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Re-export the adapter types + Nv12Frame so the viewer can name them
+// through the existing prdt_media_linux dep edge without taking a direct
+// dependency on prdt-media-ffmpeg (which is opt-in here per the feature
+// graph in crates/media-linux/Cargo.toml).
+#[cfg(all(
+    target_os = "linux",
+    any(
+        feature = "ffmpeg-decode-hevc-sw-any",
+        feature = "ffmpeg-decode-hevc-vaapi-any",
+        feature = "ffmpeg-decode-hevc-nvdec-any"
+    )
+))]
+pub use prdt_media_ffmpeg::{HevcDecoderAdapter, HevcDecoderBackend};
+// Nv12Frame lives in prdt-media-core; re-export through here so the
+// viewer can name it without a direct media-core dep.
+#[cfg(all(
+    target_os = "linux",
+    any(
+        feature = "ffmpeg-decode-hevc-sw-any",
+        feature = "ffmpeg-decode-hevc-vaapi-any",
+        feature = "ffmpeg-decode-hevc-nvdec-any"
+    )
+))]
+pub use prdt_media_core::Nv12Frame;
+#[cfg(all(target_os = "linux", feature = "ffmpeg-decode-hevc-nvdec-any"))]
+pub use prdt_media_ffmpeg::HevcNvdecFfmpegDecoderAdapter;
+#[cfg(all(target_os = "linux", feature = "ffmpeg-decode-hevc-sw-any"))]
+pub use prdt_media_ffmpeg::HevcSwFfmpegDecoderAdapter;
+#[cfg(all(target_os = "linux", feature = "ffmpeg-decode-hevc-vaapi-any"))]
+pub use prdt_media_ffmpeg::HevcVaapiFfmpegDecoderAdapter;
+
+#[cfg(all(target_os = "linux", feature = "ffmpeg-decode-hevc-sw-any"))]
+pub fn build_ffmpeg_sw_hevc_decoder(
+    width: u32,
+    height: u32,
+) -> anyhow::Result<prdt_media_ffmpeg::HevcSwFfmpegDecoderAdapter> {
+    use anyhow::Context as _;
+    let dec =
+        prdt_media_ffmpeg::HevcSwFfmpegDecoder::new(prdt_media_ffmpeg::HevcSwFfmpegDecoderConfig {
+            width,
+            height,
+        })
+        .context("HevcSwFfmpegDecoder::new")?;
+    // HevcSwFfmpegDecoderAdapter is a type alias for HevcDecoderAdapter<B>;
+    // construct the generic directly because type aliases aren't callable.
+    Ok(prdt_media_ffmpeg::HevcDecoderAdapter(dec))
+}
+
+#[cfg(all(target_os = "linux", feature = "ffmpeg-decode-hevc-vaapi-any"))]
+pub fn build_ffmpeg_vaapi_hevc_decoder(
+    width: u32,
+    height: u32,
+) -> anyhow::Result<prdt_media_ffmpeg::HevcVaapiFfmpegDecoderAdapter> {
+    use anyhow::Context as _;
+    let dec = prdt_media_ffmpeg::HevcVaapiFfmpegDecoder::new(
+        prdt_media_ffmpeg::HevcVaapiFfmpegDecoderConfig {
+            width,
+            height,
+            render_node: None,
+        },
+    )
+    .context("HevcVaapiFfmpegDecoder::new")?;
+    Ok(prdt_media_ffmpeg::HevcDecoderAdapter(dec))
+}
+
+#[cfg(all(target_os = "linux", feature = "ffmpeg-decode-hevc-nvdec-any"))]
+pub fn build_ffmpeg_nvdec_hevc_decoder(
+    width: u32,
+    height: u32,
+) -> anyhow::Result<prdt_media_ffmpeg::HevcNvdecFfmpegDecoderAdapter> {
+    use anyhow::Context as _;
+    let dec = prdt_media_ffmpeg::HevcNvdecFfmpegDecoder::new(
+        prdt_media_ffmpeg::HevcNvdecFfmpegDecoderConfig {
+            width,
+            height,
+            cuda_device_index: None,
+        },
+    )
+    .context("HevcNvdecFfmpegDecoder::new")?;
+    Ok(prdt_media_ffmpeg::HevcDecoderAdapter(dec))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A12.a regression-guard: `build_video_decoder()` must still
+    /// construct a `LinuxSwDecoder` after the P2 factory additions.
+    /// Verifies the existing H.264 decode path is not broken by the new
+    /// FFmpeg HEVC factory functions added alongside it.
+    #[test]
+    fn build_video_decoder_constructs_linux_sw_decoder() {
+        // If this compiles and doesn't panic, the OpenH264 SW decoder path
+        // is intact. The return type is LinuxSwDecoder (type-checked by rustc).
+        let _dec = build_video_decoder().expect("build_video_decoder must succeed");
+    }
+}

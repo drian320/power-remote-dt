@@ -339,3 +339,125 @@ nvidia-smi dmon -s u -d 2
 **`nvidia-smi dmon enc` non-zero:** Y / N
 **CPU readback warnings:** `<N>`
 **Notes:**
+
+---
+
+## Linux↔Linux HEVC viewer (P2)
+
+This section covers Linux viewer decode of an HEVC stream from a Linux host. All three
+decode backends (SW, VAAPI, NVDEC) are deferred HW smoke (A4/A11); this procedure is
+the **manual pre-merge regression-guard** for the OpenH264 H.264 path (A12) and the
+viewer dispatch wiring (A12.a).
+
+> **SW HEVC backend handles 1080p60 within the latency budget on a modern CPU
+> (i7-12700 / Ryzen 7700 or better). 4K60 SW decode is functional but consumes
+> 70–100% of a core per stream and exceeds the per-frame latency target; users on
+> 4K60 should select VAAPI (Intel/AMD iGPU) or NVDEC (NVIDIA dGPU).**
+
+### Build the viewer with a decode backend
+
+Choose one backend. All examples use the dev-container (bookworm, ffmpeg5 headers):
+
+```bash
+# SW HEVC decode (universal fallback, no GPU required)
+./scripts/dev-container.sh bash -c '
+  cargo build -p prdt-client --features ffmpeg-decode-hevc-sw-ffmpeg5 --release --target x86_64-unknown-linux-gnu
+'
+
+# VAAPI HEVC decode (Intel/AMD iGPU)
+./scripts/dev-container.sh bash -c '
+  cargo build -p prdt-client --features ffmpeg-decode-hevc-vaapi-ffmpeg5 --release --target x86_64-unknown-linux-gnu
+'
+
+# NVDEC HEVC decode (NVIDIA GPU)
+./scripts/dev-container.sh bash -c '
+  cargo build -p prdt-client --features ffmpeg-decode-hevc-nvdec-ffmpeg5 --release --target x86_64-unknown-linux-gnu
+'
+```
+
+Binary lands at `./target-docker/x86_64-unknown-linux-gnu/release/prdt`.
+
+### Start the Linux host (VAAPI HEVC encode)
+
+```bash
+prdt host \
+    --encoder ffmpeg-vaapi-hevc \
+    --bind 0.0.0.0:9000 \
+    --monitor 0 \
+    --bitrate-mbps 8 \
+    --key-file host-key.bin \
+    --silent-allow --headless \
+    2>&1 | tee host-linux.log
+```
+
+### Start the Linux viewer
+
+Replace `<host-ip>`, `<pubkey>`, and `<decoder>` with the actual values:
+
+```bash
+# Explicit decoder selection:
+./target-docker/x86_64-unknown-linux-gnu/release/prdt connect \
+    --host <host-ip>:9000 \
+    --host-pubkey <pubkey> \
+    --codec h265 \
+    --decoder ffmpeg-vaapi-hevc   # or ffmpeg-sw-hevc / ffmpeg-nvdec-hevc / auto
+```
+
+Expected line in viewer log:
+```
+INFO video.pipeline event="decoder_ready" backend="ffmpeg-vaapi-hevc" codec="h265"
+```
+
+### `auto` decode policy and `PRDT_PREFER_NVDEC` override
+
+When both VAAPI and NVDEC are compiled in, `--decoder auto` picks **VAAPI first** (power
+budget: iGPU ~5 W vs. dGPU ~25 W at the same 1080p60 decode workload). To flip to NVDEC:
+
+```bash
+export PRDT_PREFER_NVDEC=1   # accepted: 1, true, yes, on (case-insensitive)
+prdt connect --decoder auto ...
+```
+
+Log confirms the choice:
+```
+INFO video.pipeline decoder="ffmpeg-vaapi-hevc" selected_by="auto" reason="preferred-over-nvdec"
+# or with PRDT_PREFER_NVDEC=1:
+INFO video.pipeline decoder="ffmpeg-nvdec-hevc" selected_by="auto" reason="preferred-over-vaapi-by-env"
+```
+
+### Linux↔Linux run log
+
+**Date:** `<YYYY-MM-DD>`
+**Host:** `<iGPU/dGPU SKU>`
+**Viewer decoder:** `<ffmpeg-vaapi-hevc / ffmpeg-sw-hevc / ffmpeg-nvdec-hevc>`
+**Result:** PASS / FAIL
+**decoder_ready log line confirmed:** Y / N
+**Notes:**
+
+---
+
+## Pre-merge regression-guard (A12)
+
+**Mandatory before any PR touching `crates/viewer/src/lib.rs` or
+`crates/viewer/src/platform/linux.rs`.**
+
+The unit test suite covers A12.a (dispatch) and A12.b (round-trip) automatically:
+
+```bash
+# A12.a + A12.b — runs in < 1 s, no display required
+./scripts/dev-container.sh bash -c \
+  'cargo test -p prdt-viewer --lib --target x86_64-unknown-linux-gnu build_consumer'
+
+# A12.b specifically
+./scripts/dev-container.sh bash -c \
+  'cargo test -p prdt-viewer --lib --target x86_64-unknown-linux-gnu a12b_openh264_round_trip'
+```
+
+A12.c fallback (if the above proves infeasible due to renderer entanglement — currently
+not needed since A12.b is a pure unit test):
+
+```bash
+cargo test -p prdt-viewer --features openh264-decode -- --ignored
+```
+
+All three tests must pass (zero failures) before the PR is merged.

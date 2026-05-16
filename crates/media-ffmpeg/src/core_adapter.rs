@@ -1,8 +1,35 @@
+#[cfg(any(
+    feature = "ffmpeg-encode-hevc-vaapi-any",
+    feature = "ffmpeg-encode-hevc-nvenc-any"
+))]
 use prdt_media_core::{EncodeError, EncodedPacket, Encoder};
+#[cfg(any(
+    feature = "ffmpeg-encode-hevc-vaapi-any",
+    feature = "ffmpeg-encode-hevc-nvenc-any"
+))]
 use prdt_media_sw::I420Frame;
 
+#[cfg(any(
+    feature = "ffmpeg-decode-hevc-sw-any",
+    feature = "ffmpeg-decode-hevc-vaapi-any",
+    feature = "ffmpeg-decode-hevc-nvdec-any",
+))]
+use prdt_media_core::{DecodeError, Nv12Frame};
+
+#[cfg(any(
+    feature = "ffmpeg-decode-hevc-sw-any",
+    feature = "ffmpeg-decode-hevc-vaapi-any",
+    feature = "ffmpeg-decode-hevc-nvdec-any",
+))]
+use crate::decoder_common::HevcDecoderBackend;
+#[cfg(feature = "ffmpeg-decode-hevc-nvdec-any")]
+use crate::hevc_nvdec_decoder::HevcNvdecFfmpegDecoder;
 #[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
 use crate::hevc_nvenc_encoder::HevcNvencFfmpegEncoder;
+#[cfg(feature = "ffmpeg-decode-hevc-sw-any")]
+use crate::hevc_sw_decoder::HevcSwFfmpegDecoder;
+#[cfg(feature = "ffmpeg-decode-hevc-vaapi-any")]
+use crate::hevc_vaapi_decoder::HevcVaapiFfmpegDecoder;
 #[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
 use crate::hevc_vaapi_encoder::HevcVaapiFfmpegEncoder;
 
@@ -72,6 +99,53 @@ impl Encoder for HevcNvencFfmpegEncoderAdapter {
     }
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Decode side (P2). One generic adapter parameterised over `HevcDecoderBackend`
+// — per Option O1 in the plan, the three backends share a uniform interface
+// (unlike the encoders, where bitrate-control divergence justified per-backend
+// structs), so collapsing the adapter to a single generic saves ~50 LoC and
+// paves the way for P2.5's GPU-to-GPU path (the trait can grow a
+// `drain_hw_frame` method later without touching this layer).
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Thin wrapper holding any `HevcDecoderBackend`, plus the `Send` impl the
+/// viewer needs to keep the consumer state inside a `tokio::sync::Mutex`.
+#[cfg(any(
+    feature = "ffmpeg-decode-hevc-sw-any",
+    feature = "ffmpeg-decode-hevc-vaapi-any",
+    feature = "ffmpeg-decode-hevc-nvdec-any",
+))]
+pub struct HevcDecoderAdapter<B: HevcDecoderBackend>(pub B);
+
+#[cfg(any(
+    feature = "ffmpeg-decode-hevc-sw-any",
+    feature = "ffmpeg-decode-hevc-vaapi-any",
+    feature = "ffmpeg-decode-hevc-nvdec-any",
+))]
+impl<B: HevcDecoderBackend> HevcDecoderAdapter<B> {
+    /// Feed one Annex-B access unit. Defers to the backend; the unsafe
+    /// libavcodec calls live one layer below this adapter.
+    pub fn feed_packet(&mut self, packet: &[u8], pts_us: u64) -> Result<(), DecodeError> {
+        self.0.feed_packet(packet, pts_us)
+    }
+
+    /// Pull a decoded NV12 frame if one is ready.
+    pub fn drain_frame(&mut self) -> Result<Option<Nv12Frame>, DecodeError> {
+        self.0.drain_frame()
+    }
+
+    pub fn backend_name(&self) -> &'static str {
+        self.0.backend_name()
+    }
+}
+
+#[cfg(feature = "ffmpeg-decode-hevc-sw-any")]
+pub type HevcSwFfmpegDecoderAdapter = HevcDecoderAdapter<HevcSwFfmpegDecoder>;
+#[cfg(feature = "ffmpeg-decode-hevc-vaapi-any")]
+pub type HevcVaapiFfmpegDecoderAdapter = HevcDecoderAdapter<HevcVaapiFfmpegDecoder>;
+#[cfg(feature = "ffmpeg-decode-hevc-nvdec-any")]
+pub type HevcNvdecFfmpegDecoderAdapter = HevcDecoderAdapter<HevcNvdecFfmpegDecoder>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,5 +164,11 @@ mod tests {
         // Compile-time assertion: HevcNvencFfmpegEncoderAdapter implements Encoder<Frame=I420Frame>.
         fn _accepts_encoder<E: Encoder<Frame = I420Frame>>(_e: &mut E) {}
         let _ = std::marker::PhantomData::<HevcNvencFfmpegEncoderAdapter>;
+    }
+
+    #[cfg(feature = "ffmpeg-decode-hevc-sw-any")]
+    #[test]
+    fn sw_decoder_adapter_compiles() {
+        let _ = std::marker::PhantomData::<HevcSwFfmpegDecoderAdapter>;
     }
 }

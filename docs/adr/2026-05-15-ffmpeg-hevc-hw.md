@@ -285,6 +285,65 @@ BGRA→NV12 conversion is a larger fraction of the per-frame budget. Tracked sep
 
 ---
 
+## Decode side (P2)
+
+P2 plugs three HEVC decode backends into the Linux viewer (`crates/viewer`) behind the
+same disjoint Cargo feature shape as the encode side.
+
+### Backend selection (R3 — deliberate inversion vs. encode)
+
+The `--decoder auto` resolution order for H.265 on Linux is **VAAPI → NVDEC → SW**,
+deliberately inverted from the encode side's NVENC-first order. Rationale: decode is
+power-bound on hybrid laptops; an Intel/AMD iGPU draws ~5 W at 1080p60 decode versus
+~25 W for a discrete NVIDIA GPU at the same workload. Waking the dGPU for decode also
+disables panel self-refresh and adds PCIe traversal for the CPU readback — net cost is
+disproportionate for a workload the iGPU handles trivially.
+
+`PRDT_PREFER_NVDEC=1` (truthy: `{1,true,yes,on}`, case-insensitive; mirrors
+`PRDT_PREFER_NVENC` spec verbatim) flips to NVDEC-first for users on desktops or
+always-plugged-in machines. Reason strings in the structured log (`preferred-over-nvdec`,
+`preferred-over-vaapi-by-env`) make the inversion auditable.
+
+### SW HEVC 4K60 disclosure (R7)
+
+> **SW HEVC backend handles 1080p60 within the latency budget on a modern CPU
+> (i7-12700 / Ryzen 7700 or better). 4K60 SW decode is functional but consumes
+> 70–100% of a core per stream and exceeds the per-frame latency target; users on
+> 4K60 should select VAAPI (Intel/AMD iGPU) or NVDEC (NVIDIA dGPU).**
+
+### NV12 carrier
+
+All three decode backends output NV12 8-bit (the codec's native format after
+`av_hwframe_transfer_data` readback for the HW backends; the SW backend pins
+`pix_fmt = AV_PIX_FMT_NV12` directly). `PlatformFrame` on Linux gains an `Nv12`
+variant alongside the existing `I420` variant; the renderer adds a parallel
+`nv12_to_bgra` blit. The OpenH264 H.264 `I420` path is byte-for-byte unchanged.
+
+### Regression-safety (A12)
+
+The P2 destructure surgery at `viewer/src/lib.rs:2137` rewrote the irrefutable
+`let PlatformConsumer::Openh264 { .. } = &mut *c;` into a full `match &mut *c` to
+accommodate the three new variants. A12.b provides the regression guard: a unit test
+in `crates/viewer/src/platform/linux.rs` encodes a 320×240 I420 IDR with
+`Openh264Encoder` and feeds the NAL units through the rewritten
+`PlatformConsumer::Openh264` match arm, asserting `latest` becomes
+`Some(Arc<I420Frame>)` with correct plane dimensions. No winit/softbuffer surface is
+required; the test exercises only the decoder arm.
+
+### Follow-ups (P2)
+
+- **F1-P2 (P2.5)** — GPU-to-GPU zero-copy on decode: extend the Linux renderer to
+  consume `AV_PIX_FMT_VAAPI` and `AV_PIX_FMT_CUDA` surfaces directly, removing the
+  per-frame `hw_download` readback.
+- **F2-P2 (release tag)** — NVDEC + VAAPI HW decode smoke on a runner with real HW
+  (A4/A11 deferrals from P2).
+- **F3-P2 (release tag)** — Bench-matrix Linux port: measure HEVC-decode latency
+  contribution at 1080p60 and 4K60 for all three backends.
+- **F4-P2** — Windows D3D11VA HEVC decode via FFmpeg as a fallback for non-NVIDIA
+  Windows boxes without MF HEVC Extensions (P3).
+
+---
+
 ## Follow-ups
 
 - **F1** — When a third backend lands (P4 `hevc_qsv`), revisit `HwDevice<Kind>` generic and/or

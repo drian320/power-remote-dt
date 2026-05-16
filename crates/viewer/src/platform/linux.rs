@@ -16,6 +16,12 @@ use prdt_input_linux::{
     MAX_CLIPBOARD_BYTES as _INPUT_LINUX_MAX,
 };
 use prdt_media_linux::i420_to_bgra::i420_to_bgra;
+#[cfg(any(
+    feature = "ffmpeg-decode-hevc-sw-any",
+    feature = "ffmpeg-decode-hevc-vaapi-any",
+    feature = "ffmpeg-decode-hevc-nvdec-any"
+))]
+use prdt_media_linux::Nv12Frame;
 use prdt_media_sw::{I420Frame, Openh264Decoder};
 use prdt_protocol::{frame::Codec, MonitorRect};
 use winit::window::Window;
@@ -23,16 +29,48 @@ use winit::window::Window;
 /// Re-exported max clipboard bytes; identical value across OSes.
 pub const MAX_CLIPBOARD_BYTES: usize = _INPUT_LINUX_MAX;
 
-/// Per-OS decoded frame. Linux only has the I420 (CPU) path for L1.5b.
+/// Per-OS decoded frame. Pre-P2 Linux had only the I420 (OpenH264) path;
+/// P2 adds an NV12 variant for the three FFmpeg HEVC decode backends so
+/// the renderer can blit NV12 → BGRA without an intermediate I420
+/// conversion. The I420 H.264 path stays untouched.
 pub enum PlatformFrame {
     I420(Arc<I420Frame>),
+    #[cfg(any(
+        feature = "ffmpeg-decode-hevc-sw-any",
+        feature = "ffmpeg-decode-hevc-vaapi-any",
+        feature = "ffmpeg-decode-hevc-nvdec-any"
+    ))]
+    Nv12(Arc<Nv12Frame>),
 }
 
-/// Per-OS decoder/consumer.
+/// Per-OS decoder/consumer. Pre-P2 Linux had only the Openh264 arm; P2
+/// adds three FFmpeg HEVC backends, each behind its own feature gate so
+/// the exhaustive `match` over `PlatformConsumer` in `recv_task` stays
+/// well-defined for any subset of compiled backends. The Openh264 arm
+/// preserves byte-for-byte semantics (the H.264 hot path is sacrosanct
+/// per the P2 plan's regression-safety principle).
 pub enum PlatformConsumer {
     Openh264 {
         decoder: Openh264Decoder,
         latest: Option<Arc<I420Frame>>,
+        needs_idr: bool,
+    },
+    #[cfg(feature = "ffmpeg-decode-hevc-sw-any")]
+    FfmpegHevcSw {
+        decoder: prdt_media_linux::HevcSwFfmpegDecoderAdapter,
+        latest: Option<Arc<Nv12Frame>>,
+        needs_idr: bool,
+    },
+    #[cfg(feature = "ffmpeg-decode-hevc-vaapi-any")]
+    FfmpegHevcVaapi {
+        decoder: prdt_media_linux::HevcVaapiFfmpegDecoderAdapter,
+        latest: Option<Arc<Nv12Frame>>,
+        needs_idr: bool,
+    },
+    #[cfg(feature = "ffmpeg-decode-hevc-nvdec-any")]
+    FfmpegHevcNvdec {
+        decoder: prdt_media_linux::HevcNvdecFfmpegDecoderAdapter,
+        latest: Option<Arc<Nv12Frame>>,
         needs_idr: bool,
     },
 }
@@ -100,17 +138,36 @@ pub fn build_render(
     })
 }
 
-/// Build the consumer for the negotiated codec. Linux only supports
-/// openh264 (CPU H.264). HW backends and H.265 are rejected (caller
-/// upstream — `choose_decoder` in lib.rs — should already prevent these,
-/// but defense-in-depth is cheap here).
+/// Build the consumer for the negotiated codec. Pre-P2 Linux only
+/// supported openh264 (CPU H.264). P2 adds three opt-in FFmpeg HEVC
+/// backends (sw / vaapi / nvdec) for the H.265 path; each is reachable
+/// either by an explicit `--decoder ffmpeg-{sw,vaapi,nvdec}-hevc` arg
+/// or via `--decoder auto` when only one HEVC backend is compiled in.
+/// The OpenH264 H.264 arm is byte-for-byte unchanged.
 pub fn build_consumer(
     decoder_arg: &str,
     codec: Codec,
-    _width: u32,
-    _height: u32,
+    #[cfg_attr(
+        not(any(
+            feature = "ffmpeg-decode-hevc-sw-any",
+            feature = "ffmpeg-decode-hevc-vaapi-any",
+            feature = "ffmpeg-decode-hevc-nvdec-any"
+        )),
+        allow(unused_variables)
+    )]
+    width: u32,
+    #[cfg_attr(
+        not(any(
+            feature = "ffmpeg-decode-hevc-sw-any",
+            feature = "ffmpeg-decode-hevc-vaapi-any",
+            feature = "ffmpeg-decode-hevc-nvdec-any"
+        )),
+        allow(unused_variables)
+    )]
+    height: u32,
 ) -> Result<PlatformConsumer, super::ConsumerError> {
     match (decoder_arg, codec) {
+        // ── H.264 hot path (SACROSANCT — must not change) ──────────────────
         ("openh264" | "auto", Codec::H264) => {
             let dec = Openh264Decoder::new()
                 .map_err(|e| super::ConsumerError::Init(format!("Openh264Decoder::new: {e}")))?;
@@ -120,25 +177,218 @@ pub fn build_consumer(
                 needs_idr: true,
             })
         }
+        // ── P2 HEVC dispatch ───────────────────────────────────────────────
+        #[cfg(feature = "ffmpeg-decode-hevc-sw-any")]
+        ("ffmpeg-sw-hevc", Codec::H265) => {
+            let dec = prdt_media_linux::build_ffmpeg_sw_hevc_decoder(width, height)
+                .map_err(|e| super::ConsumerError::Init(format!("ffmpeg-sw-hevc: {e}")))?;
+            Ok(PlatformConsumer::FfmpegHevcSw {
+                decoder: dec,
+                latest: None,
+                needs_idr: true,
+            })
+        }
+        #[cfg(feature = "ffmpeg-decode-hevc-vaapi-any")]
+        ("ffmpeg-vaapi-hevc", Codec::H265) => {
+            let dec = prdt_media_linux::build_ffmpeg_vaapi_hevc_decoder(width, height)
+                .map_err(|e| super::ConsumerError::Init(format!("ffmpeg-vaapi-hevc: {e}")))?;
+            Ok(PlatformConsumer::FfmpegHevcVaapi {
+                decoder: dec,
+                latest: None,
+                needs_idr: true,
+            })
+        }
+        #[cfg(feature = "ffmpeg-decode-hevc-nvdec-any")]
+        ("ffmpeg-nvdec-hevc", Codec::H265) => {
+            let dec = prdt_media_linux::build_ffmpeg_nvdec_hevc_decoder(width, height)
+                .map_err(|e| super::ConsumerError::Init(format!("ffmpeg-nvdec-hevc: {e}")))?;
+            Ok(PlatformConsumer::FfmpegHevcNvdec {
+                decoder: dec,
+                latest: None,
+                needs_idr: true,
+            })
+        }
+        #[cfg(any(
+            feature = "ffmpeg-decode-hevc-sw-any",
+            feature = "ffmpeg-decode-hevc-vaapi-any",
+            feature = "ffmpeg-decode-hevc-nvdec-any"
+        ))]
+        ("auto", Codec::H265) => {
+            let pick = resolve_auto_decode_hevc();
+            build_consumer(pick, Codec::H265, width, height)
+        }
+        // ── Reject everything else ─────────────────────────────────────────
         (other_decoder, other_codec) => Err(super::ConsumerError::Init(format!(
-            "unsupported decoder/codec on Linux: decoder={other_decoder}, codec={other_codec:?} (Linux supports openh264+H264 only)"
+            "unsupported decoder/codec on Linux: decoder={other_decoder}, codec={other_codec:?} \
+             (Linux supports openh264+H264 plus opt-in ffmpeg-*-hevc backends for H265)"
         ))),
+    }
+}
+
+/// Pick a HEVC decode backend based on compiled features + the
+/// `PRDT_PREFER_NVDEC` env var. Priority order (deliberately inverted
+/// vs encode-side `PRDT_PREFER_NVENC`): VAAPI → NVDEC → SW. Reason:
+/// decode is power-bound on hybrid laptops; iGPU at ~5 W beats dGPU at
+/// ~25 W at the same workload, and waking the dGPU disables panel
+/// self-refresh + delays its return to idle. `PRDT_PREFER_NVDEC=1`
+/// (truthy: `{1,true,yes,on}` case-insensitive) flips to NVDEC for
+/// users on desktops / always-plugged-in machines.
+#[cfg(any(
+    feature = "ffmpeg-decode-hevc-sw-any",
+    feature = "ffmpeg-decode-hevc-vaapi-any",
+    feature = "ffmpeg-decode-hevc-nvdec-any"
+))]
+// `return` keeps the function single-expression across every cfg
+// combination — without it the cascade of cfg-gated branches needs a
+// trailing `unreachable!()` that's actually reachable depending on
+// feature set.
+#[allow(clippy::needless_return)]
+fn resolve_auto_decode_hevc() -> &'static str {
+    let prefer_nvdec = std::env::var("PRDT_PREFER_NVDEC")
+        .ok()
+        .map(|v| {
+            let lc = v.to_ascii_lowercase();
+            matches!(lc.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false);
+
+    #[cfg(all(
+        feature = "ffmpeg-decode-hevc-vaapi-any",
+        feature = "ffmpeg-decode-hevc-nvdec-any"
+    ))]
+    {
+        if prefer_nvdec {
+            tracing::info!(
+                target: "video.pipeline",
+                decoder = "ffmpeg-nvdec-hevc",
+                selected_by = "auto",
+                reason = "preferred-over-vaapi-by-env",
+                "video decoder selected"
+            );
+            return "ffmpeg-nvdec-hevc";
+        }
+        tracing::info!(
+            target: "video.pipeline",
+            decoder = "ffmpeg-vaapi-hevc",
+            selected_by = "auto",
+            reason = "preferred-over-nvdec",
+            "video decoder selected"
+        );
+        return "ffmpeg-vaapi-hevc";
+    }
+    // Single-backend builds: the cfg cascade below picks the only one
+    // that's compiled in. The `prefer_nvdec` env var is silently ignored
+    // when its target backend isn't available.
+    #[cfg(all(
+        feature = "ffmpeg-decode-hevc-vaapi-any",
+        not(feature = "ffmpeg-decode-hevc-nvdec-any")
+    ))]
+    {
+        let _ = prefer_nvdec;
+        tracing::info!(
+            target: "video.pipeline",
+            decoder = "ffmpeg-vaapi-hevc",
+            selected_by = "auto",
+            reason = "only-vaapi-compiled",
+            "video decoder selected"
+        );
+        return "ffmpeg-vaapi-hevc";
+    }
+    #[cfg(all(
+        feature = "ffmpeg-decode-hevc-nvdec-any",
+        not(feature = "ffmpeg-decode-hevc-vaapi-any")
+    ))]
+    {
+        let _ = prefer_nvdec;
+        tracing::info!(
+            target: "video.pipeline",
+            decoder = "ffmpeg-nvdec-hevc",
+            selected_by = "auto",
+            reason = "only-nvdec-compiled",
+            "video decoder selected"
+        );
+        return "ffmpeg-nvdec-hevc";
+    }
+    #[cfg(all(
+        feature = "ffmpeg-decode-hevc-sw-any",
+        not(feature = "ffmpeg-decode-hevc-vaapi-any"),
+        not(feature = "ffmpeg-decode-hevc-nvdec-any")
+    ))]
+    {
+        let _ = prefer_nvdec;
+        tracing::info!(
+            target: "video.pipeline",
+            decoder = "ffmpeg-sw-hevc",
+            selected_by = "auto",
+            reason = "only-sw-compiled",
+            "video decoder selected"
+        );
+        "ffmpeg-sw-hevc"
     }
 }
 
 /// Present one decoded frame on the existing render state. Lazily
 /// resizes the softbuffer surface to match the stream size on first
 /// frame or stream-size change.
+///
+/// P2 rewrite: the body used to live inside an irrefutable
+/// `let PlatformFrame::I420(..) = f;` binding. With the new
+/// `PlatformFrame::Nv12` variant the destructure has to become a
+/// `match`. The I420 arm is byte-for-byte identical to the pre-P2 body
+/// (stream-size resize, i420_to_bgra, cursor composite, present); the
+/// new Nv12 arm reuses the same scratch/cursor/present blocks and only
+/// swaps the color-conversion helper.
 pub fn present_frame(
     r: &mut PlatformRender,
     f: &PlatformFrame,
     _decoder_label: &str,
     shared: &crate::ViewerShared,
 ) -> Result<(), super::RenderError> {
-    let PlatformFrame::I420(i420) = f;
-    let stream_w = i420.width;
-    let stream_h = i420.height;
+    match f {
+        PlatformFrame::I420(i420) => {
+            let stream_w = i420.width;
+            let stream_h = i420.height;
 
+            resize_surface_if_needed(r, stream_w, stream_h)?;
+
+            // I420 → BGRA via the existing helper (BT.709 limited-range,
+            // alpha 0xFF). Output layout matches softbuffer's LE u32 expectation
+            // (B in lowest byte, A=0xFF in highest).
+            i420_to_bgra(i420, &mut r.scratch_bgra);
+
+            composite_cursor(r, shared, stream_w, stream_h);
+            blit_scratch_to_surface(r)?;
+        }
+        #[cfg(any(
+            feature = "ffmpeg-decode-hevc-sw-any",
+            feature = "ffmpeg-decode-hevc-vaapi-any",
+            feature = "ffmpeg-decode-hevc-nvdec-any"
+        ))]
+        PlatformFrame::Nv12(nv12) => {
+            let stream_w = nv12.width;
+            let stream_h = nv12.height;
+
+            resize_surface_if_needed(r, stream_w, stream_h)?;
+
+            nv12_to_bgra(nv12, &mut r.scratch_bgra);
+
+            composite_cursor(r, shared, stream_w, stream_h);
+            blit_scratch_to_surface(r)?;
+        }
+    }
+
+    let _ = &r.window; // suppress unused-field warning; kept to extend Surface lifetime
+    Ok(())
+}
+
+/// Resize the softbuffer surface and BGRA scratch buffer when the stream
+/// dimensions change. Extracted from the pre-P2 `present_frame` body so
+/// both the I420 and NV12 arms can share the path.
+fn resize_surface_if_needed(
+    r: &mut PlatformRender,
+    stream_w: u32,
+    stream_h: u32,
+) -> Result<(), super::RenderError> {
     if r.last_size != (stream_w, stream_h) {
         let nz_w = NonZeroU32::new(stream_w.max(1)).expect("non-zero stream width");
         let nz_h = NonZeroU32::new(stream_h.max(1)).expect("non-zero stream height");
@@ -148,15 +398,18 @@ pub fn present_frame(
         r.scratch_bgra.resize((stream_w * stream_h * 4) as usize, 0);
         r.last_size = (stream_w, stream_h);
     }
+    Ok(())
+}
 
-    // I420 → BGRA via the existing helper (BT.709 limited-range,
-    // alpha 0xFF). Output layout matches softbuffer's LE u32 expectation
-    // (B in lowest byte, A=0xFF in highest).
-    i420_to_bgra(i420, &mut r.scratch_bgra);
-
-    // P5B-2b: cursor composite (Linux softbuffer).
-    // Lock briefly, copy out the values we need, then drop the lock before
-    // the blend to avoid holding it across the CPU operation.
+/// Composite the cursor bitmap (if any) onto `r.scratch_bgra`. P5B-2b:
+/// briefly take the cursor lock, copy out the values we need, then drop
+/// the lock before the blend so we don't hold it across the CPU op.
+fn composite_cursor(
+    r: &mut PlatformRender,
+    shared: &crate::ViewerShared,
+    stream_w: u32,
+    stream_h: u32,
+) {
     if let Ok(s) = shared.cursor.lock() {
         if s.visible() {
             if let Some(bmp) = s.bitmap() {
@@ -179,7 +432,10 @@ pub fn present_frame(
             }
         }
     }
+}
 
+/// Blit `r.scratch_bgra` into the softbuffer surface and present.
+fn blit_scratch_to_surface(r: &mut PlatformRender) -> Result<(), super::RenderError> {
     let mut buf = r
         .surface
         .buffer_mut()
@@ -189,9 +445,51 @@ pub fn present_frame(
     buf_bytes.copy_from_slice(&r.scratch_bgra);
     buf.present()
         .map_err(|e| super::RenderError::Present(format!("Surface::present: {e}")))?;
-
-    let _ = &r.window; // suppress unused-field warning; kept to extend Surface lifetime
     Ok(())
+}
+
+/// NV12 (Y plane + interleaved UV plane) → BGRA. BT.709 limited-range,
+/// alpha 0xFF. Sibling of `i420_to_bgra`; same coefficients, just an
+/// interleaved chroma layout (UV byte at offset 0 = U, +1 = V).
+#[cfg(any(
+    feature = "ffmpeg-decode-hevc-sw-any",
+    feature = "ffmpeg-decode-hevc-vaapi-any",
+    feature = "ffmpeg-decode-hevc-nvdec-any"
+))]
+fn nv12_to_bgra(nv12: &Nv12Frame, out_bgra: &mut [u8]) {
+    let w = nv12.width as usize;
+    let h = nv12.height as usize;
+    debug_assert_eq!(out_bgra.len(), w * h * 4);
+    let y_stride = nv12.stride_y as usize;
+    let uv_stride = nv12.stride_uv as usize;
+    for j in 0..h {
+        for i in 0..w {
+            let y = nv12.y[j * y_stride + i] as i32;
+            let uv_row = (j / 2) * uv_stride;
+            let uv_col = (i / 2) * 2;
+            let u = nv12.uv[uv_row + uv_col] as i32 - 128;
+            let v = nv12.uv[uv_row + uv_col + 1] as i32 - 128;
+            // Matches i420_to_bgra: BT.709 coefficients, full-range arithmetic.
+            let r = y + ((1793 * v) >> 10);
+            let g = y - ((534 * u + 213 * v) >> 10);
+            let b = y + ((2115 * u) >> 10);
+            let off = (j * w + i) * 4;
+            out_bgra[off] = r_clamp(b);
+            out_bgra[off + 1] = r_clamp(g);
+            out_bgra[off + 2] = r_clamp(r);
+            out_bgra[off + 3] = 0xFF;
+        }
+    }
+}
+
+#[cfg(any(
+    feature = "ffmpeg-decode-hevc-sw-any",
+    feature = "ffmpeg-decode-hevc-vaapi-any",
+    feature = "ffmpeg-decode-hevc-nvdec-any"
+))]
+#[inline]
+fn r_clamp(v: i32) -> u8 {
+    v.clamp(0, 255) as u8
 }
 
 /// CPU alpha-blend a BGRA source rectangle onto a BGRA destination
@@ -337,12 +635,22 @@ mod tests {
         assert_eq!(dst[4..8], [0, 0, 0, 0], "(1,0) unchanged");
     }
 
+    /// Pre-P2 the viewer rejected every H.265 stream because no HEVC
+    /// decoder was wired in. When any of the P2 ffmpeg-decode-hevc-*
+    /// features are compiled in, that hard reject is lifted, so the
+    /// "rejects H.265" assertion only holds in builds with zero HEVC
+    /// backends. A12.a regression-guard: the OpenH264 H.264 arm is
+    /// untouched either way.
+    #[cfg(not(any(
+        feature = "ffmpeg-decode-hevc-sw-any",
+        feature = "ffmpeg-decode-hevc-vaapi-any",
+        feature = "ffmpeg-decode-hevc-nvdec-any"
+    )))]
     #[test]
     fn linux_build_consumer_rejects_h265() {
         let err = expect_err(build_consumer("auto", Codec::H265, 1920, 1080));
         assert!(
-            err.to_string()
-                .contains("Linux supports openh264+H264 only"),
+            err.to_string().contains("unsupported decoder/codec"),
             "unexpected error string: {err}"
         );
     }
@@ -359,6 +667,10 @@ mod tests {
             .contains("unsupported decoder/codec on Linux"));
     }
 
+    /// A12.a regression-guard: the OpenH264 H.264 arm of `build_consumer`
+    /// must still return `PlatformConsumer::Openh264` with `needs_idr =
+    /// true` when an explicit `--decoder openh264` is requested,
+    /// regardless of whether any P2 HEVC features are compiled in.
     #[test]
     fn linux_build_consumer_accepts_openh264_h264() {
         let c = build_consumer("openh264", Codec::H264, 1920, 1080).expect("should accept");
@@ -366,14 +678,140 @@ mod tests {
             PlatformConsumer::Openh264 { needs_idr, .. } => {
                 assert!(needs_idr, "fresh consumer should request IDR");
             }
+            #[allow(unreachable_patterns)]
+            _ => panic!("expected Openh264 variant; P2 HEVC dispatch must not steal H264"),
         }
     }
 
+    /// A12.a regression-guard: the `("auto", Codec::H264)` row must keep
+    /// dispatching to OpenH264 even with all three P2 HEVC features
+    /// compiled in (the H265 `auto` branch must not steal the H264 row).
     #[test]
     fn linux_build_consumer_auto_picks_openh264() {
         let c = build_consumer("auto", Codec::H264, 1920, 1080).expect("should accept");
         match c {
             PlatformConsumer::Openh264 { .. } => {}
+            #[allow(unreachable_patterns)]
+            _ => panic!("expected Openh264 variant; auto/H264 must not steal into HEVC dispatch"),
         }
+    }
+
+    /// A12.b — H.264 round-trip regression guard.
+    ///
+    /// Mirrors `openh264_decoder_accepts_self_encoded_stream` at
+    /// `crates/media-sw/src/decoder.rs:95`. Exercises the rewritten
+    /// `PlatformConsumer::Openh264` arm (the match arm that the P2
+    /// destructure surgery moved into a `match &mut *c` in
+    /// `crates/viewer/src/lib.rs:2137`): encode a small I420 frame →
+    /// feed NAL units through the same `decoder.decode(&nal_units)` path
+    /// → assert `latest` becomes `Some(Arc<I420Frame>)` with correct
+    /// plane dimensions. No winit/softbuffer surface is needed; this is
+    /// purely a decoder-arm unit test.
+    #[test]
+    fn a12b_openh264_round_trip_through_platform_consumer() {
+        use prdt_media_sw::traits::SwH264Decoder as _;
+        use prdt_media_sw::traits::SwH264Encoder as _;
+        use prdt_media_sw::{I420Frame, Openh264Encoder, Openh264EncoderConfig};
+
+        let w = 320u32;
+        let h = 240u32;
+
+        // Build the consumer the same way build_consumer() does for openh264/H264.
+        let mut c = build_consumer("openh264", Codec::H264, w, h).expect("build_consumer failed");
+
+        // Sanity: fresh consumer has needs_idr=true and latest=None.
+        match c {
+            PlatformConsumer::Openh264 {
+                needs_idr,
+                ref latest,
+                ..
+            } => {
+                assert!(needs_idr, "fresh consumer must start with needs_idr=true");
+                assert!(
+                    latest.is_none(),
+                    "fresh consumer must start with latest=None"
+                );
+            }
+            #[allow(unreachable_patterns)]
+            _ => panic!("expected Openh264 variant"),
+        }
+
+        // Encode a minimal I420 frame to obtain NAL units.
+        let cfg = Openh264EncoderConfig {
+            width: w,
+            height: h,
+            target_bitrate_bps: 500_000,
+            max_fps: 30.0,
+        };
+        let mut enc = Openh264Encoder::new(cfg).expect("encoder init");
+        let frame = {
+            let mut f = I420Frame::new_packed(w, h).expect("I420Frame alloc");
+            let stride_y = f.stride_y as usize;
+            for row in 0..(h as usize) {
+                for col in 0..(w as usize) {
+                    f.y[row * stride_y + col] = ((col + row) & 0xFF) as u8;
+                }
+            }
+            for b in f.u.iter_mut() {
+                *b = 128;
+            }
+            for b in f.v.iter_mut() {
+                *b = 128;
+            }
+            f
+        };
+
+        // Feed up to 3 IDR frames through the Openh264 arm of the match,
+        // exactly mirroring what recv_task's match arm does.
+        let (decoder, latest, needs_idr) = match c {
+            PlatformConsumer::Openh264 {
+                ref mut decoder,
+                ref mut latest,
+                ref mut needs_idr,
+            } => (decoder, latest, needs_idr),
+            #[allow(unreachable_patterns)]
+            _ => panic!("expected Openh264 variant"),
+        };
+
+        let mut got_frame = false;
+        for i in 0..3u64 {
+            let ef = enc.encode(&frame, i == 0, i * 33_000).expect("encode");
+            // This is exactly the match arm body from recv_task (lib.rs:2143–2162).
+            match decoder.decode(&ef.nal_units) {
+                Ok(Some(i420)) => {
+                    let arc = std::sync::Arc::new(i420);
+                    *latest = Some(std::sync::Arc::clone(&arc));
+                    *needs_idr = false;
+                    got_frame = true;
+                    break;
+                }
+                Ok(None) => {}
+                Err(e) => panic!("openh264 decode failed: {e}"),
+            }
+        }
+
+        assert!(got_frame, "decoder produced no frame after 3 inputs");
+        let decoded = latest.as_ref().expect("latest must be Some after decode");
+        assert_eq!(decoded.width, w);
+        assert_eq!(decoded.height, h);
+        assert_eq!(
+            decoded.y.len(),
+            (decoded.stride_y as usize) * (h as usize),
+            "Y plane size mismatch"
+        );
+        assert_eq!(
+            decoded.u.len(),
+            (decoded.stride_uv as usize) * (h as usize / 2),
+            "U plane size mismatch"
+        );
+        assert_eq!(
+            decoded.v.len(),
+            (decoded.stride_uv as usize) * (h as usize / 2),
+            "V plane size mismatch"
+        );
+        assert!(
+            !*needs_idr,
+            "needs_idr must be cleared after successful decode"
+        );
     }
 }

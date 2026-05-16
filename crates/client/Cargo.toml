@@ -45,5 +45,21 @@ ffmpeg-encode-hevc-nvenc = ["prdt-host/ffmpeg-encode-hevc-nvenc"]
 ffmpeg-encode-hevc-nvenc-ffmpeg5 = ["prdt-host/ffmpeg-encode-hevc-nvenc-ffmpeg5"]
 ffmpeg-encode-hevc-nvenc-ffmpeg7 = ["prdt-host/ffmpeg-encode-hevc-nvenc-ffmpeg7"]
 
+# P2 — HEVC decode forwarded onto prdt-host (which forwards onto
+# prdt-media-linux). The unified `prdt` binary can then be built with e.g.
+# `cargo build -p prdt-client --features ffmpeg-decode-hevc-vaapi-ffmpeg5`.
+ffmpeg-decode-hevc-sw = ["prdt-host/ffmpeg-decode-hevc-sw"]
+ffmpeg-decode-hevc-sw-ffmpeg5 = ["prdt-host/ffmpeg-decode-hevc-sw-ffmpeg5"]
+ffmpeg-decode-hevc-sw-ffmpeg6 = ["prdt-host/ffmpeg-decode-hevc-sw-ffmpeg6"]
+ffmpeg-decode-hevc-sw-ffmpeg7 = ["prdt-host/ffmpeg-decode-hevc-sw-ffmpeg7"]
+ffmpeg-decode-hevc-vaapi = ["prdt-host/ffmpeg-decode-hevc-vaapi"]
+ffmpeg-decode-hevc-vaapi-ffmpeg5 = ["prdt-host/ffmpeg-decode-hevc-vaapi-ffmpeg5"]
+ffmpeg-decode-hevc-vaapi-ffmpeg6 = ["prdt-host/ffmpeg-decode-hevc-vaapi-ffmpeg6"]
+ffmpeg-decode-hevc-vaapi-ffmpeg7 = ["prdt-host/ffmpeg-decode-hevc-vaapi-ffmpeg7"]
+ffmpeg-decode-hevc-nvdec = ["prdt-host/ffmpeg-decode-hevc-nvdec"]
+ffmpeg-decode-hevc-nvdec-ffmpeg5 = ["prdt-host/ffmpeg-decode-hevc-nvdec-ffmpeg5"]
+ffmpeg-decode-hevc-nvdec-ffmpeg6 = ["prdt-host/ffmpeg-decode-hevc-nvdec-ffmpeg6"]
+ffmpeg-decode-hevc-nvdec-ffmpeg7 = ["prdt-host/ffmpeg-decode-hevc-nvdec-ffmpeg7"]
+
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"

@@ -21,6 +21,11 @@ prdt-protocol = { path = "../protocol" }
 # know about. Gate it behind a `vaapi-h264` feature (default-on for Ubuntu
 # / Debian bookworm CI) so Arch users can opt out with `--no-default-features`.
 prdt-media-vaapi = { path = "../media-vaapi", optional = true }
+# Optional pull of prdt-media-ffmpeg so the viewer's HEVC decode backends
+# (sw / vaapi / nvdec) can be reached through the existing prdt-media-linux
+# dep edge without adding a new prdt-media-ffmpeg dep at the viewer crate
+# boundary. Activated by the ffmpeg-decode-hevc-* features below.
+prdt-media-ffmpeg = { path = "../media-ffmpeg", optional = true }
 x11rb = { workspace = true, features = ["shm"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -62,6 +67,24 @@ default = ["vaapi-h264"]
 # Arch rolling); the FFmpeg HEVC VAAPI path in prdt-media-ffmpeg is
 # independent and stays available either way.
 vaapi-h264 = ["dep:prdt-media-vaapi"]
+
+# P2 — HEVC decode features forwarded onto prdt-media-ffmpeg. The viewer
+# subscribes to these via its own forwarded mirror (crates/viewer/Cargo.toml).
+ffmpeg-decode-hevc-sw = ["dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-decode-hevc-sw", "ffmpeg-decode-hevc-sw-any"]
+ffmpeg-decode-hevc-sw-ffmpeg5 = ["dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-decode-hevc-sw-ffmpeg5", "ffmpeg-decode-hevc-sw-any"]
+ffmpeg-decode-hevc-sw-ffmpeg6 = ["dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-decode-hevc-sw-ffmpeg6", "ffmpeg-decode-hevc-sw-any"]
+ffmpeg-decode-hevc-sw-ffmpeg7 = ["dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-decode-hevc-sw-ffmpeg7", "ffmpeg-decode-hevc-sw-any"]
+ffmpeg-decode-hevc-sw-any = []
+ffmpeg-decode-hevc-vaapi = ["dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-decode-hevc-vaapi", "ffmpeg-decode-hevc-vaapi-any"]
+ffmpeg-decode-hevc-vaapi-ffmpeg5 = ["dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-decode-hevc-vaapi-ffmpeg5", "ffmpeg-decode-hevc-vaapi-any"]
+ffmpeg-decode-hevc-vaapi-ffmpeg6 = ["dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-decode-hevc-vaapi-ffmpeg6", "ffmpeg-decode-hevc-vaapi-any"]
+ffmpeg-decode-hevc-vaapi-ffmpeg7 = ["dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-decode-hevc-vaapi-ffmpeg7", "ffmpeg-decode-hevc-vaapi-any"]
+ffmpeg-decode-hevc-vaapi-any = []
+ffmpeg-decode-hevc-nvdec = ["dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-decode-hevc-nvdec", "ffmpeg-decode-hevc-nvdec-any"]
+ffmpeg-decode-hevc-nvdec-ffmpeg5 = ["dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-decode-hevc-nvdec-ffmpeg5", "ffmpeg-decode-hevc-nvdec-any"]
+ffmpeg-decode-hevc-nvdec-ffmpeg6 = ["dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-decode-hevc-nvdec-ffmpeg6", "ffmpeg-decode-hevc-nvdec-any"]
+ffmpeg-decode-hevc-nvdec-ffmpeg7 = ["dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-decode-hevc-nvdec-ffmpeg7", "ffmpeg-decode-hevc-nvdec-any"]
+ffmpeg-decode-hevc-nvdec-any = []
 
 [[example]]
 name = "dump_enum_format"

@@ -52,5 +52,28 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 dirs = { workspace = true }
 
+[features]
+# P2 — HEVC decode features forwarded onto prdt-media-linux (which in turn
+# forwards onto prdt-media-ffmpeg). The viewer-side dispatch in
+# crates/viewer/src/{lib.rs, platform/linux.rs} gates the new
+# PlatformFrame::Nv12 / PlatformConsumer::FfmpegHevc* variants on the
+# matching `-any` markers, so each backend can be compiled independently
+# (sw-only / vaapi-only / nvdec-only) and the cfg cascade stays exhaustive.
+ffmpeg-decode-hevc-sw = ["prdt-media-linux/ffmpeg-decode-hevc-sw", "ffmpeg-decode-hevc-sw-any"]
+ffmpeg-decode-hevc-sw-ffmpeg5 = ["prdt-media-linux/ffmpeg-decode-hevc-sw-ffmpeg5", "ffmpeg-decode-hevc-sw-any"]
+ffmpeg-decode-hevc-sw-ffmpeg6 = ["prdt-media-linux/ffmpeg-decode-hevc-sw-ffmpeg6", "ffmpeg-decode-hevc-sw-any"]
+ffmpeg-decode-hevc-sw-ffmpeg7 = ["prdt-media-linux/ffmpeg-decode-hevc-sw-ffmpeg7", "ffmpeg-decode-hevc-sw-any"]
+ffmpeg-decode-hevc-sw-any = []
+ffmpeg-decode-hevc-vaapi = ["prdt-media-linux/ffmpeg-decode-hevc-vaapi", "ffmpeg-decode-hevc-vaapi-any"]
+ffmpeg-decode-hevc-vaapi-ffmpeg5 = ["prdt-media-linux/ffmpeg-decode-hevc-vaapi-ffmpeg5", "ffmpeg-decode-hevc-vaapi-any"]
+ffmpeg-decode-hevc-vaapi-ffmpeg6 = ["prdt-media-linux/ffmpeg-decode-hevc-vaapi-ffmpeg6", "ffmpeg-decode-hevc-vaapi-any"]
+ffmpeg-decode-hevc-vaapi-ffmpeg7 = ["prdt-media-linux/ffmpeg-decode-hevc-vaapi-ffmpeg7", "ffmpeg-decode-hevc-vaapi-any"]
+ffmpeg-decode-hevc-vaapi-any = []
+ffmpeg-decode-hevc-nvdec = ["prdt-media-linux/ffmpeg-decode-hevc-nvdec", "ffmpeg-decode-hevc-nvdec-any"]
+ffmpeg-decode-hevc-nvdec-ffmpeg5 = ["prdt-media-linux/ffmpeg-decode-hevc-nvdec-ffmpeg5", "ffmpeg-decode-hevc-nvdec-any"]
+ffmpeg-decode-hevc-nvdec-ffmpeg6 = ["prdt-media-linux/ffmpeg-decode-hevc-nvdec-ffmpeg6", "ffmpeg-decode-hevc-nvdec-any"]
+ffmpeg-decode-hevc-nvdec-ffmpeg7 = ["prdt-media-linux/ffmpeg-decode-hevc-nvdec-ffmpeg7", "ffmpeg-decode-hevc-nvdec-any"]
+ffmpeg-decode-hevc-nvdec-any = []
+
 [dev-dependencies]
 tempfile = "3"
