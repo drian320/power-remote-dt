@@ -359,6 +359,12 @@ enum DecoderChoice {
     Nvdec,
     Mf,
     Openh264,
+    #[cfg(any(
+        feature = "ffmpeg-decode-hevc-sw-any",
+        feature = "ffmpeg-decode-hevc-vaapi-any",
+        feature = "ffmpeg-decode-hevc-nvdec-any"
+    ))]
+    FfmpegHevc,
 }
 
 /// Decide the concrete decoder backend given `--decoder`, the
@@ -366,6 +372,71 @@ enum DecoderChoice {
 /// preference. Returns the verbatim error string from plan §Phase 3
 /// on mismatch; the caller prints it and exits non-zero.
 ///
+/// Feed one HEVC access unit into a `HevcDecoderAdapter<B>`, drain any
+/// produced NV12 frame, and publish it onto `ViewerShared::latest_frame`.
+/// Shared by the three Linux `PlatformConsumer::FfmpegHevc*` arms in
+/// `recv_task` so each arm body stays a one-liner — the OpenH264 arm
+/// body is preserved verbatim alongside.
+///
+/// Mirrors the OpenH264 H.264 path's bookkeeping shape: `latest` carries
+/// the most-recent decoded frame, `needs_idr` flips to `false` after the
+/// first successful decode, `tex_count` ticks per published frame, and
+/// the LatencyProbe records the decode timestamp keyed by `seq`.
+///
+/// Only compiled when at least one of the three HEVC decode features is
+/// on; otherwise the function is dead code and the `recv_task` `match`
+/// has no `FfmpegHevc*` arms to call it from.
+#[cfg(all(
+    target_os = "linux",
+    any(
+        feature = "ffmpeg-decode-hevc-sw-any",
+        feature = "ffmpeg-decode-hevc-vaapi-any",
+        feature = "ffmpeg-decode-hevc-nvdec-any"
+    )
+))]
+#[allow(clippy::too_many_arguments)]
+fn submit_ffmpeg_hevc_packet<B>(
+    decoder: &mut prdt_media_linux::HevcDecoderAdapter<B>,
+    latest: &mut Option<Arc<prdt_media_linux::Nv12Frame>>,
+    needs_idr: &mut bool,
+    frame: &prdt_protocol::EncodedFrame,
+    is_kf: bool,
+    nal_len: usize,
+    seq: u64,
+    host_ts_us: u64,
+    recv_shared: &Arc<ViewerShared>,
+    idr_req: &mut IdrRequester,
+    tex_count: &mut u64,
+) where
+    B: prdt_media_linux::HevcDecoderBackend,
+{
+    if let Err(e) = decoder.feed_packet(&frame.nal_units, host_ts_us) {
+        warn!(error = %e, seq, is_kf, nal_len, "linux ffmpeg hevc feed_packet failed");
+        idr_req.mark();
+        return;
+    }
+    match decoder.drain_frame() {
+        Ok(Some(nv12)) => {
+            let arc = Arc::new(nv12);
+            *latest = Some(Arc::clone(&arc));
+            *needs_idr = false;
+            *tex_count += 1;
+            recv_shared.latency.record_decoded(seq);
+            *recv_shared.latest_frame.lock().unwrap() =
+                Some((PlatformFrame::Nv12(arc), host_ts_us));
+        }
+        Ok(None) => {
+            if *needs_idr && !is_kf {
+                idr_req.mark();
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, seq, is_kf, nal_len, "linux ffmpeg hevc drain_frame failed");
+            idr_req.mark();
+        }
+    }
+}
+
 /// Pure function over `&str` so this matrix can be exhaustively
 /// unit-tested without spinning up a transport.
 fn choose_decoder(
@@ -395,11 +466,41 @@ fn choose_decoder(
 
     // Step 2: enforce --decoder vs negotiated. Plan §Phase 3 specifies
     // exact error strings for the (nvdec|mf, H264) and (openh264, H265)
-    // cases; preserve them verbatim.
+    // cases; preserve them verbatim. P2 adds three Linux-only ffmpeg-*-hevc
+    // decoder names that route through the new FfmpegHevc choice on Linux
+    // builds with the matching feature compiled in.
     match (decoder_arg, negotiated) {
         ("nvdec", Codec::H265) => Ok(DecoderChoice::Nvdec),
         ("mf", Codec::H265) => Ok(DecoderChoice::Mf),
         ("openh264", Codec::H264) => Ok(DecoderChoice::Openh264),
+        #[cfg(all(target_os = "linux", feature = "ffmpeg-decode-hevc-sw-any"))]
+        ("ffmpeg-sw-hevc", Codec::H265) => Ok(DecoderChoice::FfmpegHevc),
+        #[cfg(all(target_os = "linux", feature = "ffmpeg-decode-hevc-vaapi-any"))]
+        ("ffmpeg-vaapi-hevc", Codec::H265) => Ok(DecoderChoice::FfmpegHevc),
+        #[cfg(all(target_os = "linux", feature = "ffmpeg-decode-hevc-nvdec-any"))]
+        ("ffmpeg-nvdec-hevc", Codec::H265) => Ok(DecoderChoice::FfmpegHevc),
+        // `auto` H265 routes to NVDEC on Windows (existing behaviour) and
+        // to the FfmpegHevc lane on Linux when any HEVC backend is
+        // compiled — the actual backend pick happens inside
+        // build_consumer's resolve_auto_decode_hevc() so the env-var +
+        // cfg-cascade priority logic lives in one place.
+        #[cfg(all(
+            target_os = "linux",
+            any(
+                feature = "ffmpeg-decode-hevc-sw-any",
+                feature = "ffmpeg-decode-hevc-vaapi-any",
+                feature = "ffmpeg-decode-hevc-nvdec-any"
+            )
+        ))]
+        ("auto", Codec::H265) => Ok(DecoderChoice::FfmpegHevc),
+        #[cfg(not(all(
+            target_os = "linux",
+            any(
+                feature = "ffmpeg-decode-hevc-sw-any",
+                feature = "ffmpeg-decode-hevc-vaapi-any",
+                feature = "ffmpeg-decode-hevc-nvdec-any"
+            )
+        )))]
         ("auto", Codec::H265) => Ok(DecoderChoice::Nvdec),
         ("auto", Codec::H264) => Ok(DecoderChoice::Openh264),
         ("nvdec", Codec::H264) => Err("codec mismatch: viewer requested nvdec (H.265) but host \
@@ -800,6 +901,10 @@ pub fn backend_badge(backend_name: &str) -> &'static str {
         "nvdec" => "🚀 HW",
         // HW encoders
         "nvenc" | "nvenc-h265" | "mf" | "mf-hevc" | "vaapi" => "🚀 HW",
+        // P2 — FFmpeg HEVC decode backends. SW HEVC is still software;
+        // VAAPI / NVDEC drive the GPU.
+        "ffmpeg-vaapi-hevc" | "ffmpeg-nvdec-hevc" => "🚀 HW",
+        "ffmpeg-sw-hevc" => "💻 SW",
         // Everything else (openh264, auto, unknown) — software
         _ => "💻 SW",
     }
@@ -2018,30 +2123,103 @@ fn spawn_worker_tasks(
 
                         #[cfg(target_os = "linux")]
                         {
+                            // P2 rewrite: the pre-P2 body lived inside an
+                            // irrefutable `let PlatformConsumer::Openh264 { .. }
+                            // = &mut *c;` destructure. With the new HEVC
+                            // variants behind feature gates that destructure
+                            // is no longer irrefutable, so the entire block
+                            // becomes a `match &mut *c` with each new arm
+                            // cfg-gated. The Openh264 arm body is preserved
+                            // BYTE-FOR-BYTE — the H.264 hot path is sacrosanct
+                            // per the plan's regression-safety principle
+                            // (A12.b round-trip test guards this).
                             use prdt_media_sw::traits::SwH264Decoder as _;
-                            let PlatformConsumer::Openh264 {
-                                decoder,
-                                latest,
-                                needs_idr,
-                            } = &mut *c;
-                            match decoder.decode(&frame.nal_units) {
-                                Ok(Some(i420)) => {
-                                    let arc = std::sync::Arc::new(i420);
-                                    *latest = Some(std::sync::Arc::clone(&arc));
-                                    *needs_idr = false;
-                                    tex_count += 1;
-                                    recv_shared.latency.record_decoded(seq);
-                                    *recv_shared.latest_frame.lock().unwrap() =
-                                        Some((PlatformFrame::I420(arc), host_ts_us));
-                                }
-                                Ok(None) => {
-                                    if *needs_idr && !is_kf {
-                                        idr_req.mark();
+                            match &mut *c {
+                                PlatformConsumer::Openh264 {
+                                    decoder,
+                                    latest,
+                                    needs_idr,
+                                } => {
+                                    match decoder.decode(&frame.nal_units) {
+                                        Ok(Some(i420)) => {
+                                            let arc = std::sync::Arc::new(i420);
+                                            *latest = Some(std::sync::Arc::clone(&arc));
+                                            *needs_idr = false;
+                                            tex_count += 1;
+                                            recv_shared.latency.record_decoded(seq);
+                                            *recv_shared.latest_frame.lock().unwrap() =
+                                                Some((PlatformFrame::I420(arc), host_ts_us));
+                                        }
+                                        Ok(None) => {
+                                            if *needs_idr && !is_kf {
+                                                idr_req.mark();
+                                            }
+                                        }
+                                        Err(e) => {
+                                            warn!(error = %e, seq, is_kf, nal_len, "linux openh264 decode failed");
+                                            idr_req.mark();
+                                        }
                                     }
                                 }
-                                Err(e) => {
-                                    warn!(error = %e, seq, is_kf, nal_len, "linux openh264 decode failed");
-                                    idr_req.mark();
+                                #[cfg(feature = "ffmpeg-decode-hevc-sw-any")]
+                                PlatformConsumer::FfmpegHevcSw {
+                                    decoder,
+                                    latest,
+                                    needs_idr,
+                                } => {
+                                    submit_ffmpeg_hevc_packet(
+                                        decoder,
+                                        latest,
+                                        needs_idr,
+                                        &frame,
+                                        is_kf,
+                                        nal_len,
+                                        seq,
+                                        host_ts_us,
+                                        &recv_shared,
+                                        &mut idr_req,
+                                        &mut tex_count,
+                                    );
+                                }
+                                #[cfg(feature = "ffmpeg-decode-hevc-vaapi-any")]
+                                PlatformConsumer::FfmpegHevcVaapi {
+                                    decoder,
+                                    latest,
+                                    needs_idr,
+                                } => {
+                                    submit_ffmpeg_hevc_packet(
+                                        decoder,
+                                        latest,
+                                        needs_idr,
+                                        &frame,
+                                        is_kf,
+                                        nal_len,
+                                        seq,
+                                        host_ts_us,
+                                        &recv_shared,
+                                        &mut idr_req,
+                                        &mut tex_count,
+                                    );
+                                }
+                                #[cfg(feature = "ffmpeg-decode-hevc-nvdec-any")]
+                                PlatformConsumer::FfmpegHevcNvdec {
+                                    decoder,
+                                    latest,
+                                    needs_idr,
+                                } => {
+                                    submit_ffmpeg_hevc_packet(
+                                        decoder,
+                                        latest,
+                                        needs_idr,
+                                        &frame,
+                                        is_kf,
+                                        nal_len,
+                                        seq,
+                                        host_ts_us,
+                                        &recv_shared,
+                                        &mut idr_req,
+                                        &mut tex_count,
+                                    );
                                 }
                             }
                         }
@@ -2468,10 +2646,37 @@ mod tests {
     #[test]
     fn negotiation_guard_auto_auto_picks_negotiated() {
         // Both auto: silent downgrade is permitted on either codec.
+        // On Linux builds with any P2 HEVC backend compiled in, ("auto",
+        // H265) routes to the FfmpegHevc lane (which then resolves to a
+        // concrete backend inside build_consumer's
+        // resolve_auto_decode_hevc). Otherwise it still picks Nvdec
+        // (Windows behaviour or a no-HEVC Linux build).
+        #[cfg(all(
+            target_os = "linux",
+            any(
+                feature = "ffmpeg-decode-hevc-sw-any",
+                feature = "ffmpeg-decode-hevc-vaapi-any",
+                feature = "ffmpeg-decode-hevc-nvdec-any"
+            )
+        ))]
+        assert_eq!(
+            choose_decoder("auto", Codec::H265, CodecArg::Auto).unwrap(),
+            DecoderChoice::FfmpegHevc
+        );
+        #[cfg(not(all(
+            target_os = "linux",
+            any(
+                feature = "ffmpeg-decode-hevc-sw-any",
+                feature = "ffmpeg-decode-hevc-vaapi-any",
+                feature = "ffmpeg-decode-hevc-nvdec-any"
+            )
+        )))]
         assert_eq!(
             choose_decoder("auto", Codec::H265, CodecArg::Auto).unwrap(),
             DecoderChoice::Nvdec
         );
+        // A12.a regression-guard: the H264 row must NEVER route into
+        // the HEVC lane, regardless of which P2 features are compiled.
         assert_eq!(
             choose_decoder("auto", Codec::H264, CodecArg::Auto).unwrap(),
             DecoderChoice::Openh264

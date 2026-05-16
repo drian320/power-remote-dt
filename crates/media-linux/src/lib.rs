@@ -99,6 +99,37 @@ pub fn build_video_decoder() -> anyhow::Result<sw_pipeline::LinuxSwDecoder> {
 // crate behind these forwards.
 // ────────────────────────────────────────────────────────────────────────────
 
+// Re-export the adapter types + Nv12Frame so the viewer can name them
+// through the existing prdt_media_linux dep edge without taking a direct
+// dependency on prdt-media-ffmpeg (which is opt-in here per the feature
+// graph in crates/media-linux/Cargo.toml).
+#[cfg(all(
+    target_os = "linux",
+    any(
+        feature = "ffmpeg-decode-hevc-sw-any",
+        feature = "ffmpeg-decode-hevc-vaapi-any",
+        feature = "ffmpeg-decode-hevc-nvdec-any"
+    )
+))]
+pub use prdt_media_ffmpeg::{HevcDecoderAdapter, HevcDecoderBackend};
+// Nv12Frame lives in prdt-media-core; re-export through here so the
+// viewer can name it without a direct media-core dep.
+#[cfg(all(
+    target_os = "linux",
+    any(
+        feature = "ffmpeg-decode-hevc-sw-any",
+        feature = "ffmpeg-decode-hevc-vaapi-any",
+        feature = "ffmpeg-decode-hevc-nvdec-any"
+    )
+))]
+pub use prdt_media_core::Nv12Frame;
+#[cfg(all(target_os = "linux", feature = "ffmpeg-decode-hevc-nvdec-any"))]
+pub use prdt_media_ffmpeg::HevcNvdecFfmpegDecoderAdapter;
+#[cfg(all(target_os = "linux", feature = "ffmpeg-decode-hevc-sw-any"))]
+pub use prdt_media_ffmpeg::HevcSwFfmpegDecoderAdapter;
+#[cfg(all(target_os = "linux", feature = "ffmpeg-decode-hevc-vaapi-any"))]
+pub use prdt_media_ffmpeg::HevcVaapiFfmpegDecoderAdapter;
+
 #[cfg(all(target_os = "linux", feature = "ffmpeg-decode-hevc-sw-any"))]
 pub fn build_ffmpeg_sw_hevc_decoder(
     width: u32,

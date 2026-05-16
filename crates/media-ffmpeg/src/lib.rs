@@ -138,6 +138,15 @@ pub use core_adapter::HevcSwFfmpegDecoderAdapter;
 pub use core_adapter::HevcVaapiFfmpegDecoderAdapter;
 #[cfg(all(feature = "ffmpeg-encode-hevc-vaapi-any", target_os = "linux"))]
 pub use core_adapter::HevcVaapiFfmpegEncoderAdapter;
+#[cfg(all(
+    any(
+        feature = "ffmpeg-decode-hevc-sw-any",
+        feature = "ffmpeg-decode-hevc-vaapi-any",
+        feature = "ffmpeg-decode-hevc-nvdec-any"
+    ),
+    target_os = "linux"
+))]
+pub use decoder_common::HevcDecoderBackend;
 #[cfg(all(feature = "ffmpeg-decode-hevc-nvdec-any", target_os = "linux"))]
 pub use hevc_nvdec_decoder::{HevcNvdecFfmpegDecoder, HevcNvdecFfmpegDecoderConfig};
 #[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-any", target_os = "linux"))]
