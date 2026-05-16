@@ -106,26 +106,108 @@ jobs:
         run: ./scripts/dev-container.sh bash -c 'cargo clippy -p prdt-host --features ffmpeg-encode-hevc-vaapi,ffmpeg-encode-hevc-nvenc-ffmpeg5 --target x86_64-unknown-linux-gnu -- -D warnings'
       - name: Both-features tests — prdt-host (vaapi + nvenc-ffmpeg5, dev-container)
         run: ./scripts/dev-container.sh bash -c 'cargo test -p prdt-host --features ffmpeg-encode-hevc-vaapi,ffmpeg-encode-hevc-nvenc-ffmpeg5 --lib --target x86_64-unknown-linux-gnu'
+      # ── P2 decode cells ─────────────────────────────────────────────────────
+      # SW decoder (3 backends × 4 ABIs = 12 cells; R2: ffmpeg5 cells via
+      # dev-container so Debian bookworm headers are covered).
+      # R6: the ffmpeg5 cells double as decode-only iGPU/dGPU coverage cells
+      # (no encode feature enabled) — they exercise the widened `pub mod
+      # hwdevice;` disjunction's decode-only branches. Comments note dual duty
+      # so future maintainers don't drop them thinking they're duplicates.
+      - name: Decode-SW — cargo check (ffmpeg5, dev-container; R2+R6 decode-only coverage)
+        run: ./scripts/dev-container.sh bash -c 'cargo check -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-sw-ffmpeg5 --target x86_64-unknown-linux-gnu'
+      - name: Decode-SW — clippy (ffmpeg5, dev-container)
+        run: ./scripts/dev-container.sh bash -c 'cargo clippy -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-sw-ffmpeg5 --target x86_64-unknown-linux-gnu -- -D warnings'
+      - name: Decode-SW — unit tests (ffmpeg5, dev-container; A3)
+        run: ./scripts/dev-container.sh bash -c 'cargo test -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-sw-ffmpeg5 --lib --target x86_64-unknown-linux-gnu'
+      - name: Decode-SW — cargo check (ffmpeg6 default, native runner)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: cargo check -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-sw --target x86_64-unknown-linux-gnu
+      - name: Decode-SW — cargo check (ffmpeg6 explicit, native runner)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: cargo check -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-sw-ffmpeg6 --target x86_64-unknown-linux-gnu
+      - name: Decode-SW — cargo check (ffmpeg7 explicit, native runner, check-only)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: cargo check -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-sw-ffmpeg7 --target x86_64-unknown-linux-gnu
+      # VAAPI decoder cells.
+      # R6 iGPU-only: ffmpeg5 cell has no encode feature — exercises hwdevice
+      # decode-only branch. Dual-purpose with R2 ABI coverage (same command).
+      - name: Decode-VAAPI — cargo check (ffmpeg5, dev-container; R2+R6 iGPU decode-only)
+        run: ./scripts/dev-container.sh bash -c 'cargo check -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-vaapi-ffmpeg5 --target x86_64-unknown-linux-gnu'
+      - name: Decode-VAAPI — clippy (ffmpeg5, dev-container)
+        run: ./scripts/dev-container.sh bash -c 'cargo clippy -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-vaapi-ffmpeg5 --target x86_64-unknown-linux-gnu -- -D warnings'
+      - name: Decode-VAAPI — cargo check (ffmpeg6 default, native runner)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: cargo check -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-vaapi --target x86_64-unknown-linux-gnu
+      - name: Decode-VAAPI — cargo check (ffmpeg6 explicit, native runner)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: cargo check -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-vaapi-ffmpeg6 --target x86_64-unknown-linux-gnu
+      - name: Decode-VAAPI — cargo check (ffmpeg7 explicit, native runner, check-only)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: cargo check -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-vaapi-ffmpeg7 --target x86_64-unknown-linux-gnu
+      # NVDEC decoder cells.
+      # R6 dGPU-only: ffmpeg5 cell has no encode-nvenc feature — exercises
+      # cuda_hwdevice/cuda_hwframes decode-only branch. Dual-purpose with R2.
+      - name: Decode-NVDEC — cargo check (ffmpeg5, dev-container; R2+R6 dGPU decode-only)
+        run: ./scripts/dev-container.sh bash -c 'cargo check -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-nvdec-ffmpeg5 --target x86_64-unknown-linux-gnu'
+      - name: Decode-NVDEC — clippy (ffmpeg5, dev-container)
+        run: ./scripts/dev-container.sh bash -c 'cargo clippy -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-nvdec-ffmpeg5 --target x86_64-unknown-linux-gnu -- -D warnings'
+      - name: Decode-NVDEC — cargo check (ffmpeg6 default, native runner)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: cargo check -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-nvdec --target x86_64-unknown-linux-gnu
+      - name: Decode-NVDEC — cargo check (ffmpeg6 explicit, native runner)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: cargo check -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-nvdec-ffmpeg6 --target x86_64-unknown-linux-gnu
+      - name: Decode-NVDEC — cargo check (ffmpeg7 explicit, native runner, check-only)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: cargo check -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-nvdec-ffmpeg7 --target x86_64-unknown-linux-gnu
+      # Both-features encode+decode clippy cells (A5): validate the cfg cascade
+      # when an encode and its matching decode feature are both enabled.
+      - name: Both-features encode+decode clippy — VAAPI pair (ffmpeg5, dev-container)
+        run: ./scripts/dev-container.sh bash -c 'cargo clippy -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-vaapi,ffmpeg-decode-hevc-vaapi-ffmpeg5 --target x86_64-unknown-linux-gnu -- -D warnings'
+      - name: Both-features encode+decode clippy — NVENC+NVDEC pair (ffmpeg5, dev-container)
+        run: ./scripts/dev-container.sh bash -c 'cargo clippy -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-nvenc-ffmpeg5,ffmpeg-decode-hevc-nvdec-ffmpeg5 --target x86_64-unknown-linux-gnu -- -D warnings'
+      - name: Both-features decode-triple clippy — SW+VAAPI+NVDEC (ffmpeg5, dev-container)
+        run: ./scripts/dev-container.sh bash -c 'cargo clippy -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-sw-ffmpeg5,ffmpeg-decode-hevc-vaapi-ffmpeg5,ffmpeg-decode-hevc-nvdec-ffmpeg5 --target x86_64-unknown-linux-gnu -- -D warnings'
       # --- Safety + grep guards ---
       - name: Safety-comment lint
         run: ./scripts/dev-container.sh bash -c 'python3 scripts/check-safety-comments.py crates/media-ffmpeg/src/'
       - name: No-implicit-roundtrip grep guard
         run: |
           ! grep -rE 'hwdownload|swscale|hwupload' crates/media-ffmpeg/src/
-      - name: Per-backend hwframe upload invariant (A9b — ≤ 1 av_hwframe_transfer_data call site per encoder file)
+      - name: Per-backend hw_upload/hw_download invariant (A10 — O2 combined regex, ≤ 1 call site per encoder/decoder file)
         run: |
           set -euo pipefail
-          # Each encoder file imports `av_hwframe_transfer_data as hw_upload`
-          # and must invoke `hw_upload(...)` at most once. Matching the call
-          # form (`hw_upload\(`) instead of the bare symbol avoids the false-
-          # pass where the import statement alone satisfies the old guard.
+          # Each encoder/decoder file that does HW↔CPU transfer aliases
+          # av_hwframe_transfer_data as hw_upload (encoders) or hw_download
+          # (decoders) and must invoke it at most once per file. The combined
+          # regex `hw_(upload|download)\(` catches both so AV1/VP9 additions
+          # don't need a separate guard. File glob covers both encoder and
+          # decoder files (O2).
           fail=0
           shopt -s nullglob
-          for f in crates/media-ffmpeg/src/hevc_*_encoder.rs; do
-            count=$(grep -c -E '\bhw_upload\(' "$f" || true)
-            echo "$f: $count hw_upload() call site(s)"
+          for f in crates/media-ffmpeg/src/hevc_*_encoder.rs crates/media-ffmpeg/src/hevc_*_decoder.rs; do
+            count=$(grep -c -E '\bhw_(upload|download)\(' "$f" || true)
+            echo "$f: $count hw_(upload|download)() call site(s)"
             if [ "$count" -gt 1 ]; then
-              echo "::error file=$f::More than one hw_upload() call site (got $count, max 1)"
+              echo "::error file=$f::More than one hw_(upload|download)() call site (got $count, max 1)"
               fail=1
             fi
           done
