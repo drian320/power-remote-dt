@@ -227,6 +227,10 @@ impl Drop for HevcSwFfmpegDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusty_ffmpeg::ffi::{
+        av_frame_get_buffer, avcodec_find_encoder_by_name, avcodec_receive_packet,
+        avcodec_send_frame, AV_PIX_FMT_YUV420P,
+    };
 
     #[test]
     fn constructs_cleanly_when_libavcodec_has_hevc() {
@@ -240,5 +244,167 @@ mod tests {
         let mut dec = HevcSwFfmpegDecoder::new(HevcSwFfmpegDecoderConfig::default()).expect("dec");
         dec.feed_packet(&[], 0).expect("empty feed is ok");
         assert!(dec.drain_frame().expect("drain").is_none());
+    }
+
+    /// Round-trip: encode a 64×64 YUV420P frame via libx265 (in-process,
+    /// no external ffmpeg CLI), feed the resulting Annex-B HEVC packet to
+    /// `HevcSwFfmpegDecoder`, assert the decoded NV12 frame has the correct
+    /// plane sizes. Skipped at runtime if libx265 is not compiled into the
+    /// system libavcodec (CI containers without the encoder will just skip).
+    #[test]
+    fn hevc_sw_decode_round_trip_via_libx265() {
+        let w = 64i32;
+        let h = 64i32;
+
+        // ── 1. Build a libx265 encoder context ──────────────────────────────
+        // SAFETY: string literal is a valid nul-terminated C string.
+        let enc_codec = unsafe { avcodec_find_encoder_by_name(c"libx265".as_ptr()) };
+        if enc_codec.is_null() {
+            eprintln!("skip: libx265 not compiled into system libavcodec");
+            return;
+        }
+
+        // SAFETY: enc_codec is non-null.
+        let enc_ctx_ptr = unsafe { avcodec_alloc_context3(enc_codec) };
+        assert!(!enc_ctx_ptr.is_null(), "avcodec_alloc_context3 failed");
+
+        // SAFETY: enc_ctx_ptr is freshly allocated.
+        unsafe {
+            (*enc_ctx_ptr).width = w;
+            (*enc_ctx_ptr).height = h;
+            (*enc_ctx_ptr).pix_fmt = AV_PIX_FMT_YUV420P;
+            // Minimal valid timebase for a still-frame test.
+            (*enc_ctx_ptr).time_base = rusty_ffmpeg::ffi::AVRational { num: 1, den: 30 };
+            (*enc_ctx_ptr).framerate = rusty_ffmpeg::ffi::AVRational { num: 30, den: 1 };
+            // Force IDR-only GOP (keyint=1) so the very first frame is
+            // decodeable without prior context.
+            (*enc_ctx_ptr).gop_size = 1;
+            // x265 opts: zerolatency + keyint=1 via priv_data opts.
+        }
+
+        // Set x265-params for keyint=1 + no-open-gop via av_opt_set.
+        // SAFETY: enc_ctx_ptr and its priv_data are valid after alloc3.
+        unsafe {
+            use rusty_ffmpeg::ffi::{av_opt_set, AV_OPT_SEARCH_CHILDREN};
+            let flags = AV_OPT_SEARCH_CHILDREN as i32;
+            av_opt_set(
+                enc_ctx_ptr as *mut _,
+                c"x265-params".as_ptr(),
+                c"keyint=1:no-open-gop=1".as_ptr(),
+                flags,
+            );
+            av_opt_set(
+                enc_ctx_ptr as *mut _,
+                c"preset".as_ptr(),
+                c"ultrafast".as_ptr(),
+                flags,
+            );
+        }
+
+        // SAFETY: enc_ctx_ptr is valid; open with no extra dict.
+        let ret = unsafe { avcodec_open2(enc_ctx_ptr, enc_codec, ptr::null_mut()) };
+        assert!(ret >= 0, "avcodec_open2 for libx265 failed: {ret}");
+
+        // ── 2. Allocate + fill a minimal YUV420P source frame ───────────────
+        // SAFETY: av_frame_alloc returns non-null or null.
+        let src_frame = unsafe { av_frame_alloc() };
+        assert!(!src_frame.is_null(), "av_frame_alloc failed");
+
+        // SAFETY: src_frame is non-null.
+        unsafe {
+            (*src_frame).format = AV_PIX_FMT_YUV420P;
+            (*src_frame).width = w;
+            (*src_frame).height = h;
+            (*src_frame).pts = 0;
+        }
+
+        // SAFETY: src_frame fields set; align=32 for SIMD safety.
+        let ret = unsafe { av_frame_get_buffer(src_frame, 32) };
+        assert!(ret >= 0, "av_frame_get_buffer failed: {ret}");
+
+        // Fill planes with a simple ramp so the encoder has structured content.
+        // SAFETY: frame buffer is valid after av_frame_get_buffer.
+        unsafe {
+            let f = &*src_frame;
+            let y_slice =
+                std::slice::from_raw_parts_mut(f.data[0], (f.linesize[0] as usize) * (h as usize));
+            for (i, b) in y_slice.iter_mut().enumerate() {
+                *b = (i & 0xFF) as u8;
+            }
+            let uv_h = h as usize / 2;
+            let u_slice =
+                std::slice::from_raw_parts_mut(f.data[1], (f.linesize[1] as usize) * uv_h);
+            u_slice.fill(128);
+            let v_slice =
+                std::slice::from_raw_parts_mut(f.data[2], (f.linesize[2] as usize) * uv_h);
+            v_slice.fill(128);
+        }
+
+        // ── 3. Encode the frame and flush ───────────────────────────────────
+        // SAFETY: enc_ctx_ptr is open; src_frame is valid.
+        let ret = unsafe { avcodec_send_frame(enc_ctx_ptr, src_frame) };
+        assert!(ret >= 0, "avcodec_send_frame failed: {ret}");
+        // Flush.
+        // SAFETY: enc_ctx_ptr is open.
+        let ret = unsafe { avcodec_send_frame(enc_ctx_ptr, ptr::null_mut()) };
+        assert!(ret >= 0, "avcodec_send_frame flush failed: {ret}");
+
+        // SAFETY: av_packet_alloc returns zeroed AVPacket or null.
+        let enc_pkt = unsafe { av_packet_alloc() };
+        assert!(!enc_pkt.is_null(), "av_packet_alloc failed");
+
+        // SAFETY: enc_ctx_ptr is open and flushed; enc_pkt is a valid zeroed packet.
+        let ret = unsafe { avcodec_receive_packet(enc_ctx_ptr, enc_pkt) };
+        assert!(ret >= 0, "avcodec_receive_packet failed: {ret}");
+
+        // Copy encoded bytes out before freeing encoder resources.
+        // SAFETY: enc_pkt.data/size are valid after successful receive_packet.
+        let encoded_bytes: Vec<u8> = unsafe {
+            std::slice::from_raw_parts((*enc_pkt).data, (*enc_pkt).size as usize).to_vec()
+        };
+        assert!(!encoded_bytes.is_empty(), "encoder produced zero bytes");
+
+        // ── 4. Tear down encoder ────────────────────────────────────────────
+        // SAFETY: enc_pkt is the unique owner.
+        let mut ep = enc_pkt;
+        unsafe { av_packet_free(&mut ep) };
+        // SAFETY: src_frame is the unique owner.
+        let mut sf = src_frame;
+        unsafe { av_frame_free(&mut sf) };
+        let mut ectx = enc_ctx_ptr;
+        // SAFETY: ectx is the unique owner.
+        unsafe { avcodec_free_context(&mut ectx) };
+
+        // ── 5. Feed encoded bytes to HevcSwFfmpegDecoder ────────────────────
+        let mut dec = HevcSwFfmpegDecoder::new(HevcSwFfmpegDecoderConfig {
+            width: w as u32,
+            height: h as u32,
+        })
+        .expect("SW HEVC decoder must init");
+
+        let mut decoded: Option<Nv12Frame> = None;
+        // Try up to 3 times: some encoders produce SPS/PPS + IDR in separate
+        // packets requiring multiple feed-drain cycles.
+        for _ in 0..3 {
+            dec.feed_packet(&encoded_bytes, 0).expect("feed_packet");
+            if let Some(f) = dec.drain_frame().expect("drain_frame") {
+                decoded = Some(f);
+                break;
+            }
+        }
+
+        let f = decoded.expect("SW HEVC decoder produced no frame after 3 feed cycles");
+        assert_eq!(f.width, w as u32);
+        assert_eq!(f.height, h as u32);
+        assert_eq!(
+            f.y.len(),
+            (f.stride_y as usize) * (h as usize),
+            "Y plane size"
+        );
+        assert_eq!(
+            f.uv.len(),
+            (f.stride_uv as usize) * (h as usize / 2),
+            "UV plane size"
+        );
     }
 }

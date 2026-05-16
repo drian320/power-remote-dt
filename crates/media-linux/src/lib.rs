@@ -180,3 +180,19 @@ pub fn build_ffmpeg_nvdec_hevc_decoder(
     .context("HevcNvdecFfmpegDecoder::new")?;
     Ok(prdt_media_ffmpeg::HevcDecoderAdapter(dec))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A12.a regression-guard: `build_video_decoder()` must still
+    /// construct a `LinuxSwDecoder` after the P2 factory additions.
+    /// Verifies the existing H.264 decode path is not broken by the new
+    /// FFmpeg HEVC factory functions added alongside it.
+    #[test]
+    fn build_video_decoder_constructs_linux_sw_decoder() {
+        // If this compiles and doesn't panic, the OpenH264 SW decoder path
+        // is intact. The return type is LinuxSwDecoder (type-checked by rustc).
+        let _dec = build_video_decoder().expect("build_video_decoder must succeed");
+    }
+}
