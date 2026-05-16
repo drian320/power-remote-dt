@@ -1,21 +1,21 @@
 use prdt_media_core::{EncodeError, EncodedPacket, Encoder};
 use prdt_media_sw::I420Frame;
 
-#[cfg(feature = "ffmpeg-encode-hevc-nvenc")]
+#[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
 use crate::hevc_nvenc_encoder::HevcNvencFfmpegEncoder;
-#[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+#[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
 use crate::hevc_vaapi_encoder::HevcVaapiFfmpegEncoder;
 
-#[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+#[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
 pub struct HevcVaapiFfmpegEncoderAdapter(pub HevcVaapiFfmpegEncoder);
 
 // SAFETY: HevcVaapiFfmpegEncoder owns all its FFmpeg resources exclusively via
 // NonNull pointers. It is never aliased and the caller ensures it is only used
 // from one thread at a time (the encoder pipeline always runs single-threaded).
-#[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+#[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
 unsafe impl Send for HevcVaapiFfmpegEncoderAdapter {}
 
-#[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+#[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
 impl Encoder for HevcVaapiFfmpegEncoderAdapter {
     type Frame = I420Frame;
 
@@ -40,15 +40,15 @@ impl Encoder for HevcVaapiFfmpegEncoderAdapter {
     }
 }
 
-#[cfg(feature = "ffmpeg-encode-hevc-nvenc")]
+#[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
 pub struct HevcNvencFfmpegEncoderAdapter(pub HevcNvencFfmpegEncoder);
 
 // SAFETY: HevcNvencFfmpegEncoder owns all its FFmpeg + CUDA resources via
 // NonNull pointers; never aliased; pipeline is single-threaded.
-#[cfg(feature = "ffmpeg-encode-hevc-nvenc")]
+#[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
 unsafe impl Send for HevcNvencFfmpegEncoderAdapter {}
 
-#[cfg(feature = "ffmpeg-encode-hevc-nvenc")]
+#[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
 impl Encoder for HevcNvencFfmpegEncoderAdapter {
     type Frame = I420Frame;
 
@@ -76,7 +76,7 @@ impl Encoder for HevcNvencFfmpegEncoderAdapter {
 mod tests {
     use super::*;
 
-    #[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+    #[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
     #[test]
     fn adapter_satisfies_encoder_trait_bound() {
         // Compile-time assertion: HevcVaapiFfmpegEncoderAdapter implements Encoder<Frame=I420Frame>.
@@ -84,7 +84,7 @@ mod tests {
         let _ = std::marker::PhantomData::<HevcVaapiFfmpegEncoderAdapter>;
     }
 
-    #[cfg(feature = "ffmpeg-encode-hevc-nvenc")]
+    #[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
     #[test]
     fn nvenc_adapter_satisfies_encoder_trait_bound() {
         // Compile-time assertion: HevcNvencFfmpegEncoderAdapter implements Encoder<Frame=I420Frame>.

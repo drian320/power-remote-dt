@@ -37,9 +37,9 @@ pub fn output_display_name(_d: &OutputDescriptor) -> &'static str {
 #[allow(dead_code, clippy::large_enum_variant)]
 pub enum LinuxEncoder {
     Openh264(prdt_media_sw::Openh264Encoder),
-    #[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+    #[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
     FfmpegVaapiHevc(prdt_media_ffmpeg::HevcVaapiFfmpegEncoderAdapter),
-    #[cfg(feature = "ffmpeg-encode-hevc-nvenc")]
+    #[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
     FfmpegNvencHevc(prdt_media_ffmpeg::HevcNvencFfmpegEncoderAdapter),
 }
 
@@ -48,9 +48,9 @@ impl LinuxEncoder {
     pub fn codec(&self) -> prdt_protocol::Codec {
         match self {
             LinuxEncoder::Openh264(_) => prdt_protocol::Codec::H264,
-            #[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+            #[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
             LinuxEncoder::FfmpegVaapiHevc(_) => prdt_protocol::Codec::H265,
-            #[cfg(feature = "ffmpeg-encode-hevc-nvenc")]
+            #[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
             LinuxEncoder::FfmpegNvencHevc(_) => prdt_protocol::Codec::H265,
         }
     }
@@ -59,9 +59,9 @@ impl LinuxEncoder {
 /// Advertised codecs for the Linux encoder selection (used in host handshake).
 pub fn linux_supported_codecs(encoder_arg: &str) -> Vec<prdt_protocol::Codec> {
     match normalize_encoder(encoder_arg) {
-        #[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+        #[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
         "ffmpeg-vaapi-hevc" => vec![prdt_protocol::Codec::H265],
-        #[cfg(feature = "ffmpeg-encode-hevc-nvenc")]
+        #[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
         "ffmpeg-nvenc-hevc" => vec![prdt_protocol::Codec::H265],
         _ => vec![prdt_protocol::Codec::H264],
     }
@@ -78,7 +78,7 @@ pub fn build_video_producer(
     _negotiated_codec: prdt_protocol::Codec,
 ) -> anyhow::Result<Box<dyn VideoProducer>> {
     let _backend = normalize_encoder(args_encoder);
-    #[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+    #[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
     if _backend == "ffmpeg-vaapi-hevc" {
         use anyhow::Context as _;
         use prdt_media_ffmpeg::{
@@ -99,7 +99,7 @@ pub fn build_video_producer(
         let producer = FfmpegVaapiProducer::new(Box::new(cap), adapter, fps);
         return Ok(Box::new(producer));
     }
-    #[cfg(feature = "ffmpeg-encode-hevc-nvenc")]
+    #[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
     if _backend == "ffmpeg-nvenc-hevc" {
         use anyhow::Context as _;
         use prdt_media_ffmpeg::{
@@ -127,7 +127,7 @@ pub fn build_video_producer(
 /// `VideoProducer` that wires an X11 BGRA capture source into the
 /// FFmpeg VAAPI HEVC encoder. Mirrors `LinuxSwProducer` but substitutes
 /// `HevcVaapiFfmpegEncoderAdapter` (takes `I420Frame`) and emits `Codec::H265`.
-#[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+#[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
 struct FfmpegVaapiProducer {
     capture: Option<Box<dyn prdt_media_linux::capture_source::CaptureSource>>,
     encoder: Option<prdt_media_ffmpeg::HevcVaapiFfmpegEncoderAdapter>,
@@ -140,7 +140,7 @@ struct FfmpegVaapiProducer {
     poisoned: bool,
 }
 
-#[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+#[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
 impl FfmpegVaapiProducer {
     fn new(
         capture: Box<dyn prdt_media_linux::capture_source::CaptureSource>,
@@ -169,7 +169,7 @@ impl FfmpegVaapiProducer {
     }
 }
 
-#[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+#[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
 #[async_trait::async_trait]
 impl VideoProducer for FfmpegVaapiProducer {
     async fn next_frame(
@@ -288,7 +288,7 @@ impl VideoProducer for FfmpegVaapiProducer {
 /// NVENC HEVC encoder. Mirrors [`FfmpegVaapiProducer`] but substitutes the
 /// NVENC adapter; the duplication stays below the +40 LoC threshold flagged
 /// in the plan so we do not introduce a generic wrapper for two backends.
-#[cfg(feature = "ffmpeg-encode-hevc-nvenc")]
+#[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
 struct FfmpegNvencProducer {
     capture: Option<Box<dyn prdt_media_linux::capture_source::CaptureSource>>,
     encoder: Option<prdt_media_ffmpeg::HevcNvencFfmpegEncoderAdapter>,
@@ -301,7 +301,7 @@ struct FfmpegNvencProducer {
     poisoned: bool,
 }
 
-#[cfg(feature = "ffmpeg-encode-hevc-nvenc")]
+#[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
 impl FfmpegNvencProducer {
     fn new(
         capture: Box<dyn prdt_media_linux::capture_source::CaptureSource>,
@@ -330,7 +330,7 @@ impl FfmpegNvencProducer {
     }
 }
 
-#[cfg(feature = "ffmpeg-encode-hevc-nvenc")]
+#[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
 #[async_trait::async_trait]
 impl VideoProducer for FfmpegNvencProducer {
     async fn next_frame(
@@ -449,7 +449,7 @@ impl VideoProducer for FfmpegNvencProducer {
 fn normalize_encoder(arg: &str) -> &'static str {
     match arg {
         "openh264" => "openh264",
-        #[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+        #[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
         "ffmpeg-vaapi-hevc" => {
             tracing::info!(
                 encoder = %arg,
@@ -459,7 +459,7 @@ fn normalize_encoder(arg: &str) -> &'static str {
             );
             "ffmpeg-vaapi-hevc"
         }
-        #[cfg(feature = "ffmpeg-encode-hevc-nvenc")]
+        #[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
         "ffmpeg-nvenc-hevc" => {
             tracing::info!(
                 encoder = %arg,
@@ -504,8 +504,8 @@ fn resolve_auto_encoder() -> &'static str {
     // the unused-variable lint when neither / only-one backend compiles in.
     #[cfg_attr(
         not(all(
-            feature = "ffmpeg-encode-hevc-vaapi",
-            feature = "ffmpeg-encode-hevc-nvenc"
+            feature = "ffmpeg-encode-hevc-vaapi-any",
+            feature = "ffmpeg-encode-hevc-nvenc-any"
         )),
         allow(unused_variables)
     )]
@@ -518,8 +518,8 @@ fn resolve_auto_encoder() -> &'static str {
         .unwrap_or(false);
 
     #[cfg(all(
-        feature = "ffmpeg-encode-hevc-vaapi",
-        feature = "ffmpeg-encode-hevc-nvenc"
+        feature = "ffmpeg-encode-hevc-vaapi-any",
+        feature = "ffmpeg-encode-hevc-nvenc-any"
     ))]
     {
         if prefer_nvenc {
@@ -541,8 +541,8 @@ fn resolve_auto_encoder() -> &'static str {
     }
 
     #[cfg(all(
-        feature = "ffmpeg-encode-hevc-vaapi",
-        not(feature = "ffmpeg-encode-hevc-nvenc")
+        feature = "ffmpeg-encode-hevc-vaapi-any",
+        not(feature = "ffmpeg-encode-hevc-nvenc-any")
     ))]
     {
         tracing::info!(
@@ -555,8 +555,8 @@ fn resolve_auto_encoder() -> &'static str {
     }
 
     #[cfg(all(
-        not(feature = "ffmpeg-encode-hevc-vaapi"),
-        feature = "ffmpeg-encode-hevc-nvenc"
+        not(feature = "ffmpeg-encode-hevc-vaapi-any"),
+        feature = "ffmpeg-encode-hevc-nvenc-any"
     ))]
     {
         tracing::info!(
@@ -569,8 +569,8 @@ fn resolve_auto_encoder() -> &'static str {
     }
 
     #[cfg(not(any(
-        feature = "ffmpeg-encode-hevc-vaapi",
-        feature = "ffmpeg-encode-hevc-nvenc"
+        feature = "ffmpeg-encode-hevc-vaapi-any",
+        feature = "ffmpeg-encode-hevc-nvenc-any"
     )))]
     {
         tracing::info!(
@@ -685,25 +685,97 @@ mod tests {
 
     #[test]
     #[serial]
-    #[cfg(not(feature = "ffmpeg-encode-hevc-vaapi"))]
+    #[cfg(not(feature = "ffmpeg-encode-hevc-vaapi-any"))]
     fn linux_normalize_encoder_auto_fallback_without_feature() {
         std::env::remove_var("PRDT_PREFER_NVENC");
         assert_eq!(normalize_encoder("auto"), "openh264");
     }
 
     #[test]
-    #[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+    #[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
     fn linux_normalize_encoder_ffmpeg_vaapi_hevc_arm() {
         assert_eq!(normalize_encoder("ffmpeg-vaapi-hevc"), "ffmpeg-vaapi-hevc");
     }
 
     #[test]
     #[serial]
-    #[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+    #[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
     fn linux_normalize_encoder_auto_prefers_hw_with_feature() {
         // P1.5: env-var poisoning could flip the both-features cfg arm; keep
         // the env clean so this test asserts the documented default.
         std::env::remove_var("PRDT_PREFER_NVENC");
         assert_eq!(normalize_encoder("auto"), "ffmpeg-vaapi-hevc");
+    }
+
+    #[test]
+    #[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
+    fn linux_normalize_encoder_ffmpeg_nvenc_hevc_arm() {
+        assert_eq!(normalize_encoder("ffmpeg-nvenc-hevc"), "ffmpeg-nvenc-hevc");
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(all(
+        feature = "ffmpeg-encode-hevc-vaapi-any",
+        feature = "ffmpeg-encode-hevc-nvenc-any"
+    ))]
+    fn linux_normalize_encoder_auto_prefers_vaapi_over_nvenc_by_default() {
+        std::env::remove_var("PRDT_PREFER_NVENC");
+        assert_eq!(normalize_encoder("auto"), "ffmpeg-vaapi-hevc");
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(all(
+        feature = "ffmpeg-encode-hevc-vaapi-any",
+        feature = "ffmpeg-encode-hevc-nvenc-any"
+    ))]
+    fn linux_normalize_encoder_auto_prefers_nvenc_with_env_override() {
+        std::env::set_var("PRDT_PREFER_NVENC", "1");
+        let result = normalize_encoder("auto");
+        std::env::remove_var("PRDT_PREFER_NVENC");
+        assert_eq!(result, "ffmpeg-nvenc-hevc");
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(all(
+        not(feature = "ffmpeg-encode-hevc-vaapi-any"),
+        feature = "ffmpeg-encode-hevc-nvenc-any"
+    ))]
+    fn linux_normalize_encoder_auto_picks_nvenc_when_only_nvenc() {
+        std::env::remove_var("PRDT_PREFER_NVENC");
+        assert_eq!(normalize_encoder("auto"), "ffmpeg-nvenc-hevc");
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    #[serial]
+    #[cfg(all(
+        feature = "ffmpeg-encode-hevc-vaapi-any",
+        feature = "ffmpeg-encode-hevc-nvenc-any"
+    ))]
+    fn linux_normalize_encoder_auto_log_line_emitted() {
+        std::env::set_var("PRDT_PREFER_NVENC", "1");
+        let _ = normalize_encoder("auto");
+        std::env::remove_var("PRDT_PREFER_NVENC");
+        assert!(logs_contain("video encoder selected"));
+        assert!(logs_contain("ffmpeg-nvenc-hevc"));
+        assert!(logs_contain("preferred-over-vaapi-by-env"));
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    #[serial]
+    #[cfg(all(
+        feature = "ffmpeg-encode-hevc-vaapi-any",
+        feature = "ffmpeg-encode-hevc-nvenc-any"
+    ))]
+    fn linux_normalize_encoder_auto_log_line_default_both_on() {
+        std::env::remove_var("PRDT_PREFER_NVENC");
+        let _ = normalize_encoder("auto");
+        assert!(logs_contain("video encoder selected"));
+        assert!(logs_contain("ffmpeg-vaapi-hevc"));
+        assert!(logs_contain("preferred-over-nvenc"));
     }
 }

@@ -9,12 +9,12 @@
 // (Task #5). Allow dead_code until the encoder implementation is in place.
 #![cfg_attr(all(feature = "ffmpeg", target_os = "linux"), allow(dead_code))]
 
-#[cfg(all(feature = "ffmpeg-encode-hevc-vaapi", not(target_os = "linux")))]
+#[cfg(all(feature = "ffmpeg-encode-hevc-vaapi-any", not(target_os = "linux")))]
 compile_error!(
     "feature 'ffmpeg-encode-hevc-vaapi' is not available on this target (Linux-only in P1)"
 );
 
-#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc", not(target_os = "linux")))]
+#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-any", not(target_os = "linux")))]
 compile_error!(
     "feature 'ffmpeg-encode-hevc-nvenc' is not available on this target (Linux-only in P1.5; \
      Windows already has native NVENC via media-win)"
@@ -24,28 +24,28 @@ pub mod error;
 
 #[cfg(all(
     any(
-        feature = "ffmpeg-encode-hevc-vaapi",
-        feature = "ffmpeg-encode-hevc-nvenc"
+        feature = "ffmpeg-encode-hevc-vaapi-any",
+        feature = "ffmpeg-encode-hevc-nvenc-any"
     ),
     target_os = "linux"
 ))]
 pub mod core_adapter;
-#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc", target_os = "linux"))]
+#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-any", target_os = "linux"))]
 mod cuda_hwdevice;
-#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc", target_os = "linux"))]
+#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-any", target_os = "linux"))]
 mod cuda_hwframes;
-#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc", target_os = "linux"))]
+#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-any", target_os = "linux"))]
 pub mod hevc_nvenc_encoder;
-#[cfg(all(feature = "ffmpeg-encode-hevc-vaapi", target_os = "linux"))]
+#[cfg(all(feature = "ffmpeg-encode-hevc-vaapi-any", target_os = "linux"))]
 pub mod hevc_vaapi_encoder;
-#[cfg(all(feature = "ffmpeg-encode-hevc-vaapi", target_os = "linux"))]
+#[cfg(all(feature = "ffmpeg-encode-hevc-vaapi-any", target_os = "linux"))]
 mod hwdevice;
-#[cfg(all(feature = "ffmpeg-encode-hevc-vaapi", target_os = "linux"))]
+#[cfg(all(feature = "ffmpeg-encode-hevc-vaapi-any", target_os = "linux"))]
 mod hwframes;
 #[cfg(all(
     any(
-        feature = "ffmpeg-encode-hevc-vaapi",
-        feature = "ffmpeg-encode-hevc-nvenc"
+        feature = "ffmpeg-encode-hevc-vaapi-any",
+        feature = "ffmpeg-encode-hevc-nvenc-any"
     ),
     target_os = "linux"
 ))]
@@ -53,11 +53,11 @@ mod options;
 
 pub use error::FfmpegError;
 
-#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc", target_os = "linux"))]
+#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-any", target_os = "linux"))]
 pub use core_adapter::HevcNvencFfmpegEncoderAdapter;
-#[cfg(all(feature = "ffmpeg-encode-hevc-vaapi", target_os = "linux"))]
+#[cfg(all(feature = "ffmpeg-encode-hevc-vaapi-any", target_os = "linux"))]
 pub use core_adapter::HevcVaapiFfmpegEncoderAdapter;
-#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc", target_os = "linux"))]
+#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-any", target_os = "linux"))]
 pub use hevc_nvenc_encoder::{HevcNvencFfmpegEncoder, HevcNvencFfmpegEncoderConfig};
-#[cfg(all(feature = "ffmpeg-encode-hevc-vaapi", target_os = "linux"))]
+#[cfg(all(feature = "ffmpeg-encode-hevc-vaapi-any", target_os = "linux"))]
 pub use hevc_vaapi_encoder::{HevcVaapiFfmpegEncoder, HevcVaapiFfmpegEncoderConfig};

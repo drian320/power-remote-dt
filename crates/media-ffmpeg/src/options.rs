@@ -2,9 +2,9 @@ use std::ffi::CString;
 use std::ptr;
 use std::ptr::NonNull;
 
-#[cfg(feature = "ffmpeg-encode-hevc-nvenc")]
+#[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
 use rusty_ffmpeg::ffi::AV_PIX_FMT_CUDA;
-#[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+#[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
 use rusty_ffmpeg::ffi::AV_PIX_FMT_VAAPI;
 use rusty_ffmpeg::ffi::{
     av_dict_set, AVCodecContext, AVDictionary, AVRational, AV_CODEC_FLAG_GLOBAL_HEADER,
@@ -62,7 +62,7 @@ pub(crate) unsafe fn apply_low_latency_hevc_common(ctx: *mut AVCodecContext, t: 
 ///
 /// # Safety
 /// Same contract as [`apply_low_latency_hevc_common`].
-#[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+#[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
 pub(crate) unsafe fn apply_low_latency_hevc_vaapi(ctx: *mut AVCodecContext, t: &EncoderTunables) {
     // SAFETY: caller guarantees ctx is valid; delegate then layer VAAPI bits.
     unsafe {
@@ -77,7 +77,7 @@ pub(crate) unsafe fn apply_low_latency_hevc_vaapi(ctx: *mut AVCodecContext, t: &
 ///
 /// # Safety
 /// Same contract as [`apply_low_latency_hevc_common`].
-#[cfg(feature = "ffmpeg-encode-hevc-nvenc")]
+#[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
 pub(crate) unsafe fn apply_low_latency_hevc_nvenc(ctx: *mut AVCodecContext, t: &EncoderTunables) {
     // SAFETY: caller guarantees ctx is valid; delegate then layer NVENC bits.
     unsafe {
@@ -103,7 +103,7 @@ fn dict_set(dict: &mut *mut AVDictionary, key: &str, value: &str) -> Result<(), 
 /// Build the private-data dictionary for `hevc_vaapi` low-latency CBR encode.
 /// Returns ownership of the dict pointer; caller passes it to `avcodec_open2`
 /// which consumes and frees it.
-#[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+#[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
 pub(crate) fn build_priv_data_dict(gop_size: u32) -> Result<NonNull<AVDictionary>, FfmpegError> {
     let mut dict: *mut AVDictionary = ptr::null_mut();
     dict_set(&mut dict, "async_depth", "1")?;
@@ -119,7 +119,7 @@ pub(crate) fn build_priv_data_dict(gop_size: u32) -> Result<NonNull<AVDictionary
 /// Build the private-data dictionary for `hevc_nvenc` low-latency CBR encode.
 /// All NVENC AVOption keys here are stable across rusty_ffmpeg ffmpeg5/6/7.
 /// Caller passes the dict to `avcodec_open2`, which consumes and frees it.
-#[cfg(feature = "ffmpeg-encode-hevc-nvenc")]
+#[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
 pub(crate) fn build_priv_data_dict_nvenc(
     gop_size: u32,
 ) -> Result<NonNull<AVDictionary>, FfmpegError> {
@@ -155,7 +155,7 @@ mod tests {
         Some(val.to_string_lossy().into_owned())
     }
 
-    #[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+    #[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
     #[test]
     fn low_latency_dict_contains_required_keys() {
         let dict = build_priv_data_dict(60).expect("dict built");
@@ -171,7 +171,7 @@ mod tests {
         unsafe { av_dict_free(&mut d_free) };
     }
 
-    #[cfg(feature = "ffmpeg-encode-hevc-nvenc")]
+    #[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
     #[test]
     fn nvenc_dict_contains_required_keys() {
         let dict = build_priv_data_dict_nvenc(60).expect("dict built");
@@ -192,7 +192,7 @@ mod tests {
         unsafe { av_dict_free(&mut d_free) };
     }
 
-    #[cfg(feature = "ffmpeg-encode-hevc-vaapi")]
+    #[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
     #[test]
     fn codec_ctx_fields_set() {
         use rusty_ffmpeg::ffi::avcodec_alloc_context3;
