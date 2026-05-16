@@ -11,3 +11,4 @@ Cargo.lock
 /.claude/
 crates/gui-host/assets/*.png
 target-docker/
+tests/fixtures/libnppicc-stub.so
