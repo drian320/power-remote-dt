@@ -75,5 +75,22 @@ ffmpeg-decode-hevc-nvdec-ffmpeg6 = ["prdt-media-linux/ffmpeg-decode-hevc-nvdec-f
 ffmpeg-decode-hevc-nvdec-ffmpeg7 = ["prdt-media-linux/ffmpeg-decode-hevc-nvdec-ffmpeg7", "ffmpeg-decode-hevc-nvdec-any"]
 ffmpeg-decode-hevc-nvdec-any = []
 
+# P3.2 — HEVC Main10 decode features forwarded onto prdt-media-linux.
+ffmpeg-decode-hevc-sw-main10 = ["prdt-media-linux/ffmpeg-decode-hevc-sw-main10", "ffmpeg-decode-hevc-sw-main10-any"]
+ffmpeg-decode-hevc-sw-main10-ffmpeg5 = ["prdt-media-linux/ffmpeg-decode-hevc-sw-main10-ffmpeg5", "ffmpeg-decode-hevc-sw-main10-any"]
+ffmpeg-decode-hevc-sw-main10-ffmpeg6 = ["prdt-media-linux/ffmpeg-decode-hevc-sw-main10-ffmpeg6", "ffmpeg-decode-hevc-sw-main10-any"]
+ffmpeg-decode-hevc-sw-main10-ffmpeg7 = ["prdt-media-linux/ffmpeg-decode-hevc-sw-main10-ffmpeg7", "ffmpeg-decode-hevc-sw-main10-any"]
+ffmpeg-decode-hevc-sw-main10-any = []
+ffmpeg-decode-hevc-vaapi-main10 = ["prdt-media-linux/ffmpeg-decode-hevc-vaapi-main10", "ffmpeg-decode-hevc-vaapi-main10-any"]
+ffmpeg-decode-hevc-vaapi-main10-ffmpeg5 = ["prdt-media-linux/ffmpeg-decode-hevc-vaapi-main10-ffmpeg5", "ffmpeg-decode-hevc-vaapi-main10-any"]
+ffmpeg-decode-hevc-vaapi-main10-ffmpeg6 = ["prdt-media-linux/ffmpeg-decode-hevc-vaapi-main10-ffmpeg6", "ffmpeg-decode-hevc-vaapi-main10-any"]
+ffmpeg-decode-hevc-vaapi-main10-ffmpeg7 = ["prdt-media-linux/ffmpeg-decode-hevc-vaapi-main10-ffmpeg7", "ffmpeg-decode-hevc-vaapi-main10-any"]
+ffmpeg-decode-hevc-vaapi-main10-any = []
+ffmpeg-decode-hevc-nvdec-main10 = ["prdt-media-linux/ffmpeg-decode-hevc-nvdec-main10", "ffmpeg-decode-hevc-nvdec-main10-any"]
+ffmpeg-decode-hevc-nvdec-main10-ffmpeg5 = ["prdt-media-linux/ffmpeg-decode-hevc-nvdec-main10-ffmpeg5", "ffmpeg-decode-hevc-nvdec-main10-any"]
+ffmpeg-decode-hevc-nvdec-main10-ffmpeg6 = ["prdt-media-linux/ffmpeg-decode-hevc-nvdec-main10-ffmpeg6", "ffmpeg-decode-hevc-nvdec-main10-any"]
+ffmpeg-decode-hevc-nvdec-main10-ffmpeg7 = ["prdt-media-linux/ffmpeg-decode-hevc-nvdec-main10-ffmpeg7", "ffmpeg-decode-hevc-nvdec-main10-any"]
+ffmpeg-decode-hevc-nvdec-main10-any = []
+
 [dev-dependencies]
 tempfile = "3"

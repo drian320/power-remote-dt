@@ -59,6 +59,38 @@ pub struct Nv12Frame {
     pub pts_us: u64,
 }
 
+/// HDR10 SMPTE 2086 mastering display + MaxCLL/MaxFALL.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Hdr10Metadata {
+    /// Display primaries in CIE 1931 xy chromaticity coords (units of 0.00002).
+    /// Order: R, G, B.
+    pub display_primaries: [(u16, u16); 3],
+    /// White point in CIE 1931 xy (units of 0.00002).
+    pub white_point: (u16, u16),
+    /// Min/max display mastering luminance (units of 0.0001 cd/m²).
+    pub min_mastering_luminance: u32,
+    pub max_mastering_luminance: u32,
+    /// MaxCLL / MaxFALL (cd/m²).
+    pub max_content_light_level: u16,
+    pub max_frame_average_light_level: u16,
+}
+
+/// P010LE-formatted Main10 4:2:0 frame on CPU memory. Y/UV planes carry
+/// `u16` samples in 16-bit containers with the **valid 10 bits in the high
+/// part** of each container (libavcodec P010LE convention).
+#[derive(Debug, Clone)]
+pub struct Nv12Frame16 {
+    pub width: u32,
+    pub height: u32,
+    pub y: Vec<u16>,
+    pub uv: Vec<u16>,
+    /// Stride in units of u16 elements.
+    pub stride_y: u32,
+    pub stride_uv: u32,
+    pub pts_us: u64,
+    pub hdr10: Option<Hdr10Metadata>,
+}
+
 /// Pixel-format-tagged decoded frame. Only the variants needed by a
 /// given pipeline have to be matched; the OpenH264 path keeps using
 /// `prdt_media_sw::I420Frame` directly today, so this enum starts with
@@ -67,4 +99,5 @@ pub struct Nv12Frame {
 #[derive(Debug, Clone)]
 pub enum DecodedFrame {
     Nv12(Arc<Nv12Frame>),
+    Nv12_10(Arc<Nv12Frame16>),
 }

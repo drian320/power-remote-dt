@@ -327,6 +327,7 @@ fn parse_resolution(s: &str) -> Result<(u32, u32)> {
 enum CodecArg {
     Auto,
     H265,
+    H265Main10,
     H264,
 }
 
@@ -335,18 +336,38 @@ impl CodecArg {
         match s {
             "auto" => Ok(Self::Auto),
             "h265" => Ok(Self::H265),
+            "h265-main10" => Ok(Self::H265Main10),
             "h264" => Ok(Self::H264),
-            other => anyhow::bail!("bad --codec {other:?}, expected one of: auto, h265, h264"),
+            other => anyhow::bail!(
+                "bad --codec {other:?}, expected one of: auto, h265, h265-main10, h264"
+            ),
         }
     }
 
     /// The codec the viewer advertises in Hello. `auto` resolves to
-    /// `H265` (historical default) so a non-upgraded host that ignores
-    /// the new wire fields still gets a sensible request.
+    /// `H265Main10` when any Main10 decode feature is compiled in
+    /// (so the host can echo back `H265Main10` in HelloAck if it also
+    /// supports it), falling back to `H265` for legacy-only builds.
     fn hello_codec(self) -> Codec {
         match self {
-            Self::Auto => Codec::H265,
+            Self::Auto => {
+                #[cfg(any(
+                    feature = "ffmpeg-decode-hevc-sw-main10-any",
+                    feature = "ffmpeg-decode-hevc-vaapi-main10-any",
+                    feature = "ffmpeg-decode-hevc-nvdec-main10-any"
+                ))]
+                {
+                    return Codec::H265Main10;
+                }
+                #[cfg(not(any(
+                    feature = "ffmpeg-decode-hevc-sw-main10-any",
+                    feature = "ffmpeg-decode-hevc-vaapi-main10-any",
+                    feature = "ffmpeg-decode-hevc-nvdec-main10-any"
+                )))]
+                Codec::H265
+            }
             Self::H265 => Codec::H265,
+            Self::H265Main10 => Codec::H265Main10,
             Self::H264 => Codec::H264,
         }
     }
@@ -365,6 +386,12 @@ enum DecoderChoice {
         feature = "ffmpeg-decode-hevc-nvdec-any"
     ))]
     FfmpegHevc,
+    #[cfg(any(
+        feature = "ffmpeg-decode-hevc-sw-main10-any",
+        feature = "ffmpeg-decode-hevc-vaapi-main10-any",
+        feature = "ffmpeg-decode-hevc-nvdec-main10-any"
+    ))]
+    FfmpegHevcMain10,
 }
 
 /// Decide the concrete decoder backend given `--decoder`, the
@@ -437,6 +464,60 @@ fn submit_ffmpeg_hevc_packet<B>(
     }
 }
 
+/// Mirrors `submit_ffmpeg_hevc_packet` for the three Main10 backends.
+/// Each backend implements `HevcDecoderBackend10` directly (no adapter
+/// wrapper), so this helper is generic over `B: HevcDecoderBackend10`.
+#[cfg(all(
+    target_os = "linux",
+    any(
+        feature = "ffmpeg-decode-hevc-sw-main10-any",
+        feature = "ffmpeg-decode-hevc-vaapi-main10-any",
+        feature = "ffmpeg-decode-hevc-nvdec-main10-any"
+    )
+))]
+#[allow(clippy::too_many_arguments)]
+fn submit_ffmpeg_hevc_main10_packet<B>(
+    decoder: &mut B,
+    latest: &mut Option<Arc<prdt_media_linux::Nv12Frame16>>,
+    needs_idr: &mut bool,
+    frame: &prdt_protocol::EncodedFrame,
+    is_kf: bool,
+    nal_len: usize,
+    seq: u64,
+    host_ts_us: u64,
+    recv_shared: &Arc<ViewerShared>,
+    idr_req: &mut IdrRequester,
+    tex_count: &mut u64,
+) where
+    B: prdt_media_linux::HevcDecoderBackend10,
+{
+    if let Err(e) = decoder.feed_packet(&frame.nal_units, host_ts_us) {
+        warn!(error = %e, seq, is_kf, nal_len, "linux ffmpeg hevc-main10 feed_packet failed");
+        idr_req.mark();
+        return;
+    }
+    match decoder.drain_frame() {
+        Ok(Some(nv12_10)) => {
+            let arc = Arc::new(nv12_10);
+            *latest = Some(Arc::clone(&arc));
+            *needs_idr = false;
+            *tex_count += 1;
+            recv_shared.latency.record_decoded(seq);
+            *recv_shared.latest_frame.lock().unwrap() =
+                Some((PlatformFrame::Nv12_10(arc), host_ts_us));
+        }
+        Ok(None) => {
+            if *needs_idr && !is_kf {
+                idr_req.mark();
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, seq, is_kf, nal_len, "linux ffmpeg hevc-main10 drain_frame failed");
+            idr_req.mark();
+        }
+    }
+}
+
 /// Pure function over `&str` so this matrix can be exhaustively
 /// unit-tested without spinning up a transport.
 fn choose_decoder(
@@ -455,6 +536,12 @@ fn choose_decoder(
                 negotiated.name()
             ));
         }
+        CodecArg::H265Main10 if negotiated != Codec::H265Main10 => {
+            return Err(format!(
+                "codec mismatch: --codec h265-main10 but host negotiated {}",
+                negotiated.name()
+            ));
+        }
         CodecArg::H264 if negotiated != Codec::H264 => {
             return Err(format!(
                 "codec mismatch: --codec h264 but host negotiated {}",
@@ -468,7 +555,7 @@ fn choose_decoder(
     // exact error strings for the (nvdec|mf, H264) and (openh264, H265)
     // cases; preserve them verbatim. P2 adds three Linux-only ffmpeg-*-hevc
     // decoder names that route through the new FfmpegHevc choice on Linux
-    // builds with the matching feature compiled in.
+    // builds with the matching feature compiled in. P3.2 adds Main10 rows.
     match (decoder_arg, negotiated) {
         ("nvdec", Codec::H265) => Ok(DecoderChoice::Nvdec),
         ("mf", Codec::H265) => Ok(DecoderChoice::Mf),
@@ -503,6 +590,38 @@ fn choose_decoder(
         )))]
         ("auto", Codec::H265) => Ok(DecoderChoice::Nvdec),
         ("auto", Codec::H264) => Ok(DecoderChoice::Openh264),
+        // P3.2 — Main10 explicit decoder rows. No silent fallback to 8-bit:
+        // an HDR10 stream needs an HDR-capable decoder.
+        #[cfg(all(target_os = "linux", feature = "ffmpeg-decode-hevc-sw-main10-any"))]
+        ("ffmpeg-sw-hevc-main10", Codec::H265Main10) => Ok(DecoderChoice::FfmpegHevcMain10),
+        #[cfg(all(target_os = "linux", feature = "ffmpeg-decode-hevc-vaapi-main10-any"))]
+        ("ffmpeg-vaapi-hevc-main10", Codec::H265Main10) => Ok(DecoderChoice::FfmpegHevcMain10),
+        #[cfg(all(target_os = "linux", feature = "ffmpeg-decode-hevc-nvdec-main10-any"))]
+        ("ffmpeg-nvdec-hevc-main10", Codec::H265Main10) => Ok(DecoderChoice::FfmpegHevcMain10),
+        // `auto` H265Main10: route to FfmpegHevcMain10 if any Main10 backend compiled.
+        #[cfg(all(
+            target_os = "linux",
+            any(
+                feature = "ffmpeg-decode-hevc-sw-main10-any",
+                feature = "ffmpeg-decode-hevc-vaapi-main10-any",
+                feature = "ffmpeg-decode-hevc-nvdec-main10-any"
+            )
+        ))]
+        ("auto", Codec::H265Main10) => Ok(DecoderChoice::FfmpegHevcMain10),
+        // No Main10 feature compiled: reject rather than silently falling back to 8-bit.
+        #[cfg(not(all(
+            target_os = "linux",
+            any(
+                feature = "ffmpeg-decode-hevc-sw-main10-any",
+                feature = "ffmpeg-decode-hevc-vaapi-main10-any",
+                feature = "ffmpeg-decode-hevc-nvdec-main10-any"
+            )
+        )))]
+        (_, Codec::H265Main10) => Err(
+            "host negotiated H265Main10 but no Main10 decode feature is compiled in; \
+             rebuild with --features ffmpeg-decode-hevc-{sw,vaapi,nvdec}-main10"
+                .into(),
+        ),
         ("nvdec", Codec::H264) => Err("codec mismatch: viewer requested nvdec (H.265) but host \
              negotiated H.264; pass --decoder openh264 or --decoder auto"
             .into()),
@@ -2208,6 +2327,66 @@ fn spawn_worker_tasks(
                                     needs_idr,
                                 } => {
                                     submit_ffmpeg_hevc_packet(
+                                        decoder,
+                                        latest,
+                                        needs_idr,
+                                        &frame,
+                                        is_kf,
+                                        nal_len,
+                                        seq,
+                                        host_ts_us,
+                                        &recv_shared,
+                                        &mut idr_req,
+                                        &mut tex_count,
+                                    );
+                                }
+                                #[cfg(feature = "ffmpeg-decode-hevc-sw-main10-any")]
+                                PlatformConsumer::FfmpegHevcSwMain10 {
+                                    decoder,
+                                    latest,
+                                    needs_idr,
+                                } => {
+                                    submit_ffmpeg_hevc_main10_packet(
+                                        decoder,
+                                        latest,
+                                        needs_idr,
+                                        &frame,
+                                        is_kf,
+                                        nal_len,
+                                        seq,
+                                        host_ts_us,
+                                        &recv_shared,
+                                        &mut idr_req,
+                                        &mut tex_count,
+                                    );
+                                }
+                                #[cfg(feature = "ffmpeg-decode-hevc-vaapi-main10-any")]
+                                PlatformConsumer::FfmpegHevcVaapiMain10 {
+                                    decoder,
+                                    latest,
+                                    needs_idr,
+                                } => {
+                                    submit_ffmpeg_hevc_main10_packet(
+                                        decoder,
+                                        latest,
+                                        needs_idr,
+                                        &frame,
+                                        is_kf,
+                                        nal_len,
+                                        seq,
+                                        host_ts_us,
+                                        &recv_shared,
+                                        &mut idr_req,
+                                        &mut tex_count,
+                                    );
+                                }
+                                #[cfg(feature = "ffmpeg-decode-hevc-nvdec-main10-any")]
+                                PlatformConsumer::FfmpegHevcNvdecMain10 {
+                                    decoder,
+                                    latest,
+                                    needs_idr,
+                                } => {
+                                    submit_ffmpeg_hevc_main10_packet(
                                         decoder,
                                         latest,
                                         needs_idr,

@@ -22,6 +22,12 @@ use prdt_media_linux::i420_to_bgra::i420_to_bgra;
     feature = "ffmpeg-decode-hevc-nvdec-any"
 ))]
 use prdt_media_linux::Nv12Frame;
+#[cfg(any(
+    feature = "ffmpeg-decode-hevc-sw-main10-any",
+    feature = "ffmpeg-decode-hevc-vaapi-main10-any",
+    feature = "ffmpeg-decode-hevc-nvdec-main10-any"
+))]
+use prdt_media_linux::Nv12Frame16;
 use prdt_media_sw::{I420Frame, Openh264Decoder};
 use prdt_protocol::{frame::Codec, MonitorRect};
 use winit::window::Window;
@@ -41,6 +47,12 @@ pub enum PlatformFrame {
         feature = "ffmpeg-decode-hevc-nvdec-any"
     ))]
     Nv12(Arc<Nv12Frame>),
+    #[cfg(any(
+        feature = "ffmpeg-decode-hevc-sw-main10-any",
+        feature = "ffmpeg-decode-hevc-vaapi-main10-any",
+        feature = "ffmpeg-decode-hevc-nvdec-main10-any"
+    ))]
+    Nv12_10(Arc<Nv12Frame16>),
 }
 
 /// Per-OS decoder/consumer. Pre-P2 Linux had only the Openh264 arm; P2
@@ -71,6 +83,24 @@ pub enum PlatformConsumer {
     FfmpegHevcNvdec {
         decoder: prdt_media_linux::HevcNvdecFfmpegDecoderAdapter,
         latest: Option<Arc<Nv12Frame>>,
+        needs_idr: bool,
+    },
+    #[cfg(feature = "ffmpeg-decode-hevc-sw-main10-any")]
+    FfmpegHevcSwMain10 {
+        decoder: prdt_media_linux::HevcSwMain10FfmpegDecoder,
+        latest: Option<Arc<Nv12Frame16>>,
+        needs_idr: bool,
+    },
+    #[cfg(feature = "ffmpeg-decode-hevc-vaapi-main10-any")]
+    FfmpegHevcVaapiMain10 {
+        decoder: prdt_media_linux::HevcVaapiMain10FfmpegDecoder,
+        latest: Option<Arc<Nv12Frame16>>,
+        needs_idr: bool,
+    },
+    #[cfg(feature = "ffmpeg-decode-hevc-nvdec-main10-any")]
+    FfmpegHevcNvdecMain10 {
+        decoder: prdt_media_linux::HevcNvdecMain10FfmpegDecoder,
+        latest: Option<Arc<Nv12Frame16>>,
         needs_idr: bool,
     },
 }
@@ -217,6 +247,50 @@ pub fn build_consumer(
             let pick = resolve_auto_decode_hevc();
             build_consumer(pick, Codec::H265, width, height)
         }
+        // ── P3.2 HEVC Main10 dispatch ──────────────────────────────────────
+        #[cfg(feature = "ffmpeg-decode-hevc-sw-main10-any")]
+        ("ffmpeg-sw-hevc-main10", Codec::H265Main10) => {
+            let dec = prdt_media_linux::build_ffmpeg_sw_hevc_main10_decoder(width, height)
+                .map_err(|e| super::ConsumerError::Init(format!("ffmpeg-sw-hevc-main10: {e}")))?;
+            Ok(PlatformConsumer::FfmpegHevcSwMain10 {
+                decoder: dec,
+                latest: None,
+                needs_idr: true,
+            })
+        }
+        #[cfg(feature = "ffmpeg-decode-hevc-vaapi-main10-any")]
+        ("ffmpeg-vaapi-hevc-main10", Codec::H265Main10) => {
+            let dec = prdt_media_linux::build_ffmpeg_vaapi_hevc_main10_decoder(width, height)
+                .map_err(|e| {
+                    super::ConsumerError::Init(format!("ffmpeg-vaapi-hevc-main10: {e}"))
+                })?;
+            Ok(PlatformConsumer::FfmpegHevcVaapiMain10 {
+                decoder: dec,
+                latest: None,
+                needs_idr: true,
+            })
+        }
+        #[cfg(feature = "ffmpeg-decode-hevc-nvdec-main10-any")]
+        ("ffmpeg-nvdec-hevc-main10", Codec::H265Main10) => {
+            let dec = prdt_media_linux::build_ffmpeg_nvdec_hevc_main10_decoder(width, height)
+                .map_err(|e| {
+                    super::ConsumerError::Init(format!("ffmpeg-nvdec-hevc-main10: {e}"))
+                })?;
+            Ok(PlatformConsumer::FfmpegHevcNvdecMain10 {
+                decoder: dec,
+                latest: None,
+                needs_idr: true,
+            })
+        }
+        #[cfg(any(
+            feature = "ffmpeg-decode-hevc-sw-main10-any",
+            feature = "ffmpeg-decode-hevc-vaapi-main10-any",
+            feature = "ffmpeg-decode-hevc-nvdec-main10-any"
+        ))]
+        ("auto", Codec::H265Main10) => {
+            let pick = resolve_auto_decode_hevc_main10();
+            build_consumer(pick, Codec::H265Main10, width, height)
+        }
         // ── Reject everything else ─────────────────────────────────────────
         (other_decoder, other_codec) => Err(super::ConsumerError::Init(format!(
             "unsupported decoder/codec on Linux: decoder={other_decoder}, codec={other_codec:?} \
@@ -327,6 +401,96 @@ fn resolve_auto_decode_hevc() -> &'static str {
     }
 }
 
+/// Pick a HEVC Main10 decode backend based on compiled features + the
+/// `PRDT_PREFER_NVDEC` env var. Priority order: NVDEC → VAAPI → SW
+/// (per team-lead spec: nvdec_main10 > vaapi_main10 > sw_main10).
+#[cfg(any(
+    feature = "ffmpeg-decode-hevc-sw-main10-any",
+    feature = "ffmpeg-decode-hevc-vaapi-main10-any",
+    feature = "ffmpeg-decode-hevc-nvdec-main10-any"
+))]
+#[allow(clippy::needless_return)]
+fn resolve_auto_decode_hevc_main10() -> &'static str {
+    let prefer_nvdec = std::env::var("PRDT_PREFER_NVDEC")
+        .ok()
+        .map(|v| {
+            let lc = v.to_ascii_lowercase();
+            matches!(lc.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false);
+
+    #[cfg(all(
+        feature = "ffmpeg-decode-hevc-nvdec-main10-any",
+        feature = "ffmpeg-decode-hevc-vaapi-main10-any"
+    ))]
+    {
+        if prefer_nvdec {
+            tracing::info!(
+                target: "video.pipeline",
+                decoder = "ffmpeg-nvdec-hevc-main10",
+                selected_by = "auto",
+                reason = "preferred-over-vaapi-by-env",
+                "video decoder selected"
+            );
+            return "ffmpeg-nvdec-hevc-main10";
+        }
+        tracing::info!(
+            target: "video.pipeline",
+            decoder = "ffmpeg-nvdec-hevc-main10",
+            selected_by = "auto",
+            reason = "preferred-over-vaapi",
+            "video decoder selected"
+        );
+        return "ffmpeg-nvdec-hevc-main10";
+    }
+    #[cfg(all(
+        feature = "ffmpeg-decode-hevc-nvdec-main10-any",
+        not(feature = "ffmpeg-decode-hevc-vaapi-main10-any")
+    ))]
+    {
+        let _ = prefer_nvdec;
+        tracing::info!(
+            target: "video.pipeline",
+            decoder = "ffmpeg-nvdec-hevc-main10",
+            selected_by = "auto",
+            reason = "only-nvdec-compiled",
+            "video decoder selected"
+        );
+        return "ffmpeg-nvdec-hevc-main10";
+    }
+    #[cfg(all(
+        feature = "ffmpeg-decode-hevc-vaapi-main10-any",
+        not(feature = "ffmpeg-decode-hevc-nvdec-main10-any")
+    ))]
+    {
+        let _ = prefer_nvdec;
+        tracing::info!(
+            target: "video.pipeline",
+            decoder = "ffmpeg-vaapi-hevc-main10",
+            selected_by = "auto",
+            reason = "only-vaapi-compiled",
+            "video decoder selected"
+        );
+        return "ffmpeg-vaapi-hevc-main10";
+    }
+    #[cfg(all(
+        feature = "ffmpeg-decode-hevc-sw-main10-any",
+        not(feature = "ffmpeg-decode-hevc-vaapi-main10-any"),
+        not(feature = "ffmpeg-decode-hevc-nvdec-main10-any")
+    ))]
+    {
+        let _ = prefer_nvdec;
+        tracing::info!(
+            target: "video.pipeline",
+            decoder = "ffmpeg-sw-hevc-main10",
+            selected_by = "auto",
+            reason = "only-sw-compiled",
+            "video decoder selected"
+        );
+        "ffmpeg-sw-hevc-main10"
+    }
+}
+
 /// Present one decoded frame on the existing render state. Lazily
 /// resizes the softbuffer surface to match the stream size on first
 /// frame or stream-size change.
@@ -371,6 +535,22 @@ pub fn present_frame(
             resize_surface_if_needed(r, stream_w, stream_h)?;
 
             nv12_to_bgra(nv12, &mut r.scratch_bgra);
+
+            composite_cursor(r, shared, stream_w, stream_h);
+            blit_scratch_to_surface(r)?;
+        }
+        #[cfg(any(
+            feature = "ffmpeg-decode-hevc-sw-main10-any",
+            feature = "ffmpeg-decode-hevc-vaapi-main10-any",
+            feature = "ffmpeg-decode-hevc-nvdec-main10-any"
+        ))]
+        PlatformFrame::Nv12_10(nv12_10) => {
+            let stream_w = nv12_10.width;
+            let stream_h = nv12_10.height;
+
+            resize_surface_if_needed(r, stream_w, stream_h)?;
+
+            p010_to_bgra_sdr_tonemap(nv12_10, &mut r.scratch_bgra);
 
             composite_cursor(r, shared, stream_w, stream_h);
             blit_scratch_to_surface(r)?;
@@ -485,11 +665,94 @@ fn nv12_to_bgra(nv12: &Nv12Frame, out_bgra: &mut [u8]) {
 #[cfg(any(
     feature = "ffmpeg-decode-hevc-sw-any",
     feature = "ffmpeg-decode-hevc-vaapi-any",
-    feature = "ffmpeg-decode-hevc-nvdec-any"
+    feature = "ffmpeg-decode-hevc-nvdec-any",
+    feature = "ffmpeg-decode-hevc-sw-main10-any",
+    feature = "ffmpeg-decode-hevc-vaapi-main10-any",
+    feature = "ffmpeg-decode-hevc-nvdec-main10-any"
 ))]
 #[inline]
 fn r_clamp(v: i32) -> u8 {
     v.clamp(0, 255) as u8
+}
+
+/// P010LE (Y/UV u16 planes, valid 10 bits in the high bits per FFmpeg
+/// P010LE convention) → BGRA8. Applies a simple Reinhard-style SDR tone
+/// map: BT.2020 NCL matrix → linearise via inverse PQ EOTF → Reinhard →
+/// BT.709 gamma → clamp to 8-bit. HDR display on Linux is F6 follow-up.
+#[cfg(any(
+    feature = "ffmpeg-decode-hevc-sw-main10-any",
+    feature = "ffmpeg-decode-hevc-vaapi-main10-any",
+    feature = "ffmpeg-decode-hevc-nvdec-main10-any"
+))]
+fn p010_to_bgra_sdr_tonemap(nv12_10: &Nv12Frame16, out_bgra: &mut [u8]) {
+    let w = nv12_10.width as usize;
+    let h = nv12_10.height as usize;
+    debug_assert_eq!(out_bgra.len(), w * h * 4);
+    let y_stride = nv12_10.stride_y as usize;
+    let uv_stride = nv12_10.stride_uv as usize;
+
+    for j in 0..h {
+        for i in 0..w {
+            // P010LE: valid 10 bits in the high bits of each u16. Shift right
+            // by 6 to extract [0..1023], then normalise to [0.0, 1.0].
+            let y_raw = (nv12_10.y[j * y_stride + i] >> 6) as f32 / 1023.0;
+            let uv_row = (j / 2) * uv_stride;
+            let uv_col = (i / 2) * 2;
+            let u_raw = (nv12_10.uv[uv_row + uv_col] >> 6) as f32 / 1023.0 - 0.5;
+            let v_raw = (nv12_10.uv[uv_row + uv_col + 1] >> 6) as f32 / 1023.0 - 0.5;
+
+            // BT.2020 NCL Y'CbCr limited-range → full-range Y'CbCr.
+            // (Skip limited-range expand since encoder uses full-range for Main10.)
+            // BT.2020 NCL inverse matrix (Y', Cb, Cr) → (R', G', B') in [0,1].
+            let r_lin = (y_raw + 1.4746 * v_raw).clamp(0.0, 1.0);
+            let g_lin = (y_raw - 0.1646 * u_raw - 0.5714 * v_raw).clamp(0.0, 1.0);
+            let b_lin = (y_raw + 1.8814 * u_raw).clamp(0.0, 1.0);
+
+            // Inverse PQ EOTF (SMPTE ST 2084) → scene-linear light [0, 10000 cd/m²].
+            let pq_eotf = |e: f32| -> f32 {
+                const M1: f32 = 0.1593017578125;
+                const M2: f32 = 78.84375;
+                const C1: f32 = 0.8359375;
+                const C2: f32 = 18.8515625;
+                const C3: f32 = 18.6875;
+                let ep = e.powf(1.0 / M2);
+                let num = (ep - C1).max(0.0);
+                let den = C2 - C3 * ep;
+                (num / den).powf(1.0 / M1) * 10000.0
+            };
+            let r_scene = pq_eotf(r_lin);
+            let g_scene = pq_eotf(g_lin);
+            let b_scene = pq_eotf(b_lin);
+
+            // Reinhard tone-map: L_out = L_in / (1 + L_in) with peak at 1000 cd/m².
+            // Normalise to [0, 1] assuming 1000 cd/m² peak.
+            let scale = 1.0 / 1000.0;
+            let tone = |v: f32| -> f32 {
+                let v = v * scale;
+                v / (1.0 + v)
+            };
+            let r_tm = tone(r_scene);
+            let g_tm = tone(g_scene);
+            let b_tm = tone(b_scene);
+
+            // BT.709 gamma (approximate sRGB): linear → gamma-encoded.
+            let gamma = |v: f32| -> u8 {
+                let v = v.clamp(0.0, 1.0);
+                let enc = if v <= 0.0031308 {
+                    12.92 * v
+                } else {
+                    1.055 * v.powf(1.0 / 2.4) - 0.055
+                };
+                (enc * 255.0 + 0.5) as u8
+            };
+
+            let off = (j * w + i) * 4;
+            out_bgra[off] = gamma(b_tm);
+            out_bgra[off + 1] = gamma(g_tm);
+            out_bgra[off + 2] = gamma(r_tm);
+            out_bgra[off + 3] = 0xFF;
+        }
+    }
 }
 
 /// CPU alpha-blend a BGRA source rectangle onto a BGRA destination

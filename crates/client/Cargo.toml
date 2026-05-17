@@ -72,5 +72,19 @@ ffmpeg-decode-hevc-nvdec-ffmpeg5 = ["prdt-host/ffmpeg-decode-hevc-nvdec-ffmpeg5"
 ffmpeg-decode-hevc-nvdec-ffmpeg6 = ["prdt-host/ffmpeg-decode-hevc-nvdec-ffmpeg6"]
 ffmpeg-decode-hevc-nvdec-ffmpeg7 = ["prdt-host/ffmpeg-decode-hevc-nvdec-ffmpeg7"]
 
+# P3.2 — HEVC Main10 decode features forwarded onto prdt-host.
+ffmpeg-decode-hevc-sw-main10 = ["prdt-host/ffmpeg-decode-hevc-sw-main10"]
+ffmpeg-decode-hevc-sw-main10-ffmpeg5 = ["prdt-host/ffmpeg-decode-hevc-sw-main10-ffmpeg5"]
+ffmpeg-decode-hevc-sw-main10-ffmpeg6 = ["prdt-host/ffmpeg-decode-hevc-sw-main10-ffmpeg6"]
+ffmpeg-decode-hevc-sw-main10-ffmpeg7 = ["prdt-host/ffmpeg-decode-hevc-sw-main10-ffmpeg7"]
+ffmpeg-decode-hevc-vaapi-main10 = ["prdt-host/ffmpeg-decode-hevc-vaapi-main10"]
+ffmpeg-decode-hevc-vaapi-main10-ffmpeg5 = ["prdt-host/ffmpeg-decode-hevc-vaapi-main10-ffmpeg5"]
+ffmpeg-decode-hevc-vaapi-main10-ffmpeg6 = ["prdt-host/ffmpeg-decode-hevc-vaapi-main10-ffmpeg6"]
+ffmpeg-decode-hevc-vaapi-main10-ffmpeg7 = ["prdt-host/ffmpeg-decode-hevc-vaapi-main10-ffmpeg7"]
+ffmpeg-decode-hevc-nvdec-main10 = ["prdt-host/ffmpeg-decode-hevc-nvdec-main10"]
+ffmpeg-decode-hevc-nvdec-main10-ffmpeg5 = ["prdt-host/ffmpeg-decode-hevc-nvdec-main10-ffmpeg5"]
+ffmpeg-decode-hevc-nvdec-main10-ffmpeg6 = ["prdt-host/ffmpeg-decode-hevc-nvdec-main10-ffmpeg6"]
+ffmpeg-decode-hevc-nvdec-main10-ffmpeg7 = ["prdt-host/ffmpeg-decode-hevc-nvdec-main10-ffmpeg7"]
+
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"

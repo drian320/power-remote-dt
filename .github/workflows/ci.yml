@@ -323,6 +323,79 @@ jobs:
           sys.exit(\"rusty_ffmpeg not found in resolved graph\")
           "
           ' || { echo "::error::5-way co-resolution: rusty_ffmpeg did not resolve to ffmpeg7 (Cargo unification broken)"; exit 1; }
+      # ── P3 Main10 decode cells ───────────────────────────────────────────────
+      # 3 backends × 4 ABI variants = 12 cells (A2.1). Mirrors the 8-bit decode
+      # cell pattern above: ffmpeg5 dev-container (check + clippy) + ffmpeg6
+      # native (check) + ffmpeg7 native check-only. No CUDA toolkit needed:
+      # nvdec-main10 uses FFmpeg native API with lazy-loaded libnvcuvid.
+      # Decode-SW Main10 cells.
+      - name: Decode-SW-Main10 — cargo check (ffmpeg5, dev-container)
+        run: ./scripts/dev-container.sh bash -c 'cargo check -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-sw-main10-ffmpeg5 --target x86_64-unknown-linux-gnu'
+      - name: Decode-SW-Main10 — clippy (ffmpeg5, dev-container)
+        run: ./scripts/dev-container.sh bash -c 'cargo clippy -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-sw-main10-ffmpeg5 --target x86_64-unknown-linux-gnu -- -D warnings'
+      - name: Decode-SW-Main10 — cargo check (ffmpeg6 default, native runner)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: cargo check -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-sw-main10 --target x86_64-unknown-linux-gnu
+      - name: Decode-SW-Main10 — cargo check (ffmpeg7 explicit, native runner, check-only)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: cargo check -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-sw-main10-ffmpeg7 --target x86_64-unknown-linux-gnu
+      # Decode-VAAPI Main10 cells.
+      - name: Decode-VAAPI-Main10 — cargo check (ffmpeg5, dev-container)
+        run: ./scripts/dev-container.sh bash -c 'cargo check -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-vaapi-main10-ffmpeg5 --target x86_64-unknown-linux-gnu'
+      - name: Decode-VAAPI-Main10 — clippy (ffmpeg5, dev-container)
+        run: ./scripts/dev-container.sh bash -c 'cargo clippy -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-vaapi-main10-ffmpeg5 --target x86_64-unknown-linux-gnu -- -D warnings'
+      - name: Decode-VAAPI-Main10 — cargo check (ffmpeg6 default, native runner)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: cargo check -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-vaapi-main10 --target x86_64-unknown-linux-gnu
+      - name: Decode-VAAPI-Main10 — cargo check (ffmpeg7 explicit, native runner, check-only)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: cargo check -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-vaapi-main10-ffmpeg7 --target x86_64-unknown-linux-gnu
+      # Decode-NVDEC Main10 cells. No CUDA toolkit on this runner (libnvcuvid
+      # is lazy-loaded by FFmpeg at runtime; not a link-time dep for nvdec-main10).
+      - name: Decode-NVDEC-Main10 — cargo check (ffmpeg5, dev-container)
+        run: ./scripts/dev-container.sh bash -c 'cargo check -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-nvdec-main10-ffmpeg5 --target x86_64-unknown-linux-gnu'
+      - name: Decode-NVDEC-Main10 — clippy (ffmpeg5, dev-container)
+        run: ./scripts/dev-container.sh bash -c 'cargo clippy -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-nvdec-main10-ffmpeg5 --target x86_64-unknown-linux-gnu -- -D warnings'
+      - name: Decode-NVDEC-Main10 — cargo check (ffmpeg6 default, native runner)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: cargo check -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-nvdec-main10 --target x86_64-unknown-linux-gnu
+      - name: Decode-NVDEC-Main10 — cargo check (ffmpeg7 explicit, native runner, check-only)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: cargo check -p prdt-media-ffmpeg --features ffmpeg-decode-hevc-nvdec-main10-ffmpeg7 --target x86_64-unknown-linux-gnu
+      # Decode-Main10 co-resolution: all 3 Main10 decode backends together must
+      # unify to ffmpeg7 without conflict (A2.1 — mirrors the 5-way encode cell).
+      - name: Decode-Main10 3-backend co-resolution (SW+VAAPI+NVDEC main10 unify cleanly)
+        run: |
+          ./scripts/dev-container.sh bash -c '
+            cargo metadata --format-version 1 \
+              --features ffmpeg-decode-hevc-sw-main10,ffmpeg-decode-hevc-vaapi-main10,ffmpeg-decode-hevc-nvdec-main10 \
+              --manifest-path crates/media-ffmpeg/Cargo.toml \
+              --filter-platform x86_64-unknown-linux-gnu \
+            | python3 -c "
+          import json, sys
+          m = json.load(sys.stdin)
+          for node in m[\"resolve\"][\"nodes\"]:
+              if node[\"id\"].startswith(\"registry+https://github.com/rust-lang/crates.io-index#rusty_ffmpeg@\") \
+                 or node[\"id\"].startswith(\"rusty_ffmpeg \"):
+                  enabled = set(node[\"features\"])
+                  assert \"ffmpeg6\" in enabled, f\"expected ffmpeg6 in unified rusty_ffmpeg features, got {enabled}\"
+                  print(f\"OK: decode-main10 3-backend co-resolution features: {sorted(enabled)}\")
+                  sys.exit(0)
+          sys.exit(\"rusty_ffmpeg not found in resolved graph\")
+          "
+          ' || { echo "::error::decode-main10 3-backend co-resolution: rusty_ffmpeg did not resolve expected features (Cargo unification broken)"; exit 1; }
       # --- Safety + grep guards ---
       - name: Safety-comment lint
         run: ./scripts/dev-container.sh bash -c 'python3 scripts/check-safety-comments.py crates/media-ffmpeg/src/'
@@ -342,7 +415,7 @@ jobs:
           # O1 carve-out (P2.5): hevc_nvenc_npp_encoder.rs uses cudaMemcpy2DAsync
           # (cuda-direct) instead of av_hwframe_transfer_data — it must have ZERO
           # hw_(upload|download) call sites. The general ≤1 guard still holds for
-          # all other encoder/decoder files.
+          # all other encoder/decoder files (including Main10 decoders added in P3).
           fail=0
           shopt -s nullglob
           for f in crates/media-ffmpeg/src/hevc_*_encoder.rs crates/media-ffmpeg/src/hevc_*_decoder.rs; do

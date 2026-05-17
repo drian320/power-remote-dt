@@ -40,6 +40,10 @@ from typing import Optional
 PROTECTED = [
     ("crates/media-ffmpeg/src/options.rs", 38, 87),
     ("crates/media-ffmpeg/src/nvenc_common.rs", 41, 96),
+    # P3 PR2: copy_nv12_planes is the 8-bit decoder plane-copy helper; its body
+    # must stay byte-stable when copy_p010_planes (_main10 sibling) is appended
+    # after it. Range is in OLD-file (master) coordinates: lines 56-83.
+    ("crates/media-ffmpeg/src/decoder_common.rs", 56, 83),
 ]
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
@@ -153,6 +157,7 @@ if __name__ == "__main__":
     if ok:
         print(
             "byte-identity guard PASS: "
-            "options.rs:38-87 unchanged; nvenc_common.rs:41-96 unchanged"
+            "options.rs:38-87 unchanged; nvenc_common.rs:41-96 unchanged; "
+            "decoder_common.rs:56-83 unchanged"
         )
     sys.exit(0 if ok else 1)
