@@ -55,6 +55,9 @@ ffmpeg-encode-hevc-vaapi-main10-ffmpeg7 = ["prdt-host/ffmpeg-encode-hevc-vaapi-m
 ffmpeg-encode-hevc-nvenc-main10 = ["prdt-host/ffmpeg-encode-hevc-nvenc-main10"]
 ffmpeg-encode-hevc-nvenc-main10-ffmpeg5 = ["prdt-host/ffmpeg-encode-hevc-nvenc-main10-ffmpeg5"]
 ffmpeg-encode-hevc-nvenc-main10-ffmpeg7 = ["prdt-host/ffmpeg-encode-hevc-nvenc-main10-ffmpeg7"]
+# PR3 — Windows HDR10 display path. Forwarded onto prdt-viewer (Windows target
+# dep) which forwards onto prdt-media-win.
+media-win-hdr10 = ["prdt-viewer/media-win-hdr10"]
 
 # P2 — HEVC decode forwarded onto prdt-host (which forwards onto
 # prdt-media-linux). The unified `prdt` binary can then be built with e.g.

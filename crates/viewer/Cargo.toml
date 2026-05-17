@@ -74,6 +74,9 @@ ffmpeg-decode-hevc-nvdec-ffmpeg5 = ["prdt-media-linux/ffmpeg-decode-hevc-nvdec-f
 ffmpeg-decode-hevc-nvdec-ffmpeg6 = ["prdt-media-linux/ffmpeg-decode-hevc-nvdec-ffmpeg6", "ffmpeg-decode-hevc-nvdec-any"]
 ffmpeg-decode-hevc-nvdec-ffmpeg7 = ["prdt-media-linux/ffmpeg-decode-hevc-nvdec-ffmpeg7", "ffmpeg-decode-hevc-nvdec-any"]
 ffmpeg-decode-hevc-nvdec-any = []
+# PR3 — Windows HDR10 display path. Forwarded onto prdt-media-win so the
+# viewer binary can be built with HDR10 support enabled end-to-end.
+media-win-hdr10 = ["prdt-media-win/media-win-hdr10"]
 
 # P3.2 — HEVC Main10 decode features forwarded onto prdt-media-linux.
 ffmpeg-decode-hevc-sw-main10 = ["prdt-media-linux/ffmpeg-decode-hevc-sw-main10", "ffmpeg-decode-hevc-sw-main10-any"]

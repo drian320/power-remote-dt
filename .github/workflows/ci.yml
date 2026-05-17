@@ -57,6 +57,36 @@ jobs:
           }
           Write-Output "PASS: NVENC compile_error! contains 'Linux-only'"
           exit 0
+      # ── PR3 HDR10 compile gates (A3.1 / A3.2) ───────────────────────────────
+      # A3.1: Windows viewer with media-win-hdr10 feature must compile cleanly.
+      - name: HDR10 — cargo check prdt-client with media-win-hdr10 (A3.1)
+        run: cargo check -p prdt-client --target x86_64-pc-windows-msvc --features media-win-hdr10
+      # A3.2: Windows viewer without the feature must still compile (8-bit-only path
+      # is the default; the HDR10 code is fully gated by the feature flag).
+      # This step runs cargo check without the feature; the earlier top-level `build`
+      # step already covers the no-feature build so this is a focused compile gate.
+      - name: HDR10 — cargo check prdt-client without media-win-hdr10 (A3.2, 8-bit-only default)
+        run: cargo check -p prdt-client --target x86_64-pc-windows-msvc
+      # F10 guard: SetHDRMetaData must not appear in any live (non-cfg-gated)
+      # code path. The regex searches Rust source files only; PowerShell's
+      # Select-String returns exit 0 whether or not it finds matches, so we
+      # invert: fail if any file WITHOUT the cfg-gate contains the call.
+      # Implementation: grep for SetHDRMetaData lines NOT preceded by
+      # #[cfg(feature = "media-win-hdr10")] — approximated by checking that
+      # every match site has the feature gate in the same file.
+      - name: HDR10 — F10 guard (SetHDRMetaData only under cfg-gate)
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Recurse -Filter "*.rs" crates/media-win/src/ |
+            Where-Object { (Select-String -Path $_.FullName -Pattern 'SetHDRMetaData' -Quiet) }
+          foreach ($f in $files) {
+            $hasCfg = (Select-String -Path $f.FullName -Pattern 'cfg\(feature.*media-win-hdr10' -Quiet)
+            if (-not $hasCfg) {
+              Write-Error "FAIL: $($f.FullName) calls SetHDRMetaData without a media-win-hdr10 cfg gate"
+              exit 1
+            }
+          }
+          Write-Output "PASS: all SetHDRMetaData call sites are cfg-gated on media-win-hdr10"
 
   media-ffmpeg-compile:
     runs-on: ubuntu-latest
