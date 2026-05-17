@@ -263,7 +263,7 @@ jobs:
         env:
           FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
           FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
-          LIBRARY_PATH: /usr/local/cuda-12-6/lib64
+          LIBRARY_PATH: /usr/local/cuda-12.6/lib64
         run: |
           cargo build \
             --release \

@@ -86,6 +86,7 @@ pub fn linux_supported_codecs(encoder_arg: &str) -> Vec<prdt_protocol::Codec> {
 /// negotiate successfully. NOT the HelloAck advertisement list; use
 /// `supported_codecs_for(hello_codec)` to build that (R15 filter).
 pub fn linux_supported_codecs_negotiation(encoder_arg: &str) -> Vec<prdt_protocol::Codec> {
+    #[allow(unused_mut)] // `mut` is conditional on Main10 features being enabled
     let mut v = linux_supported_codecs(encoder_arg);
     #[cfg(any(
         feature = "ffmpeg-encode-hevc-vaapi-main10-any",
