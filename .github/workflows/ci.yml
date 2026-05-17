@@ -3,6 +3,12 @@ on:
   push:
     branches: [master]
   pull_request:
+    paths:
+      - 'crates/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'packaging/windows/**'
+      - '.github/workflows/ci.yml'
 
 jobs:
   check:
@@ -114,6 +120,46 @@ jobs:
       # Lint: clippy on the new module (F8.A12 clippy cell).
       - name: F8 — cargo clippy prdt-media-win with media-win-hevc-main10 (A12 lint gate)
         run: cargo clippy -p prdt-media-win --target x86_64-pc-windows-msvc --features media-win-hevc-main10 -- -D warnings
+
+      # ── F-WIN-FFMPEG PR1 cells ────────────────────────────────────────────────
+      # Bootstrap note: the first CI run after PR1 merges will FAIL at the fetch
+      # step because packaging/windows/ffmpeg-manifest.json ships with a sha256
+      # placeholder value. Maintainer remediation:
+      #   1. Run locally: $env:ALLOW_UNVERIFIED_SHA256=1; .\scripts\fetch-ffmpeg-windows.ps1
+      #   2. Copy the printed sha256 into packaging/windows/ffmpeg-manifest.json
+      #   3. Commit + push the updated manifest; CI will pass from that point on.
+      # Never set ALLOW_UNVERIFIED_SHA256=1 in CI — it is a local-bootstrap-only opt-in.
+      - name: F-WIN-FFMPEG — Cache FFmpeg Windows DLLs
+        uses: actions/cache@v4
+        with:
+          path: target/windows-ffmpeg
+          key: ffmpeg-windows-${{ hashFiles('packaging/windows/ffmpeg-manifest.json') }}
+
+      - name: F-WIN-FFMPEG — fetch FFmpeg DLLs (PR1.A3)
+        shell: pwsh
+        run: .\scripts\fetch-ffmpeg-windows.ps1
+
+      - name: F-WIN-FFMPEG — export FFmpeg env vars
+        shell: pwsh
+        run: |
+          . target\windows-ffmpeg\env.ps1
+          echo "FFMPEG_DLL_PATH=$env:FFMPEG_DLL_PATH"       >> $env:GITHUB_ENV
+          echo "FFMPEG_INCLUDE_DIR=$env:FFMPEG_INCLUDE_DIR" >> $env:GITHUB_ENV
+          echo "FFMPEG_LIB_DIR=$env:FFMPEG_LIB_DIR"         >> $env:GITHUB_ENV
+
+      - name: F-WIN-FFMPEG — cargo check prdt-media-win without media-win-ffmpeg (PR1.A1)
+        run: cargo check -p prdt-media-win --target x86_64-pc-windows-msvc
+
+      - name: F-WIN-FFMPEG — cargo check prdt-media-win with media-win-ffmpeg (PR1.A2)
+        run: cargo check -p prdt-media-win --target x86_64-pc-windows-msvc --features media-win-ffmpeg
+
+      - name: F-WIN-FFMPEG — MF byte-identity guard re-assertion (PR1.byte-id-mf)
+        # Runs on windows-latest via Git Bash (shell: bash) + python3 which is
+        # available on all GitHub-hosted runners. Asserts that mf/decoder.rs,
+        # mf/decoder_main10.rs, and mf/encoder.rs are byte-identical to the
+        # master baseline pinned in check-8bit-helpers-byte-identity.py.
+        shell: bash
+        run: python3 scripts/check-8bit-helpers-byte-identity.py --include-mf-files
 
   media-ffmpeg-compile:
     runs-on: ubuntu-latest
@@ -497,3 +543,19 @@ jobs:
             fail=1
           fi
           exit $fail
+
+  ffmpeg-pin-discipline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: assert rusty_ffmpeg is exact-pinned to =0.16.7 across all crates
+        run: |
+          set -euo pipefail
+          violations=$(grep -nE '^\s*rusty_ffmpeg' crates/*/Cargo.toml \
+            | grep -vE 'version\s*=\s*"=0\.16\.7"' || true)
+          if [ -n "$violations" ]; then
+            echo "FAIL: rusty_ffmpeg deps not exact-pinned to =0.16.7:"
+            echo "$violations"
+            exit 1
+          fi
+          echo "PASS: all rusty_ffmpeg deps are exact-pinned to =0.16.7"
