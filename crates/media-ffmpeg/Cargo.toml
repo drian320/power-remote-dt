@@ -60,6 +60,28 @@ ffmpeg-encode-hevc-nvenc-ffmpeg7 = ["ffmpeg", "rusty_ffmpeg/ffmpeg7", "ffmpeg-en
 # activates NVENC code paths.
 ffmpeg-encode-hevc-nvenc-any = []
 
+# Main10 VAAPI backend × ABI combinations (P3). Each variant transitively enables
+# the matching 8-bit VAAPI feature so all VAAPI scaffolding is available. The
+# unsuffixed `ffmpeg-encode-hevc-vaapi-main10` defaults to ffmpeg5 (dev container).
+ffmpeg-encode-hevc-vaapi-main10 = ["ffmpeg-encode-hevc-vaapi", "ffmpeg-encode-hevc-vaapi-main10-any"]
+ffmpeg-encode-hevc-vaapi-main10-ffmpeg5 = ["ffmpeg-encode-hevc-vaapi", "rusty_ffmpeg/ffmpeg5", "ffmpeg-encode-hevc-vaapi-main10-any"]
+ffmpeg-encode-hevc-vaapi-main10-ffmpeg6 = ["ffmpeg-encode-hevc-vaapi-ffmpeg6", "ffmpeg-encode-hevc-vaapi-main10-any"]
+ffmpeg-encode-hevc-vaapi-main10-ffmpeg7 = ["ffmpeg-encode-hevc-vaapi-ffmpeg7", "ffmpeg-encode-hevc-vaapi-main10-any"]
+# Marker enabled by all four VAAPI Main10 ABI variants; use in cfg() so any ABI
+# activates VAAPI Main10 code paths.
+ffmpeg-encode-hevc-vaapi-main10-any = []
+
+# Main10 NVENC backend × ABI combinations (P3). Each variant transitively enables
+# the matching 8-bit NVENC feature. The unsuffixed variant defaults to ffmpeg6
+# (Ubuntu 24.04 smoke runner; mirrors the 8-bit NVENC default).
+ffmpeg-encode-hevc-nvenc-main10 = ["ffmpeg-encode-hevc-nvenc", "ffmpeg-encode-hevc-nvenc-main10-any"]
+ffmpeg-encode-hevc-nvenc-main10-ffmpeg5 = ["ffmpeg-encode-hevc-nvenc-ffmpeg5", "ffmpeg-encode-hevc-nvenc-main10-any"]
+ffmpeg-encode-hevc-nvenc-main10-ffmpeg6 = ["ffmpeg-encode-hevc-nvenc", "ffmpeg-encode-hevc-nvenc-main10-any"]
+ffmpeg-encode-hevc-nvenc-main10-ffmpeg7 = ["ffmpeg-encode-hevc-nvenc-ffmpeg7", "ffmpeg-encode-hevc-nvenc-main10-any"]
+# Marker enabled by all four NVENC Main10 ABI variants; use in cfg() so any ABI
+# activates NVENC Main10 code paths.
+ffmpeg-encode-hevc-nvenc-main10-any = []
+
 # NPP variants (P2.5). Each NPP-ffmpegN feature transitively enables the matching
 # NVENC-ffmpegN feature so downstream crates can opt into a single feature and
 # get the consistent NVENC + NPP pair. ABI consistency is guaranteed by Cargo's

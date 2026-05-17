@@ -255,6 +255,39 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
+      - name: Build prdt with VAAPI + NVENC Main10 encode paths (P3 — HDR10 smoke)
+        # No CUDA toolkit needed for Main10: vaapi-main10 and nvenc-main10 use
+        # standard FFmpeg API calls (no NPP hand-declarations). CUDA toolkit is
+        # already installed above (for the NPP step) so linker search paths are
+        # still valid if the nvenc-main10 path indirectly needs them.
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+          LIBRARY_PATH: /usr/local/cuda-12.6/lib64
+        run: |
+          cargo build \
+            --release \
+            -p prdt-client \
+            --features ffmpeg-encode-hevc-vaapi-main10,ffmpeg-encode-hevc-nvenc-main10 \
+            --target x86_64-unknown-linux-gnu
+
+      - name: Stage HEVC-encode-Main10 artifact
+        run: |
+          cp target/x86_64-unknown-linux-gnu/release/prdt artifacts/prdt-linux-x86_64-ffmpeg-hevc-encode-main10
+          chmod +x artifacts/prdt-linux-x86_64-ffmpeg-hevc-encode-main10
+          (cd artifacts && sha256sum prdt-linux-x86_64-ffmpeg-hevc-encode-main10 > prdt-linux-x86_64-ffmpeg-hevc-encode-main10.sha256)
+          ls -la artifacts/prdt-linux-x86_64-ffmpeg-hevc-encode-main10*
+          file artifacts/prdt-linux-x86_64-ffmpeg-hevc-encode-main10
+          ldd artifacts/prdt-linux-x86_64-ffmpeg-hevc-encode-main10 | grep -E 'libav|libva|libcuda|libnvidia' || true
+
+      - name: Upload HEVC-encode-Main10 workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prdt-linux-x86_64-ffmpeg-hevc-encode-main10
+          path: artifacts/prdt-linux-x86_64-ffmpeg-hevc-encode-main10*
+          retention-days: 30
+          if-no-files-found: error
+
   build-windows:
     name: Build Windows x86_64 prdt (viewer-side, no FFmpeg feature)
     # Windows side decodes HEVC via Media Foundation / NVDEC — it does NOT need

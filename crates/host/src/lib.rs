@@ -768,9 +768,14 @@ pub async fn run_host(
                 .context("pick_default_adapter for codec advertisement")?;
             crate::platform::win::supported_codecs_for_encoder_arg(&args.encoder, &adapter)
         };
+        // On Linux, the negotiation set includes H265Main10 when a Main10
+        // encoder feature is compiled in (so Main10 clients can negotiate).
+        // `supported_codecs_for` is passed as the ack-filter: it strips
+        // H265Main10 from HelloAck when the inbound Hello.codec is a
+        // pre-PR1 codec (R15 mitigation).
         #[cfg(target_os = "linux")]
         let host_supported: Vec<Codec> =
-            crate::platform::linux::linux_supported_codecs(&args.encoder);
+            crate::platform::linux::linux_supported_codecs_negotiation(&args.encoder);
         let hs_result = match host_handshake(
             &*transport,
             &auth_hook,
@@ -781,6 +786,17 @@ pub async fn run_host(
             monitor_rect,
             vd_rect,
             &host_supported,
+            {
+                #[cfg(target_os = "linux")]
+                {
+                    crate::platform::linux::supported_codecs_for
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let hs = host_supported.clone();
+                    move |_: Codec| hs.clone()
+                }
+            },
             Duration::from_secs(60),
         )
         .await
@@ -1457,7 +1473,7 @@ fn to_policy_codec(c: prdt_protocol::Codec) -> prdt_media_policy::Codec {
     match c {
         Codec::H264 => prdt_media_policy::Codec::H264,
         Codec::H265 => prdt_media_policy::Codec::H265,
-        Codec::Av1 => {
+        Codec::Av1 | Codec::H265Main10 => {
             tracing::warn!(
                 "prdt_protocol::Codec::Av1 not supported by prdt_media_policy in P5A; \
                  falling back to H264 for policy ranking (codec hot-swap deferred to P5C)"

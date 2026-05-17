@@ -9,6 +9,11 @@ pub enum Codec {
     H265 = 0,
     H264 = 1,
     Av1 = 2,
+    /// HEVC Main10 (10-bit 4:2:0). variant_index=3 on the wire.
+    /// Pre-PR1 clients reject this discriminant at the bincode layer;
+    /// hosts MUST NOT advertise it in HelloAck unless the inbound
+    /// Hello.codec was itself H265Main10 (R15 mitigation).
+    H265Main10 = 3,
 }
 
 impl Codec {
@@ -17,6 +22,7 @@ impl Codec {
             0 => Some(Self::H265),
             1 => Some(Self::H264),
             2 => Some(Self::Av1),
+            3 => Some(Self::H265Main10),
             _ => None,
         }
     }
@@ -26,6 +32,7 @@ impl Codec {
             Self::H265 => "h265",
             Self::H264 => "h264",
             Self::Av1 => "av1",
+            Self::H265Main10 => "h265-main10",
         }
     }
 }
@@ -99,6 +106,30 @@ mod tests {
             assert_eq!(c as u8, v);
         }
         assert!(Codec::from_u8(42).is_none());
+    }
+
+    #[test]
+    fn codec_from_u8_h265_main10() {
+        assert_eq!(Codec::from_u8(3), Some(Codec::H265Main10));
+    }
+
+    #[test]
+    fn codec_h265_main10_name() {
+        assert_eq!(Codec::H265Main10.name(), "h265-main10");
+    }
+
+    // bincode 1.3 fixint encodes variant_index as 4-byte LE u32.
+    #[test]
+    fn codec_h265_main10_bincode_wire_bytes() {
+        let c = Codec::H265Main10;
+        let bytes = bincode::serialize(&c).expect("serialize");
+        assert_eq!(
+            bytes,
+            [3, 0, 0, 0],
+            "bincode 1.3 fixint encodes variant_index as u32 LE"
+        );
+        let back: Codec = bincode::deserialize(&bytes).expect("deserialize");
+        assert_eq!(c, back);
     }
 
     #[test]

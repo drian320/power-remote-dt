@@ -43,6 +43,10 @@ pub enum LinuxEncoder {
     FfmpegNvencHevc(prdt_media_ffmpeg::HevcNvencFfmpegEncoderAdapter),
     #[cfg(feature = "ffmpeg-encode-hevc-nvenc-npp-any")]
     FfmpegNvencHevcNpp(prdt_media_ffmpeg::HevcNvencNppFfmpegEncoderAdapter),
+    #[cfg(feature = "ffmpeg-encode-hevc-vaapi-main10-any")]
+    FfmpegVaapiHevcMain10(prdt_media_ffmpeg::HevcVaapiMain10FfmpegEncoder),
+    #[cfg(feature = "ffmpeg-encode-hevc-nvenc-main10-any")]
+    FfmpegNvencHevcMain10(prdt_media_ffmpeg::HevcNvencMain10FfmpegEncoder),
 }
 
 #[allow(dead_code)]
@@ -56,6 +60,10 @@ impl LinuxEncoder {
             LinuxEncoder::FfmpegNvencHevc(_) => prdt_protocol::Codec::H265,
             #[cfg(feature = "ffmpeg-encode-hevc-nvenc-npp-any")]
             LinuxEncoder::FfmpegNvencHevcNpp(_) => prdt_protocol::Codec::H265,
+            #[cfg(feature = "ffmpeg-encode-hevc-vaapi-main10-any")]
+            LinuxEncoder::FfmpegVaapiHevcMain10(_) => prdt_protocol::Codec::H265Main10,
+            #[cfg(feature = "ffmpeg-encode-hevc-nvenc-main10-any")]
+            LinuxEncoder::FfmpegNvencHevcMain10(_) => prdt_protocol::Codec::H265Main10,
         }
     }
 }
@@ -71,6 +79,45 @@ pub fn linux_supported_codecs(encoder_arg: &str) -> Vec<prdt_protocol::Codec> {
         "ffmpeg-nvenc-hevc-npp" => vec![prdt_protocol::Codec::H265],
         _ => vec![prdt_protocol::Codec::H264],
     }
+}
+
+/// Full negotiation set for Hello.codec acceptance — includes H265Main10 when
+/// a Main10 encoder feature is compiled in so that Main10-capable clients can
+/// negotiate successfully. NOT the HelloAck advertisement list; use
+/// `supported_codecs_for(hello_codec)` to build that (R15 filter).
+pub fn linux_supported_codecs_negotiation(encoder_arg: &str) -> Vec<prdt_protocol::Codec> {
+    #[allow(unused_mut)] // `mut` is conditional on Main10 features being enabled
+    let mut v = linux_supported_codecs(encoder_arg);
+    #[cfg(any(
+        feature = "ffmpeg-encode-hevc-vaapi-main10-any",
+        feature = "ffmpeg-encode-hevc-nvenc-main10-any"
+    ))]
+    if !v.contains(&prdt_protocol::Codec::H265Main10) {
+        v.push(prdt_protocol::Codec::H265Main10);
+    }
+    v
+}
+
+/// Pre-existing codec variants (variant_index 0/1/2) safe to send to any client.
+fn linux_supported_codecs_base() -> Vec<prdt_protocol::Codec> {
+    vec![
+        prdt_protocol::Codec::H265,
+        prdt_protocol::Codec::H264,
+        prdt_protocol::Codec::Av1,
+    ]
+}
+
+/// R15 mitigation: only advertise `Codec::H265Main10` (variant_index=3) to
+/// clients whose inbound `Hello.codec` was already `H265Main10`. Pre-PR1
+/// clients sending `H264`, `H265`, or `Av1` receive a HelloAck containing
+/// only pre-existing variants 0/1/2 — bincode never encounters an unknown
+/// variant_index, so the message decodes cleanly.
+pub fn supported_codecs_for(hello_codec: prdt_protocol::Codec) -> Vec<prdt_protocol::Codec> {
+    let mut v = linux_supported_codecs_base();
+    if hello_codec == prdt_protocol::Codec::H265Main10 {
+        v.push(prdt_protocol::Codec::H265Main10);
+    }
+    v
 }
 
 /// Build a boxed `VideoProducer` for the Linux path. Resolves the requested
@@ -146,6 +193,44 @@ pub fn build_video_producer(
         let cap = prdt_media_linux::x11_capture::X11ShmCapturer::new()
             .context("X11ShmCapturer::new for ffmpeg-nvenc-hevc-npp path")?;
         let producer = FfmpegNvencNppProducer::new(Box::new(cap), adapter, fps);
+        return Ok(Box::new(producer));
+    }
+    #[cfg(feature = "ffmpeg-encode-hevc-vaapi-main10-any")]
+    if _backend == "ffmpeg-vaapi-hevc-main10" {
+        use anyhow::Context as _;
+        use prdt_media_ffmpeg::{HevcVaapiMain10FfmpegEncoder, HevcVaapiMain10FfmpegEncoderConfig};
+        let cfg = HevcVaapiMain10FfmpegEncoderConfig {
+            width: 1920,
+            height: 1080,
+            fps,
+            initial_bitrate_bps: bitrate_bps,
+            gop_size: fps,
+            render_node: None,
+        };
+        let enc =
+            HevcVaapiMain10FfmpegEncoder::new(cfg).context("HevcVaapiMain10FfmpegEncoder::new")?;
+        let cap = prdt_media_linux::x11_capture::X11ShmCapturer::new()
+            .context("X11ShmCapturer::new for ffmpeg-vaapi-hevc-main10 path")?;
+        let producer = FfmpegVaapiMain10Producer::new(Box::new(cap), enc, fps);
+        return Ok(Box::new(producer));
+    }
+    #[cfg(feature = "ffmpeg-encode-hevc-nvenc-main10-any")]
+    if _backend == "ffmpeg-nvenc-hevc-main10" {
+        use anyhow::Context as _;
+        use prdt_media_ffmpeg::{HevcNvencMain10FfmpegEncoder, HevcNvencMain10FfmpegEncoderConfig};
+        let cfg = HevcNvencMain10FfmpegEncoderConfig {
+            width: 1920,
+            height: 1080,
+            fps,
+            initial_bitrate_bps: bitrate_bps,
+            gop_size: fps,
+            cuda_device_index: None,
+        };
+        let enc =
+            HevcNvencMain10FfmpegEncoder::new(cfg).context("HevcNvencMain10FfmpegEncoder::new")?;
+        let cap = prdt_media_linux::x11_capture::X11ShmCapturer::new()
+            .context("X11ShmCapturer::new for ffmpeg-nvenc-hevc-main10 path")?;
+        let producer = FfmpegNvencMain10Producer::new(Box::new(cap), enc, fps);
         return Ok(Box::new(producer));
     }
     let producer = prdt_media_linux::build_video_producer(bitrate_bps, fps)?;
@@ -642,6 +727,313 @@ impl VideoProducer for FfmpegNvencNppProducer {
     }
 }
 
+/// `VideoProducer` that wires an X11 BGRA capture source into the
+/// FFmpeg VAAPI HEVC Main10 encoder. Mirrors `FfmpegNvencNppProducer`
+/// (raw BGRA in, P010LE conversion handled inside the encoder).
+#[cfg(feature = "ffmpeg-encode-hevc-vaapi-main10-any")]
+struct FfmpegVaapiMain10Producer {
+    capture: Option<Box<dyn prdt_media_linux::capture_source::CaptureSource>>,
+    encoder: Option<prdt_media_ffmpeg::HevcVaapiMain10FfmpegEncoder>,
+    bgra_buf: Vec<u8>,
+    pacer: tokio::time::Interval,
+    seq: u64,
+    idr_pending: bool,
+    width: u32,
+    height: u32,
+    poisoned: bool,
+}
+
+#[cfg(feature = "ffmpeg-encode-hevc-vaapi-main10-any")]
+impl FfmpegVaapiMain10Producer {
+    fn new(
+        capture: Box<dyn prdt_media_linux::capture_source::CaptureSource>,
+        encoder: prdt_media_ffmpeg::HevcVaapiMain10FfmpegEncoder,
+        fps: u32,
+    ) -> Self {
+        let (width, height) = capture.geometry();
+        let micros = if fps == 0 {
+            16_667
+        } else {
+            1_000_000 / fps as u64
+        };
+        let mut pacer = tokio::time::interval(std::time::Duration::from_micros(micros));
+        pacer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        Self {
+            capture: Some(capture),
+            encoder: Some(encoder),
+            bgra_buf: vec![0u8; (width * height * 4) as usize],
+            pacer,
+            seq: 0,
+            idr_pending: true,
+            width,
+            height,
+            poisoned: false,
+        }
+    }
+}
+
+#[cfg(feature = "ffmpeg-encode-hevc-vaapi-main10-any")]
+#[async_trait::async_trait]
+impl VideoProducer for FfmpegVaapiMain10Producer {
+    async fn next_frame(
+        &mut self,
+    ) -> Result<prdt_protocol::EncodedFrame, prdt_protocol::ProducerError> {
+        if self.poisoned {
+            return Err(prdt_protocol::ProducerError::Capture(
+                "producer poisoned; drop and recreate".into(),
+            ));
+        }
+
+        self.pacer.tick().await;
+
+        let mut bgra = std::mem::take(&mut self.bgra_buf);
+        let mut capture = self
+            .capture
+            .take()
+            .expect("capture taken twice; producer state corrupted");
+        let capture_join = tokio::task::spawn_blocking(move || {
+            let r = capture.capture_into(&mut bgra);
+            (bgra, capture, r)
+        })
+        .await;
+        let (bgra, capture, capture_result) = match capture_join {
+            Ok(triple) => triple,
+            Err(e) => {
+                self.poisoned = true;
+                return Err(prdt_protocol::ProducerError::Capture(format!(
+                    "producer poisoned by inner panic: {e}"
+                )));
+            }
+        };
+        self.bgra_buf = bgra;
+        self.capture = Some(capture);
+
+        use prdt_media_linux::capture_source::CaptureSourceError;
+        match capture_result {
+            Ok(()) => {}
+            Err(CaptureSourceError::WouldBlock(reason)) => {
+                return Err(prdt_protocol::ProducerError::Capture(format!(
+                    "would_block: {reason}"
+                )));
+            }
+            Err(CaptureSourceError::Terminal { backend, reason }) => {
+                return Err(prdt_protocol::ProducerError::Capture(format!(
+                    "{backend}: {reason}"
+                )));
+            }
+        }
+
+        let bgra = std::mem::take(&mut self.bgra_buf);
+        let width = self.width;
+        let height = self.height;
+        let force_idr = std::mem::take(&mut self.idr_pending);
+        let ts_us = prdt_protocol::now_monotonic_us();
+
+        let mut enc = self
+            .encoder
+            .take()
+            .expect("encoder taken twice; producer state corrupted");
+        let encode_join = tokio::task::spawn_blocking(move || {
+            let pkt = enc
+                .encode(&bgra, width, height, force_idr, ts_us)
+                .map_err(|e| prdt_protocol::ProducerError::Encode(e.to_string()))?;
+            Ok::<_, prdt_protocol::ProducerError>((enc, bgra, pkt))
+        })
+        .await;
+        let (enc_back, bgra_back, pkt) = match encode_join {
+            Ok(Ok(triple)) => triple,
+            Ok(Err(e)) => return Err(e),
+            Err(e) => {
+                self.poisoned = true;
+                return Err(prdt_protocol::ProducerError::Capture(format!(
+                    "producer poisoned by inner panic: {e}"
+                )));
+            }
+        };
+        self.encoder = Some(enc_back);
+        self.bgra_buf = bgra_back;
+
+        let seq = self.seq;
+        self.seq += 1;
+        Ok(prdt_protocol::EncodedFrame {
+            seq,
+            timestamp_host_us: pkt.timestamp_us,
+            is_keyframe: pkt.is_keyframe,
+            nal_units: bytes::Bytes::from(pkt.nal_bytes),
+            width: self.width,
+            height: self.height,
+            codec: prdt_protocol::Codec::H265Main10,
+        })
+    }
+
+    fn request_idr(&mut self) {
+        self.idr_pending = true;
+    }
+
+    fn set_target_bitrate(&mut self, bps: u32) {
+        if let Some(e) = self.encoder.as_mut() {
+            let _ = e.set_target_bitrate(bps);
+        }
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "ffmpeg-vaapi-hevc-main10"
+    }
+}
+
+/// `VideoProducer` that wires an X11 BGRA capture source into the
+/// FFmpeg NVENC HEVC Main10 encoder. Mirrors `FfmpegVaapiMain10Producer`.
+#[cfg(feature = "ffmpeg-encode-hevc-nvenc-main10-any")]
+struct FfmpegNvencMain10Producer {
+    capture: Option<Box<dyn prdt_media_linux::capture_source::CaptureSource>>,
+    encoder: Option<prdt_media_ffmpeg::HevcNvencMain10FfmpegEncoder>,
+    bgra_buf: Vec<u8>,
+    pacer: tokio::time::Interval,
+    seq: u64,
+    idr_pending: bool,
+    width: u32,
+    height: u32,
+    poisoned: bool,
+}
+
+#[cfg(feature = "ffmpeg-encode-hevc-nvenc-main10-any")]
+impl FfmpegNvencMain10Producer {
+    fn new(
+        capture: Box<dyn prdt_media_linux::capture_source::CaptureSource>,
+        encoder: prdt_media_ffmpeg::HevcNvencMain10FfmpegEncoder,
+        fps: u32,
+    ) -> Self {
+        let (width, height) = capture.geometry();
+        let micros = if fps == 0 {
+            16_667
+        } else {
+            1_000_000 / fps as u64
+        };
+        let mut pacer = tokio::time::interval(std::time::Duration::from_micros(micros));
+        pacer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        Self {
+            capture: Some(capture),
+            encoder: Some(encoder),
+            bgra_buf: vec![0u8; (width * height * 4) as usize],
+            pacer,
+            seq: 0,
+            idr_pending: true,
+            width,
+            height,
+            poisoned: false,
+        }
+    }
+}
+
+#[cfg(feature = "ffmpeg-encode-hevc-nvenc-main10-any")]
+#[async_trait::async_trait]
+impl VideoProducer for FfmpegNvencMain10Producer {
+    async fn next_frame(
+        &mut self,
+    ) -> Result<prdt_protocol::EncodedFrame, prdt_protocol::ProducerError> {
+        if self.poisoned {
+            return Err(prdt_protocol::ProducerError::Capture(
+                "producer poisoned; drop and recreate".into(),
+            ));
+        }
+
+        self.pacer.tick().await;
+
+        let mut bgra = std::mem::take(&mut self.bgra_buf);
+        let mut capture = self
+            .capture
+            .take()
+            .expect("capture taken twice; producer state corrupted");
+        let capture_join = tokio::task::spawn_blocking(move || {
+            let r = capture.capture_into(&mut bgra);
+            (bgra, capture, r)
+        })
+        .await;
+        let (bgra, capture, capture_result) = match capture_join {
+            Ok(triple) => triple,
+            Err(e) => {
+                self.poisoned = true;
+                return Err(prdt_protocol::ProducerError::Capture(format!(
+                    "producer poisoned by inner panic: {e}"
+                )));
+            }
+        };
+        self.bgra_buf = bgra;
+        self.capture = Some(capture);
+
+        use prdt_media_linux::capture_source::CaptureSourceError;
+        match capture_result {
+            Ok(()) => {}
+            Err(CaptureSourceError::WouldBlock(reason)) => {
+                return Err(prdt_protocol::ProducerError::Capture(format!(
+                    "would_block: {reason}"
+                )));
+            }
+            Err(CaptureSourceError::Terminal { backend, reason }) => {
+                return Err(prdt_protocol::ProducerError::Capture(format!(
+                    "{backend}: {reason}"
+                )));
+            }
+        }
+
+        let bgra = std::mem::take(&mut self.bgra_buf);
+        let width = self.width;
+        let height = self.height;
+        let force_idr = std::mem::take(&mut self.idr_pending);
+        let ts_us = prdt_protocol::now_monotonic_us();
+
+        let mut enc = self
+            .encoder
+            .take()
+            .expect("encoder taken twice; producer state corrupted");
+        let encode_join = tokio::task::spawn_blocking(move || {
+            let pkt = enc
+                .encode(&bgra, width, height, force_idr, ts_us)
+                .map_err(|e| prdt_protocol::ProducerError::Encode(e.to_string()))?;
+            Ok::<_, prdt_protocol::ProducerError>((enc, bgra, pkt))
+        })
+        .await;
+        let (enc_back, bgra_back, pkt) = match encode_join {
+            Ok(Ok(triple)) => triple,
+            Ok(Err(e)) => return Err(e),
+            Err(e) => {
+                self.poisoned = true;
+                return Err(prdt_protocol::ProducerError::Capture(format!(
+                    "producer poisoned by inner panic: {e}"
+                )));
+            }
+        };
+        self.encoder = Some(enc_back);
+        self.bgra_buf = bgra_back;
+
+        let seq = self.seq;
+        self.seq += 1;
+        Ok(prdt_protocol::EncodedFrame {
+            seq,
+            timestamp_host_us: pkt.timestamp_us,
+            is_keyframe: pkt.is_keyframe,
+            nal_units: bytes::Bytes::from(pkt.nal_bytes),
+            width: self.width,
+            height: self.height,
+            codec: prdt_protocol::Codec::H265Main10,
+        })
+    }
+
+    fn request_idr(&mut self) {
+        self.idr_pending = true;
+    }
+
+    fn set_target_bitrate(&mut self, bps: u32) {
+        if let Some(e) = self.encoder.as_mut() {
+            let _ = e.set_target_bitrate(bps);
+        }
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "ffmpeg-nvenc-hevc-main10"
+    }
+}
+
 /// Map any encoder CLI arg to the canonical backend name on Linux.
 fn normalize_encoder(arg: &str) -> &'static str {
     match arg {
@@ -698,6 +1090,57 @@ fn normalize_encoder(arg: &str) -> &'static str {
                 requested = arg,
                 hint = "rebuild with --features ffmpeg-encode-hevc-nvenc-npp",
                 "NVENC HEVC NPP backend not compiled in; falling back to openh264"
+            );
+            "openh264"
+        }
+        // P3 Main10 VAAPI path (explicit opt-in only; `auto` keeps 8-bit, A1.8).
+        #[cfg(feature = "ffmpeg-encode-hevc-vaapi-main10-any")]
+        "ffmpeg-vaapi-hevc-main10" => {
+            tracing::info!(
+                encoder = %arg,
+                selected_by = "explicit-flag",
+                reason = "user-requested",
+                bit_depth = 10,
+                "video encoder selected"
+            );
+            "ffmpeg-vaapi-hevc-main10"
+        }
+        #[cfg(not(feature = "ffmpeg-encode-hevc-vaapi-main10-any"))]
+        "ffmpeg-vaapi-hevc-main10" => {
+            tracing::warn!(
+                requested = arg,
+                hint = "rebuild with --features ffmpeg-encode-hevc-vaapi-main10",
+                "VAAPI HEVC Main10 backend not compiled in; falling back to openh264"
+            );
+            "openh264"
+        }
+        // P3 Main10 NVENC path (explicit opt-in only; `auto` keeps 8-bit, A1.8).
+        #[cfg(feature = "ffmpeg-encode-hevc-nvenc-main10-any")]
+        "ffmpeg-nvenc-hevc-main10" => {
+            tracing::info!(
+                encoder = %arg,
+                selected_by = "explicit-flag",
+                reason = "user-requested",
+                bit_depth = 10,
+                "video encoder selected"
+            );
+            "ffmpeg-nvenc-hevc-main10"
+        }
+        #[cfg(not(feature = "ffmpeg-encode-hevc-nvenc-main10-any"))]
+        "ffmpeg-nvenc-hevc-main10" => {
+            tracing::warn!(
+                requested = arg,
+                hint = "rebuild with --features ffmpeg-encode-hevc-nvenc-main10",
+                "NVENC HEVC Main10 backend not compiled in; falling back to openh264"
+            );
+            "openh264"
+        }
+        // NPP-Main10 is deferred to F3; reject at parse time (A1.7).
+        "ffmpeg-nvenc-hevc-main10-npp" | "nvenc-npp-main10" => {
+            tracing::error!(
+                requested = arg,
+                note = "NPP Main10 is deferred to F3 follow-up (requires a real GPU 10-bit primitive)",
+                "ffmpeg-nvenc-hevc-main10-npp is not supported in PR1; use ffmpeg-nvenc-hevc-main10 instead"
             );
             "openh264"
         }
@@ -1113,6 +1556,71 @@ mod tests {
     fn linux_normalize_encoder_npp_arm_falls_back_without_feature() {
         assert_eq!(normalize_encoder("ffmpeg-nvenc-hevc-npp"), "openh264");
         assert_eq!(normalize_encoder("nvenc-npp"), "openh264");
+    }
+
+    // R15 mitigation: pre-PR1 clients must never receive H265Main10 in HelloAck.
+    #[test]
+    fn supported_codecs_for_excludes_main10_for_legacy_codecs() {
+        use prdt_protocol::Codec;
+        for legacy in [Codec::H265, Codec::H264, Codec::Av1] {
+            let codecs = supported_codecs_for(legacy);
+            assert!(
+                !codecs.contains(&Codec::H265Main10),
+                "H265Main10 must not appear for legacy hello_codec {:?}",
+                legacy
+            );
+        }
+    }
+
+    #[test]
+    fn supported_codecs_for_includes_main10_for_main10_client() {
+        use prdt_protocol::Codec;
+        let codecs = supported_codecs_for(Codec::H265Main10);
+        assert!(
+            codecs.contains(&Codec::H265Main10),
+            "H265Main10 must appear when hello_codec is H265Main10"
+        );
+    }
+
+    // A1.12 sub-test 5: bincode wire bytes for pre-PR1 hello codecs must
+    // never contain variant_index=3 at any Codec slot.
+    // bincode 1.3 encodes Vec<T> as: 8-byte LE u64 length, then each element.
+    // Codec elements are 4-byte LE u32 variant_index. We scan aligned 4-byte
+    // slots starting at byte 8 (after the length prefix) to avoid false
+    // positives from the length field itself (e.g. a 3-element Vec encodes
+    // its length as [3,0,0,0,0,0,0,0] whose first 4 bytes equal [3,0,0,0]).
+    #[test]
+    fn supported_codecs_for_wire_bytes_exclude_variant3_for_legacy_codecs() {
+        use prdt_protocol::Codec;
+        let variant3: [u8; 4] = [3, 0, 0, 0];
+        for legacy in [Codec::H265, Codec::H264, Codec::Av1] {
+            let codecs = supported_codecs_for(legacy);
+            let bytes = bincode::serialize(&codecs).expect("serialize");
+            // Skip the 8-byte length prefix; check each 4-byte Codec slot.
+            let found = bytes[8..].chunks(4).any(|slot| slot == variant3);
+            assert!(
+                !found,
+                "variant_index=3 must not appear in Codec slots for hello_codec {:?}; bytes={:?}",
+                legacy, bytes
+            );
+        }
+    }
+
+    // A1.12 sub-test 6: bincode wire bytes for Main10 hello codec must
+    // contain variant_index=3 at a Codec slot.
+    #[test]
+    fn supported_codecs_for_wire_bytes_include_variant3_for_main10_client() {
+        use prdt_protocol::Codec;
+        let codecs = supported_codecs_for(Codec::H265Main10);
+        let bytes = bincode::serialize(&codecs).expect("serialize");
+        let variant3: [u8; 4] = [3, 0, 0, 0];
+        // Skip the 8-byte length prefix; check each 4-byte Codec slot.
+        let found = bytes[8..].chunks(4).any(|slot| slot == variant3);
+        assert!(
+            found,
+            "variant_index=3 must appear in Codec slots when hello_codec is H265Main10; bytes={:?}",
+            bytes
+        );
     }
 
     /// `build_video_producer` with `ffmpeg-nvenc-hevc-npp` selects the NPP
