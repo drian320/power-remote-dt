@@ -129,6 +129,31 @@ pub use prdt_media_ffmpeg::HevcNvdecFfmpegDecoderAdapter;
 pub use prdt_media_ffmpeg::HevcSwFfmpegDecoderAdapter;
 #[cfg(all(target_os = "linux", feature = "ffmpeg-decode-hevc-vaapi-any"))]
 pub use prdt_media_ffmpeg::HevcVaapiFfmpegDecoderAdapter;
+// P3.2 — Main10 decode re-exports.
+#[cfg(all(
+    target_os = "linux",
+    any(
+        feature = "ffmpeg-decode-hevc-sw-main10-any",
+        feature = "ffmpeg-decode-hevc-vaapi-main10-any",
+        feature = "ffmpeg-decode-hevc-nvdec-main10-any",
+    )
+))]
+pub use prdt_media_core::Nv12Frame16;
+#[cfg(all(
+    target_os = "linux",
+    any(
+        feature = "ffmpeg-decode-hevc-sw-main10-any",
+        feature = "ffmpeg-decode-hevc-vaapi-main10-any",
+        feature = "ffmpeg-decode-hevc-nvdec-main10-any",
+    )
+))]
+pub use prdt_media_ffmpeg::HevcDecoderBackend10;
+#[cfg(all(target_os = "linux", feature = "ffmpeg-decode-hevc-nvdec-main10-any"))]
+pub use prdt_media_ffmpeg::HevcNvdecMain10FfmpegDecoder;
+#[cfg(all(target_os = "linux", feature = "ffmpeg-decode-hevc-sw-main10-any"))]
+pub use prdt_media_ffmpeg::HevcSwMain10FfmpegDecoder;
+#[cfg(all(target_os = "linux", feature = "ffmpeg-decode-hevc-vaapi-main10-any"))]
+pub use prdt_media_ffmpeg::HevcVaapiMain10FfmpegDecoder;
 
 #[cfg(all(target_os = "linux", feature = "ffmpeg-decode-hevc-sw-any"))]
 pub fn build_ffmpeg_sw_hevc_decoder(
@@ -179,6 +204,50 @@ pub fn build_ffmpeg_nvdec_hevc_decoder(
     )
     .context("HevcNvdecFfmpegDecoder::new")?;
     Ok(prdt_media_ffmpeg::HevcDecoderAdapter(dec))
+}
+
+#[cfg(all(target_os = "linux", feature = "ffmpeg-decode-hevc-sw-main10-any"))]
+pub fn build_ffmpeg_sw_hevc_main10_decoder(
+    width: u32,
+    height: u32,
+) -> anyhow::Result<prdt_media_ffmpeg::HevcSwMain10FfmpegDecoder> {
+    use anyhow::Context as _;
+    prdt_media_ffmpeg::HevcSwMain10FfmpegDecoder::new(
+        prdt_media_ffmpeg::HevcSwMain10FfmpegDecoderConfig { width, height },
+    )
+    .context("HevcSwMain10FfmpegDecoder::new")
+}
+
+#[cfg(all(target_os = "linux", feature = "ffmpeg-decode-hevc-vaapi-main10-any"))]
+pub fn build_ffmpeg_vaapi_hevc_main10_decoder(
+    width: u32,
+    height: u32,
+) -> anyhow::Result<prdt_media_ffmpeg::HevcVaapiMain10FfmpegDecoder> {
+    use anyhow::Context as _;
+    prdt_media_ffmpeg::HevcVaapiMain10FfmpegDecoder::new(
+        prdt_media_ffmpeg::HevcVaapiMain10FfmpegDecoderConfig {
+            width,
+            height,
+            render_node: None,
+        },
+    )
+    .context("HevcVaapiMain10FfmpegDecoder::new")
+}
+
+#[cfg(all(target_os = "linux", feature = "ffmpeg-decode-hevc-nvdec-main10-any"))]
+pub fn build_ffmpeg_nvdec_hevc_main10_decoder(
+    width: u32,
+    height: u32,
+) -> anyhow::Result<prdt_media_ffmpeg::HevcNvdecMain10FfmpegDecoder> {
+    use anyhow::Context as _;
+    prdt_media_ffmpeg::HevcNvdecMain10FfmpegDecoder::new(
+        prdt_media_ffmpeg::HevcNvdecMain10FfmpegDecoderConfig {
+            width,
+            height,
+            cuda_device_index: None,
+        },
+    )
+    .context("HevcNvdecMain10FfmpegDecoder::new")
 }
 
 #[cfg(test)]

@@ -82,6 +82,27 @@ compile_error!(
      Windows already has NVDEC HEVC decode via media-win)"
 );
 
+#[cfg(all(feature = "ffmpeg-decode-hevc-sw-main10-any", not(target_os = "linux")))]
+compile_error!(
+    "feature 'ffmpeg-decode-hevc-sw-main10' is not available on this target (Linux-only in P3)"
+);
+
+#[cfg(all(
+    feature = "ffmpeg-decode-hevc-vaapi-main10-any",
+    not(target_os = "linux")
+))]
+compile_error!(
+    "feature 'ffmpeg-decode-hevc-vaapi-main10' is not available on this target (Linux-only in P3)"
+);
+
+#[cfg(all(
+    feature = "ffmpeg-decode-hevc-nvdec-main10-any",
+    not(target_os = "linux")
+))]
+compile_error!(
+    "feature 'ffmpeg-decode-hevc-nvdec-main10' is not available on this target (Linux-only in P3)"
+);
+
 pub mod error;
 
 #[cfg(all(
@@ -124,6 +145,8 @@ pub(crate) mod cuda_npp;
 pub mod decoder_common;
 #[cfg(all(feature = "ffmpeg-decode-hevc-nvdec-any", target_os = "linux"))]
 pub mod hevc_nvdec_decoder;
+#[cfg(all(feature = "ffmpeg-decode-hevc-nvdec-main10-any", target_os = "linux"))]
+pub mod hevc_nvdec_main10_decoder;
 #[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-any", target_os = "linux"))]
 pub mod hevc_nvenc_encoder;
 #[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-main10-any", target_os = "linux"))]
@@ -132,10 +155,14 @@ pub mod hevc_nvenc_main10_encoder;
 pub mod hevc_nvenc_npp_encoder;
 #[cfg(all(feature = "ffmpeg-decode-hevc-sw-any", target_os = "linux"))]
 pub mod hevc_sw_decoder;
+#[cfg(all(feature = "ffmpeg-decode-hevc-sw-main10-any", target_os = "linux"))]
+pub mod hevc_sw_main10_decoder;
 #[cfg(all(feature = "ffmpeg-decode-hevc-vaapi-any", target_os = "linux"))]
 pub mod hevc_vaapi_decoder;
 #[cfg(all(feature = "ffmpeg-encode-hevc-vaapi-any", target_os = "linux"))]
 pub mod hevc_vaapi_encoder;
+#[cfg(all(feature = "ffmpeg-decode-hevc-vaapi-main10-any", target_os = "linux"))]
+pub mod hevc_vaapi_main10_decoder;
 #[cfg(all(feature = "ffmpeg-encode-hevc-vaapi-main10-any", target_os = "linux"))]
 pub mod hevc_vaapi_main10_encoder;
 #[cfg(all(
@@ -197,8 +224,21 @@ pub use core_adapter::HevcVaapiFfmpegEncoderAdapter;
     target_os = "linux"
 ))]
 pub use decoder_common::HevcDecoderBackend;
+#[cfg(all(
+    any(
+        feature = "ffmpeg-decode-hevc-sw-main10-any",
+        feature = "ffmpeg-decode-hevc-vaapi-main10-any",
+        feature = "ffmpeg-decode-hevc-nvdec-main10-any",
+    ),
+    target_os = "linux"
+))]
+pub use decoder_common::HevcDecoderBackend10;
 #[cfg(all(feature = "ffmpeg-decode-hevc-nvdec-any", target_os = "linux"))]
 pub use hevc_nvdec_decoder::{HevcNvdecFfmpegDecoder, HevcNvdecFfmpegDecoderConfig};
+#[cfg(all(feature = "ffmpeg-decode-hevc-nvdec-main10-any", target_os = "linux"))]
+pub use hevc_nvdec_main10_decoder::{
+    HevcNvdecMain10FfmpegDecoder, HevcNvdecMain10FfmpegDecoderConfig,
+};
 #[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-any", target_os = "linux"))]
 pub use hevc_nvenc_encoder::{HevcNvencFfmpegEncoder, HevcNvencFfmpegEncoderConfig};
 #[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-main10-any", target_os = "linux"))]
@@ -209,10 +249,16 @@ pub use hevc_nvenc_main10_encoder::{
 pub use hevc_nvenc_npp_encoder::{HevcNvencNppFfmpegEncoder, HevcNvencNppFfmpegEncoderConfig};
 #[cfg(all(feature = "ffmpeg-decode-hevc-sw-any", target_os = "linux"))]
 pub use hevc_sw_decoder::{HevcSwFfmpegDecoder, HevcSwFfmpegDecoderConfig};
+#[cfg(all(feature = "ffmpeg-decode-hevc-sw-main10-any", target_os = "linux"))]
+pub use hevc_sw_main10_decoder::{HevcSwMain10FfmpegDecoder, HevcSwMain10FfmpegDecoderConfig};
 #[cfg(all(feature = "ffmpeg-decode-hevc-vaapi-any", target_os = "linux"))]
 pub use hevc_vaapi_decoder::{HevcVaapiFfmpegDecoder, HevcVaapiFfmpegDecoderConfig};
 #[cfg(all(feature = "ffmpeg-encode-hevc-vaapi-any", target_os = "linux"))]
 pub use hevc_vaapi_encoder::{HevcVaapiFfmpegEncoder, HevcVaapiFfmpegEncoderConfig};
+#[cfg(all(feature = "ffmpeg-decode-hevc-vaapi-main10-any", target_os = "linux"))]
+pub use hevc_vaapi_main10_decoder::{
+    HevcVaapiMain10FfmpegDecoder, HevcVaapiMain10FfmpegDecoderConfig,
+};
 #[cfg(all(feature = "ffmpeg-encode-hevc-vaapi-main10-any", target_os = "linux"))]
 pub use hevc_vaapi_main10_encoder::{
     HevcVaapiMain10FfmpegEncoder, HevcVaapiMain10FfmpegEncoderConfig,

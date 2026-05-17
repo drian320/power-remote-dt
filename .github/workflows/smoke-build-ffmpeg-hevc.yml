@@ -288,6 +288,44 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
+      - name: Build prdt with all three HEVC Main10 decoders (P3 — Linux↔Linux Main10 viewer)
+        # No CUDA toolkit needed: nvdec-main10 uses FFmpeg native API with
+        # libnvcuvid lazy-loaded at runtime. LIBRARY_PATH is already set from
+        # the NPP step above but is harmless for the decode-main10 path.
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+          LIBRARY_PATH: /usr/local/cuda-12.6/lib64
+        run: |
+          cargo build \
+            --release \
+            -p prdt-client \
+            --features ffmpeg-decode-hevc-sw-main10,ffmpeg-decode-hevc-vaapi-main10,ffmpeg-decode-hevc-nvdec-main10 \
+            --target x86_64-unknown-linux-gnu
+
+      - name: Stage HEVC-decode-Main10 artifact
+        run: |
+          cp target/x86_64-unknown-linux-gnu/release/prdt artifacts/prdt-linux-x86_64-ffmpeg-hevc-decode-main10
+          chmod +x artifacts/prdt-linux-x86_64-ffmpeg-hevc-decode-main10
+          (cd artifacts && sha256sum prdt-linux-x86_64-ffmpeg-hevc-decode-main10 > prdt-linux-x86_64-ffmpeg-hevc-decode-main10.sha256)
+          ls -la artifacts/prdt-linux-x86_64-ffmpeg-hevc-decode-main10*
+          file artifacts/prdt-linux-x86_64-ffmpeg-hevc-decode-main10
+          # Assert libnvcuvid and libnvidia-encode are NOT linked at build time
+          # (both are lazy-loaded by FFmpeg at runtime).
+          ldd artifacts/prdt-linux-x86_64-ffmpeg-hevc-decode-main10 | grep -E 'libav|libva|libcuda|libnvidia|libnvcuvid' || true
+          if ldd artifacts/prdt-linux-x86_64-ffmpeg-hevc-decode-main10 | grep -qE 'libnvcuvid|libnvidia-encode'; then
+            echo "::error::libnvcuvid.so.1 / libnvidia-encode.so.1 appears in ldd output — binary was accidentally linked at build time"
+            exit 1
+          fi
+
+      - name: Upload HEVC-decode-Main10 workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prdt-linux-x86_64-ffmpeg-hevc-decode-main10
+          path: artifacts/prdt-linux-x86_64-ffmpeg-hevc-decode-main10*
+          retention-days: 30
+          if-no-files-found: error
+
   build-windows:
     name: Build Windows x86_64 prdt (viewer-side, no FFmpeg feature)
     # Windows side decodes HEVC via Media Foundation / NVDEC — it does NOT need
