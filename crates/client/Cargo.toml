@@ -43,6 +43,7 @@ ffmpeg-encode-hevc-vaapi-ffmpeg6 = ["prdt-host/ffmpeg-encode-hevc-vaapi-ffmpeg6"
 ffmpeg-encode-hevc-vaapi-ffmpeg7 = ["prdt-host/ffmpeg-encode-hevc-vaapi-ffmpeg7"]
 ffmpeg-encode-hevc-nvenc = ["prdt-host/ffmpeg-encode-hevc-nvenc"]
 ffmpeg-encode-hevc-nvenc-ffmpeg5 = ["prdt-host/ffmpeg-encode-hevc-nvenc-ffmpeg5"]
+ffmpeg-encode-hevc-nvenc-ffmpeg6 = ["prdt-host/ffmpeg-encode-hevc-nvenc-ffmpeg6"]
 ffmpeg-encode-hevc-nvenc-ffmpeg7 = ["prdt-host/ffmpeg-encode-hevc-nvenc-ffmpeg7"]
 # P2.5 — NPP (GPU BGRA→NV12) variants. Shallow forwards onto prdt-host.
 ffmpeg-encode-hevc-nvenc-npp = ["prdt-host/ffmpeg-encode-hevc-nvenc-npp"]
@@ -51,9 +52,11 @@ ffmpeg-encode-hevc-nvenc-npp-ffmpeg7 = ["prdt-host/ffmpeg-encode-hevc-nvenc-npp-
 # P3.1 — HEVC Main10 (10-bit) encode variants. Shallow forwards onto prdt-host.
 ffmpeg-encode-hevc-vaapi-main10 = ["prdt-host/ffmpeg-encode-hevc-vaapi-main10"]
 ffmpeg-encode-hevc-vaapi-main10-ffmpeg5 = ["prdt-host/ffmpeg-encode-hevc-vaapi-main10-ffmpeg5"]
+ffmpeg-encode-hevc-vaapi-main10-ffmpeg6 = ["prdt-host/ffmpeg-encode-hevc-vaapi-main10-ffmpeg6"]
 ffmpeg-encode-hevc-vaapi-main10-ffmpeg7 = ["prdt-host/ffmpeg-encode-hevc-vaapi-main10-ffmpeg7"]
 ffmpeg-encode-hevc-nvenc-main10 = ["prdt-host/ffmpeg-encode-hevc-nvenc-main10"]
 ffmpeg-encode-hevc-nvenc-main10-ffmpeg5 = ["prdt-host/ffmpeg-encode-hevc-nvenc-main10-ffmpeg5"]
+ffmpeg-encode-hevc-nvenc-main10-ffmpeg6 = ["prdt-host/ffmpeg-encode-hevc-nvenc-main10-ffmpeg6"]
 ffmpeg-encode-hevc-nvenc-main10-ffmpeg7 = ["prdt-host/ffmpeg-encode-hevc-nvenc-main10-ffmpeg7"]
 # PR3 — Windows HDR10 display path. Forwarded onto prdt-viewer (Windows target
 # dep) which forwards onto prdt-media-win.
