@@ -152,7 +152,7 @@ jobs:
         # mf/decoder_main10.rs, and mf/encoder.rs are byte-identical to the
         # master baseline pinned in check-8bit-helpers-byte-identity.py.
         shell: bash
-        run: python3 scripts/check-8bit-helpers-byte-identity.py --include-mf-files
+        run: python3 scripts/check-8bit-helpers-byte-identity.py
 
   media-ffmpeg-compile:
     runs-on: ubuntu-latest

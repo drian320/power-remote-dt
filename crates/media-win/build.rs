@@ -20,6 +20,9 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
     #[cfg(target_os = "windows")]
+    wire_ffmpeg_dll_path();
+
+    #[cfg(target_os = "windows")]
     {
         generate_nvenc_bindings();
         generate_nvdec_bindings();
@@ -79,6 +82,35 @@ fn generate_nvenc_bindings() {
 
     bindings.write_to_file(&out_path).expect("write bindings");
     println!("cargo:rustc-cfg=prdt_nvenc_bindings");
+}
+
+/// PR1 (media-win-ffmpeg): assert FFMPEG env vars are set and wire the linker
+/// search path. Does NOT download FFmpeg — that is scripts/fetch-ffmpeg-windows.ps1.
+/// rusty_ffmpeg's own build.rs reads FFMPEG_INCLUDE_DIR / FFMPEG_LIB_DIR; we
+/// emit cargo:rustc-link-search so the MSVC linker finds the .lib import libs.
+#[cfg(target_os = "windows")]
+fn wire_ffmpeg_dll_path() {
+    // Only active when the feature is enabled; env var presence is the signal.
+    let lib_dir = match env::var("FFMPEG_LIB_DIR") {
+        Ok(p) => p,
+        Err(_) => {
+            // Feature may be enabled without the env var when cross-checking on
+            // a dev machine. Emit an actionable warning but do not fail the
+            // build — rusty_ffmpeg's own build.rs will fail with its own error
+            // if the headers are also missing.
+            println!(
+                "cargo:warning=FFMPEG_LIB_DIR is not set; FFmpeg .lib import libraries \
+                 will not be found by the linker. Run scripts/fetch-ffmpeg-windows.ps1 \
+                 and source target/windows-ffmpeg/env.ps1 before building with \
+                 --features media-win-ffmpeg."
+            );
+            return;
+        }
+    };
+    println!("cargo:rerun-if-env-changed=FFMPEG_LIB_DIR");
+    println!("cargo:rerun-if-env-changed=FFMPEG_INCLUDE_DIR");
+    println!("cargo:rerun-if-env-changed=FFMPEG_DLL_PATH");
+    println!("cargo:rustc-link-search=native={lib_dir}");
 }
 
 /// Plan 2d: generate NVDEC (cuvid) bindings. Requires the NVIDIA Video

@@ -71,6 +71,14 @@ PROTECTED: list[Union[Tuple[str, int, int], Tuple[str, str, str]]] = [
         "// region: 8-bit-mf-consumer",
         "// endregion: 8-bit-mf-consumer",
     ),
+    # F-WIN-FFMPEG PR1: whole-file byte-identity guard for the two remaining MF
+    # files that do not carry region markers. Ranges use origin/master line
+    # counts; if either file is new on this branch the resolve step skips the
+    # range with a warning (file-not-found path in resolve_marker_range).
+    # decoder_main10.rs: 1046 lines on master at PR1 start.
+    ("crates/media-win/src/mf/decoder_main10.rs", 1, 1046),
+    # encoder.rs: 603 lines on master at PR1 start.
+    ("crates/media-win/src/mf/encoder.rs", 1, 603),
 ]
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
