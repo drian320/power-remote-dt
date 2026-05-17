@@ -22,6 +22,10 @@ use prdt_protocol::{now_monotonic_us, EncodedFrame, ProducerError, VideoProducer
 pub enum VideoEncoderBackend {
     Hw(HwHevcEncoder),
     SwH264(Box<Openh264Encoder>),
+    #[cfg(feature = "prdt-media-win/media-win-ffmpeg-nvenc-any")]
+    FfmpegNvencHevc(prdt_media_win::ffmpeg::HevcNvencFfmpegEncoderWindowsAdapter),
+    #[cfg(feature = "prdt-media-win/media-win-ffmpeg-nvenc-main10-any")]
+    FfmpegNvencHevcMain10(prdt_media_win::ffmpeg::HevcNvencMain10FfmpegEncoderWindowsAdapter),
 }
 
 impl VideoEncoderBackend {
@@ -29,6 +33,10 @@ impl VideoEncoderBackend {
         match self {
             Self::Hw(e) => e.backend_name(),
             Self::SwH264(_) => "openh264",
+            #[cfg(feature = "prdt-media-win/media-win-ffmpeg-nvenc-any")]
+            Self::FfmpegNvencHevc(e) => e.backend_name(),
+            #[cfg(feature = "prdt-media-win/media-win-ffmpeg-nvenc-main10-any")]
+            Self::FfmpegNvencHevcMain10(e) => e.backend_name(),
         }
     }
 
@@ -47,6 +55,10 @@ impl VideoEncoderBackend {
             Self::SwH264(e) => {
                 e.set_target_bitrate(bps);
             }
+            #[cfg(feature = "prdt-media-win/media-win-ffmpeg-nvenc-any")]
+            Self::FfmpegNvencHevc(e) => e.set_target_bitrate(bps),
+            #[cfg(feature = "prdt-media-win/media-win-ffmpeg-nvenc-main10-any")]
+            Self::FfmpegNvencHevcMain10(e) => e.set_target_bitrate(bps),
         }
     }
 }
@@ -337,7 +349,85 @@ pub(super) fn pick_encoder(
             let enc = Openh264Encoder::new(cfg).context("Openh264Encoder::new")?;
             Ok(VideoEncoderBackend::SwH264(Box::new(enc)))
         }
-        other => anyhow::bail!("unknown --encoder {other:?} (valid: auto, nvenc, mf, openh264)"),
+        "mf-nvenc-hevc" => {
+            if negotiated_codec != Codec::H265 {
+                anyhow::bail!(
+                    "encoder=mf-nvenc-hevc but negotiated codec={:?}; handshake layer should have rejected this",
+                    negotiated_codec
+                );
+            }
+            let cfg = NvencEncoderConfig {
+                width,
+                height,
+                fps_numerator: 60,
+                fps_denominator: 1,
+                bitrate_bps,
+                gop_length: 60,
+            };
+            let enc = MfH265Encoder::new(dev, &cfg).context("MfH265Encoder::new")?;
+            Ok(VideoEncoderBackend::Hw(HwHevcEncoder::from(enc)))
+        }
+        "mf-nvenc-hevc-main10" => {
+            anyhow::bail!("encoder=mf-nvenc-hevc-main10 is not yet supported (MF HEVC Main10 encode is not implemented)")
+        }
+        #[cfg(feature = "prdt-media-win/media-win-ffmpeg-nvenc-any")]
+        "ffmpeg-nvenc-hevc" => {
+            if negotiated_codec != Codec::H265 {
+                anyhow::bail!(
+                    "encoder=ffmpeg-nvenc-hevc but negotiated codec={:?}; handshake layer should have rejected this",
+                    negotiated_codec
+                );
+            }
+            let cfg = prdt_media_win::ffmpeg::nvenc_encoder::HevcNvencFfmpegEncoderWindowsAdapterConfig {
+                width,
+                height,
+                fps: 60,
+                initial_bitrate_bps: bitrate_bps,
+                gop_size: 60,
+            };
+            let enc = prdt_media_win::ffmpeg::HevcNvencFfmpegEncoderWindowsAdapter::new(
+                dev.clone(),
+                cfg,
+            )
+            .context("HevcNvencFfmpegEncoderWindowsAdapter::new")?;
+            Ok(VideoEncoderBackend::FfmpegNvencHevc(enc))
+        }
+        #[cfg(not(feature = "prdt-media-win/media-win-ffmpeg-nvenc-any"))]
+        "ffmpeg-nvenc-hevc" => {
+            anyhow::bail!(
+                "encoder \"ffmpeg-nvenc-hevc\" requires building with --features media-win-ffmpeg-nvenc"
+            )
+        }
+        #[cfg(feature = "prdt-media-win/media-win-ffmpeg-nvenc-main10-any")]
+        "ffmpeg-nvenc-hevc-main10" => {
+            if negotiated_codec != Codec::H265 {
+                anyhow::bail!(
+                    "encoder=ffmpeg-nvenc-hevc-main10 but negotiated codec={:?}; handshake layer should have rejected this",
+                    negotiated_codec
+                );
+            }
+            let cfg =
+                prdt_media_win::ffmpeg::nvenc_main10_encoder::HevcNvencMain10FfmpegEncoderWindowsAdapterConfig {
+                    width,
+                    height,
+                    fps: 60,
+                    initial_bitrate_bps: bitrate_bps,
+                    gop_size: 60,
+                };
+            let enc = prdt_media_win::ffmpeg::HevcNvencMain10FfmpegEncoderWindowsAdapter::new(
+                dev.clone(),
+                cfg,
+            )
+            .context("HevcNvencMain10FfmpegEncoderWindowsAdapter::new")?;
+            Ok(VideoEncoderBackend::FfmpegNvencHevcMain10(enc))
+        }
+        #[cfg(not(feature = "prdt-media-win/media-win-ffmpeg-nvenc-main10-any"))]
+        "ffmpeg-nvenc-hevc-main10" => {
+            anyhow::bail!(
+                "encoder \"ffmpeg-nvenc-hevc-main10\" requires building with --features media-win-ffmpeg-nvenc-main10"
+            )
+        }
+        other => anyhow::bail!("unknown --encoder {other:?} (valid: auto, nvenc, mf, openh264, mf-nvenc-hevc, mf-nvenc-hevc-main10, ffmpeg-nvenc-hevc, ffmpeg-nvenc-hevc-main10)"),
     }
 }
 
@@ -474,6 +564,22 @@ pub fn build_video_producer(
         }
         VideoEncoderBackend::SwH264(enc) => {
             Box::new(DxgiSwProducer::with_encoder(&dev, output, *enc).context("sw producer")?)
+        }
+        #[cfg(feature = "prdt-media-win/media-win-ffmpeg-nvenc-any")]
+        VideoEncoderBackend::FfmpegNvencHevc(enc) => {
+            let hw: HwHevcEncoder = enc.into();
+            Box::new(
+                DxgiNvencProducer::with_encoder(&dev, output, hw)
+                    .context("ffmpeg-nvenc-hevc producer")?,
+            )
+        }
+        #[cfg(feature = "prdt-media-win/media-win-ffmpeg-nvenc-main10-any")]
+        VideoEncoderBackend::FfmpegNvencHevcMain10(enc) => {
+            let hw: HwHevcEncoder = enc.into();
+            Box::new(
+                DxgiNvencProducer::with_encoder(&dev, output, hw)
+                    .context("ffmpeg-nvenc-hevc-main10 producer")?,
+            )
         }
     };
     Ok(producer)
