@@ -101,6 +101,24 @@ mod tests {
         assert!(Codec::from_u8(42).is_none());
     }
 
+    // Phase-0 probe: captures ground-truth None behaviour for discriminant 3
+    // before the H265Main10 variant is added (wire-compat baseline).
+    #[test]
+    fn codec_from_u8_3_is_none_pre_variant() {
+        assert_eq!(Codec::from_u8(3), None);
+    }
+
+    // Phase-0 negative bincode round-trip: pre-PR1 deserializers reject
+    // variant_index=3 at the bincode layer.
+    #[test]
+    fn codec_bincode_variant_index_3_is_err_pre_variant() {
+        let result = bincode::deserialize::<Codec>(&[3u8, 0, 0, 0]);
+        assert!(
+            result.is_err(),
+            "pre-variant: bincode must reject unknown variant_index=3"
+        );
+    }
+
     #[test]
     fn encoded_frame_construction() {
         let f = EncodedFrame::new_h265(
