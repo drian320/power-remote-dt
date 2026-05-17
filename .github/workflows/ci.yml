@@ -154,6 +154,46 @@ jobs:
         shell: bash
         run: python3 scripts/check-8bit-helpers-byte-identity.py
 
+      # ── F-WIN-FFMPEG PR2 cells ────────────────────────────────────────────────
+      # PR2 adds NVENC encoder dispatch (8-bit + Main10) behind the
+      # media-win-ffmpeg-nvenc / media-win-ffmpeg-nvenc-main10 feature flags.
+      # DLL env vars are inherited from the export step above.
+
+      - name: F-WIN-FFMPEG — cargo check with media-win-ffmpeg-nvenc (PR2.A1)
+        run: cargo check -p prdt-media-win --target x86_64-pc-windows-msvc --features media-win-ffmpeg-nvenc
+
+      - name: F-WIN-FFMPEG — cargo check with media-win-ffmpeg-nvenc-main10 (PR2.A2)
+        run: cargo check -p prdt-media-win --target x86_64-pc-windows-msvc --features media-win-ffmpeg-nvenc-main10
+
+      - name: F-WIN-FFMPEG — cargo clippy with media-win-ffmpeg-nvenc-main10 (PR2.A3)
+        run: cargo clippy -p prdt-media-win --target x86_64-pc-windows-msvc --features media-win-ffmpeg-nvenc-main10 -- -D warnings
+
+      - name: F-WIN-FFMPEG — encoder context creation unit test (PR2.A4)
+        # windows-latest has no NVIDIA GPU; test must return EncoderNotAvailable,
+        # NOT panic. Allowed exit codes: 0 (pass) or test-framework "ok" with skip.
+        run: cargo test -p prdt-media-win --target x86_64-pc-windows-msvc --features media-win-ffmpeg-nvenc-main10 --lib ffmpeg::nvenc_encoder::tests::context_creation_succeeds
+
+      - name: F-WIN-FFMPEG — CLI rejects ffmpeg-nvenc-hevc-main10 without feature (PR2.A5)
+        # Build the client binary WITHOUT any media-win-ffmpeg feature, then run
+        # `prdt host --encoder ffmpeg-nvenc-hevc-main10 --headless` and assert
+        # the exact error string from normalize_encoder bail.
+        shell: pwsh
+        run: |
+          cargo build -p prdt-client --target x86_64-pc-windows-msvc
+          $output = (& target\x86_64-pc-windows-msvc\debug\prdt.exe host --encoder ffmpeg-nvenc-hevc-main10 --headless 2>&1) | Out-String
+          Write-Output $output
+          $expected = 'encoder "ffmpeg-nvenc-hevc-main10" requires building with --features media-win-ffmpeg-nvenc-main10'
+          if ($output -notmatch [regex]::Escape($expected)) {
+            Write-Error "FAIL: expected error string not found in output"
+            exit 1
+          }
+          Write-Output "PASS: correct error emitted for missing ffmpeg feature"
+          exit 0
+
+      - name: F-WIN-FFMPEG — MF byte-identity guard re-assertion (PR2.byte-id-mf)
+        shell: bash
+        run: python3 scripts/check-8bit-helpers-byte-identity.py
+
   media-ffmpeg-compile:
     runs-on: ubuntu-latest
     steps:
