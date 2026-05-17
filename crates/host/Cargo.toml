@@ -93,6 +93,7 @@ ffmpeg-decode-hevc-nvdec-any = []
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
 tempfile = "3"
 clap = { workspace = true }
+bincode = { workspace = true }
 # Used by Linux tests that toggle PRDT_PREFER_NVENC to assert auto-encoder
 # resolution; cross-test env-var pollution would otherwise flip the
 # both-features cfg arm in unpredictable ways.

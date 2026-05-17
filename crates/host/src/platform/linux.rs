@@ -1163,6 +1163,47 @@ mod tests {
         );
     }
 
+    // A1.12 sub-test 5: bincode wire bytes for pre-PR1 hello codecs must
+    // never contain variant_index=3 at any Codec slot.
+    // bincode 1.3 encodes Vec<T> as: 8-byte LE u64 length, then each element.
+    // Codec elements are 4-byte LE u32 variant_index. We scan aligned 4-byte
+    // slots starting at byte 8 (after the length prefix) to avoid false
+    // positives from the length field itself (e.g. a 3-element Vec encodes
+    // its length as [3,0,0,0,0,0,0,0] whose first 4 bytes equal [3,0,0,0]).
+    #[test]
+    fn supported_codecs_for_wire_bytes_exclude_variant3_for_legacy_codecs() {
+        use prdt_protocol::Codec;
+        let variant3: [u8; 4] = [3, 0, 0, 0];
+        for legacy in [Codec::H265, Codec::H264, Codec::Av1] {
+            let codecs = supported_codecs_for(legacy);
+            let bytes = bincode::serialize(&codecs).expect("serialize");
+            // Skip the 8-byte length prefix; check each 4-byte Codec slot.
+            let found = bytes[8..].chunks(4).any(|slot| slot == variant3);
+            assert!(
+                !found,
+                "variant_index=3 must not appear in Codec slots for hello_codec {:?}; bytes={:?}",
+                legacy, bytes
+            );
+        }
+    }
+
+    // A1.12 sub-test 6: bincode wire bytes for Main10 hello codec must
+    // contain variant_index=3 at a Codec slot.
+    #[test]
+    fn supported_codecs_for_wire_bytes_include_variant3_for_main10_client() {
+        use prdt_protocol::Codec;
+        let codecs = supported_codecs_for(Codec::H265Main10);
+        let bytes = bincode::serialize(&codecs).expect("serialize");
+        let variant3: [u8; 4] = [3, 0, 0, 0];
+        // Skip the 8-byte length prefix; check each 4-byte Codec slot.
+        let found = bytes[8..].chunks(4).any(|slot| slot == variant3);
+        assert!(
+            found,
+            "variant_index=3 must appear in Codec slots when hello_codec is H265Main10; bytes={:?}",
+            bytes
+        );
+    }
+
     /// `build_video_producer` with `ffmpeg-nvenc-hevc-npp` selects the NPP
     /// factory path. On a CUDA-less dev container this returns an error from
     /// `HevcNvencNppFfmpegEncoder::new`, not a silent openh264 fallback.
