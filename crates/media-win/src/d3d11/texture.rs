@@ -7,7 +7,7 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_FORMAT_R8G8B8A8_UNORM,
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_FORMAT_P010, DXGI_FORMAT_R8G8B8A8_UNORM,
     DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8_UNORM, DXGI_SAMPLE_DESC,
 };
 
@@ -30,6 +30,10 @@ pub enum TextureFormat {
     /// dual-plane CUDA-D3D11 interop path (Plan 2d zero-copy). Half-resolution
     /// in both dimensions vs the Y plane; each element holds (Cb, Cr).
     R8G8,
+    /// P010 (10-bit 4:2:0, Y plane + interleaved UV, 16-bit containers with
+    /// valid bits in the high 10). Input format for `Nv12ShaderRendererP010`
+    /// (HDR10 path, gated on `media-win-hdr10` feature).
+    P010,
 }
 
 impl TextureFormat {
@@ -40,6 +44,7 @@ impl TextureFormat {
             Self::Nv12 => DXGI_FORMAT_NV12,
             Self::R8 => DXGI_FORMAT_R8_UNORM,
             Self::R8G8 => DXGI_FORMAT_R8G8_UNORM,
+            Self::P010 => DXGI_FORMAT_P010,
         }
     }
 
@@ -51,6 +56,8 @@ impl TextureFormat {
             Self::Bgra8 | Self::Rgba8 => 4,
             Self::Nv12 | Self::R8 => 1,
             Self::R8G8 => 2,
+            // P010 Y plane: 2 bytes per pixel (u16 per luma sample).
+            Self::P010 => 2,
         }
     }
 }

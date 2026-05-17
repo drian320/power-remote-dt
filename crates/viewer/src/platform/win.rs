@@ -10,6 +10,8 @@ use prdt_input_win::{
     virtual_desktop_rect as _input_win_virtual_desktop_rect,
     write_clipboard_text as _input_win_write_clipboard_text, MAX_CLIPBOARD_BYTES as _INPUT_WIN_MAX,
 };
+#[cfg(feature = "media-win-hdr10")]
+use prdt_media_core::Hdr10Metadata;
 use prdt_media_sw::Openh264Decoder;
 #[cfg(prdt_nvdec_bindings)]
 use prdt_media_win::NvdecD3d11Consumer;
@@ -17,6 +19,8 @@ use prdt_media_win::{
     pick_default_adapter, CpuI420Uploader, D3d11Device, D3d11Texture, MfD3d11Consumer,
     Nv12Renderer, Nv12ShaderRenderer, SwapChain,
 };
+#[cfg(feature = "media-win-hdr10")]
+use prdt_media_win::{CpuP010Uploader, Nv12ShaderRendererP010};
 use prdt_protocol::MonitorRect;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::Arc;
@@ -40,6 +44,18 @@ pub enum PlatformFrame {
     /// receive the same `Arc` the writer constructed, with no extra clone.
     #[cfg(prdt_nvdec_bindings)]
     DualPlane(Arc<prdt_media_win::DualPlaneFrame>),
+    /// Pre-uploaded P010 D3D11 texture from the HDR10 decode path.
+    /// The recv task uploads via `CpuP010Uploader` (inside `PlatformConsumer::Hdr10`)
+    /// and stores the resulting `D3d11Texture` here. `Nv12ShaderRendererP010`
+    /// samples it via R16_UNORM (Y) + R16G16_UNORM (UV) SRVs.
+    ///
+    /// The sidecar `hdr10` field is forwarded from `Nv12Frame16.hdr10` so
+    /// `present_frame` can call `swap.set_hdr10_metadata` on first IDR.
+    #[cfg(feature = "media-win-hdr10")]
+    Nv12_10 {
+        tex: D3d11Texture,
+        hdr10: Option<Hdr10Metadata>,
+    },
 }
 
 /// Decoder-selected consumer. Held behind the recv task's
@@ -60,6 +76,21 @@ pub enum PlatformConsumer {
         latest_texture: Option<D3d11Texture>,
         needs_idr: bool,
     },
+    /// HDR10 path (PR3): the Windows viewer receives P010LE CPU frames from
+    /// the FFmpeg Linux-side decode path (PR2 → wire → client). The recv
+    /// task calls `uploader.upload(frame)` to get a GPU P010 texture, then
+    /// sets `latest_texture` for the render thread to drain.
+    ///
+    /// `MfD3d11Consumer` is included for future use (Windows-native H265Main10
+    /// decode path; out of scope for PR3 per plan §Out-of-scope F8 follow-up).
+    ///
+    /// `last_hdr10_meta` is updated once per stream; subsequent identical
+    /// metadata calls `set_hdr10_metadata` are skipped via comparison.
+    #[cfg(feature = "media-win-hdr10")]
+    Hdr10 {
+        uploader: CpuP010Uploader,
+        latest_texture: Option<(D3d11Texture, Option<Hdr10Metadata>)>,
+    },
 }
 
 /// Decoder-selected renderer enum. Private (held inside `PlatformRender`).
@@ -73,6 +104,11 @@ pub(crate) enum WinRenderer {
     /// Sidesteps `ID3D11VideoProcessor`, which the Intel iGPU rejects on
     /// CPU-uploaded NV12 textures (issue #19 Bug 4).
     Openh264(Nv12ShaderRenderer),
+    /// HDR10 P010 path: takes a pre-uploaded P010 D3D11 texture and converts
+    /// via a BT.2020 NCL Y′CbCr → R′G′B′ pixel shader (PQ pass-through) into
+    /// the R10G10B10A2_UNORM HDR10 swapchain.
+    #[cfg(feature = "media-win-hdr10")]
+    Hdr10(Nv12ShaderRendererP010),
 }
 
 /// Per-OS render-state. Windows holds D3D11Device + SwapChain + the
@@ -84,6 +120,10 @@ pub struct PlatformRender {
     pub(crate) dev: D3d11Device,
     pub(crate) swap: SwapChain,
     pub(crate) renderer: Option<WinRenderer>,
+    /// Tracks whether `set_hdr10_metadata` has been called for the current
+    /// stream so we only re-call when the metadata actually changes.
+    #[cfg(feature = "media-win-hdr10")]
+    pub(crate) last_hdr10_meta: Option<Hdr10Metadata>,
 }
 
 impl PlatformRender {
@@ -161,6 +201,8 @@ pub fn build_render(
         dev,
         swap,
         renderer: None,
+        #[cfg(feature = "media-win-hdr10")]
+        last_hdr10_meta: None,
     })
 }
 
@@ -185,6 +227,10 @@ pub fn resize_renderer(
             WinRenderer::Openh264(_) => {
                 // Nv12ShaderRenderer is dimension-agnostic.
             }
+            #[cfg(feature = "media-win-hdr10")]
+            WinRenderer::Hdr10(_) => {
+                // Nv12ShaderRendererP010 is dimension-agnostic.
+            }
         }
     }
     Ok(())
@@ -198,11 +244,24 @@ pub fn present_frame(
     decoder_label: &str,
     _shared: &crate::ViewerShared,
 ) -> Result<(), super::RenderError> {
+    // Lazy HDR10 swapchain upgrade: on the first Nv12_10 frame, if the
+    // swapchain is still in 8-bit mode, upgrade it now. Fails loud —
+    // no silent SDR fallback (plan PR3 Step 4 change #6).
+    #[cfg(feature = "media-win-hdr10")]
+    if matches!(f, PlatformFrame::Nv12_10 { .. }) && !r.swap.is_hdr10() {
+        let hwnd = extract_hwnd(&r.window)
+            .map_err(|e| super::RenderError::Init(format!("extract_hwnd for HDR10: {e}")))?;
+        rebuild_swap_hdr10(r, hwnd)
+            .map_err(|e| super::RenderError::Init(format!("rebuild_swap_hdr10: {e}")))?;
+    }
+
     let needs_new = match (f, r.renderer.as_ref()) {
         (PlatformFrame::Nv12(nv12), Some(WinRenderer::Mf(rmf))) => {
             rmf.input_size() != (nv12.width(), nv12.height())
         }
         (PlatformFrame::Nv12(_), Some(WinRenderer::Openh264(_))) => false,
+        #[cfg(feature = "media-win-hdr10")]
+        (PlatformFrame::Nv12_10 { .. }, Some(WinRenderer::Hdr10(_))) => false,
         (_, None) => true,
         #[allow(unreachable_patterns)]
         _ => true,
@@ -212,6 +271,8 @@ pub fn present_frame(
             PlatformFrame::Nv12(nv12) => (nv12.width(), nv12.height()),
             #[cfg(prdt_nvdec_bindings)]
             PlatformFrame::DualPlane(dp) => (dp.width, dp.height),
+            #[cfg(feature = "media-win-hdr10")]
+            PlatformFrame::Nv12_10 { tex, .. } => (tex.width(), tex.height()),
         };
         let new_renderer = if decoder_label == "nvdec" {
             #[cfg(prdt_nvdec_bindings)]
@@ -228,12 +289,20 @@ pub fn present_frame(
                 WinRenderer::Mf(rn)
             }
         } else if decoder_label == "openh264" {
-            // Single-NV12-texture shader renderer — sidesteps the Intel
-            // ID3D11VideoProcessor input-view bug entirely (issue #19 Bug 4).
             let rn = Nv12ShaderRenderer::new(&r.dev)
                 .map_err(|e| super::RenderError::Init(format!("Nv12ShaderRenderer::new: {e}")))?;
             WinRenderer::Openh264(rn)
         } else {
+            // HDR10 path: if the swapchain is in HDR10 mode, use the P010 renderer.
+            #[cfg(feature = "media-win-hdr10")]
+            if r.swap.is_hdr10() {
+                let rn = Nv12ShaderRendererP010::new(&r.dev).map_err(|e| {
+                    super::RenderError::Init(format!("Nv12ShaderRendererP010::new: {e}"))
+                })?;
+                r.renderer = Some(WinRenderer::Hdr10(rn));
+                // Fall through to the render dispatch below with the new renderer.
+                return present_frame(r, f, decoder_label, _shared);
+            }
             let rn = Nv12Renderer::new(&r.dev, iw, ih, r.swap.width(), r.swap.height())
                 .map_err(|e| super::RenderError::Init(format!("Nv12Renderer::new: {e}")))?;
             WinRenderer::Mf(rn)
@@ -258,6 +327,22 @@ pub fn present_frame(
             (WinRenderer::Nvdec(rnv), PlatformFrame::DualPlane(dpl)) => {
                 rnv.render(dpl.as_ref(), &r.swap).map_err(|e| {
                     super::RenderError::Present(format!("DualPlaneYuvRenderer::render: {e}"))
+                })?;
+            }
+            #[cfg(feature = "media-win-hdr10")]
+            (WinRenderer::Hdr10(rp010), PlatformFrame::Nv12_10 { tex, hdr10 }) => {
+                // Forward HDR10 metadata to the swapchain on first IDR (or on change).
+                if let Some(meta) = hdr10 {
+                    if r.last_hdr10_meta.as_ref() != Some(meta) {
+                        if let Err(e) = r.swap.set_hdr10_metadata(meta) {
+                            tracing::warn!(?e, "set_hdr10_metadata failed; continuing");
+                        } else {
+                            r.last_hdr10_meta = Some(*meta);
+                        }
+                    }
+                }
+                rp010.render(tex, &r.swap).map_err(|e| {
+                    super::RenderError::Present(format!("Nv12ShaderRendererP010::render: {e}"))
                 })?;
             }
             _ => {
@@ -286,6 +371,11 @@ use prdt_protocol::frame::Codec;
 /// Build the per-codec consumer for the negotiated codec + decoder choice.
 /// Mirrors the existing lib.rs decode-init code path; T7 will route lib.rs
 /// through this factory.
+///
+/// For `Codec::H265Main10` (gated on `media-win-hdr10`): attempts to construct
+/// an HDR10 swapchain. If HDR10 is unavailable and the `media-win-hdr-to-sdr-fallback`
+/// feature is not enabled, returns `ConsumerError::HdrUnavailable` (no silent
+/// precision loss per plan PR3 Step 4 change #6).
 pub fn build_consumer(
     decoder_arg: &str,
     codec: Codec,
@@ -313,18 +403,62 @@ pub fn build_consumer(
         }
         #[cfg(prdt_nvdec_bindings)]
         ("nvdec", Codec::H265) => {
-            let nv = NvdecD3d11Consumer::new(dev, width, height)
-                .map_err(|e| super::ConsumerError::Init(
-                    format!("NvdecD3d11Consumer::new: {e}"),
-                ))?;
+            let nv = NvdecD3d11Consumer::new(dev, width, height).map_err(|e| {
+                super::ConsumerError::Init(format!("NvdecD3d11Consumer::new: {e}"))
+            })?;
             Ok(PlatformConsumer::Nvdec(nv))
         }
         #[cfg(not(prdt_nvdec_bindings))]
         ("nvdec", Codec::H265) => Err(super::ConsumerError::Init(
             "nvdec requested but built without prdt_nvdec_bindings cfg".into(),
         )),
+        #[cfg(feature = "media-win-hdr10")]
+        (_, Codec::H265Main10) => {
+            build_consumer_hdr10(width, height, dev)
+        }
         (other_decoder, other_codec) => Err(super::ConsumerError::Init(format!(
             "unsupported decoder/codec combination on Windows: decoder={other_decoder}, codec={other_codec:?}"
         ))),
     }
+}
+
+/// Build the HDR10 consumer: constructs a `CpuP010Uploader` for CPU→GPU
+/// P010 texture upload. The HDR10 swapchain is constructed separately in
+/// `build_render_hdr10` (called by lib.rs after `build_consumer` succeeds).
+///
+/// Separated from `build_consumer` so the function stays under the
+/// `media-win-hdr10` feature gate without polluting the 8-bit path.
+#[cfg(feature = "media-win-hdr10")]
+pub fn build_consumer_hdr10(
+    width: u32,
+    height: u32,
+    dev: &D3d11Device,
+) -> Result<PlatformConsumer, super::ConsumerError> {
+    let uploader = CpuP010Uploader::new(dev, width, height)
+        .map_err(|e| super::ConsumerError::Init(format!("CpuP010Uploader::new: {e}")))?;
+    Ok(PlatformConsumer::Hdr10 {
+        uploader,
+        latest_texture: None,
+    })
+}
+
+/// Build an HDR10 swapchain bound to `hwnd`. Returns `ConsumerError::HdrUnavailable`
+/// (wrapping `MediaError::HdrUnavailable`) if either DXGI capability probe fails.
+/// Callers must surface this to the user — no silent SDR fallback (change #6).
+///
+/// Replaces the 8-bit swapchain in `PlatformRender::swap` so subsequent
+/// `present_frame` calls use the HDR10 path.
+#[cfg(feature = "media-win-hdr10")]
+pub fn rebuild_swap_hdr10(r: &mut PlatformRender, hwnd: HWND) -> Result<(), super::ConsumerError> {
+    let swap = prdt_media_win::SwapChain::new_for_hwnd_hdr10(
+        &r.dev,
+        hwnd,
+        r.swap.width(),
+        r.swap.height(),
+    )
+    .map_err(|e| super::ConsumerError::HdrUnavailable(e.to_string()))?;
+    r.swap = swap;
+    r.renderer = None; // force renderer rebuild on next present_frame call
+    r.last_hdr10_meta = None;
+    Ok(())
 }

@@ -21,6 +21,10 @@ pub enum ConsumerError {
     Decode(String),
     #[error("decoder backend init failed: {0}")]
     Init(String),
+    /// HDR10 swapchain requested but unavailable on this display/driver.
+    /// Hard-fail: no silent SDR precision loss per plan PR3 Step 4 change #6.
+    #[error("HDR10 unavailable: {0}")]
+    HdrUnavailable(String),
 }
 
 #[derive(Debug, Error)]
@@ -85,6 +89,10 @@ mod tests {
         assert_eq!(
             ConsumerError::Init("openh264 missing".into()).to_string(),
             "decoder backend init failed: openh264 missing",
+        );
+        assert_eq!(
+            ConsumerError::HdrUnavailable("no HDR display".into()).to_string(),
+            "HDR10 unavailable: no HDR display",
         );
     }
 
