@@ -71,6 +71,12 @@ PROTECTED: list[Union[Tuple[str, int, int], Tuple[str, str, str]]] = [
         "// region: 8-bit-mf-consumer",
         "// endregion: 8-bit-mf-consumer",
     ),
+    # F-WIN-FFMPEG PR1: whole-file byte-identity guard for encoder.rs (no region
+    # markers). Range uses origin/master line count (603 lines at PR1 start).
+    # NOTE: decoder_main10.rs guard removed — its master baseline never compiled
+    # against windows-rs 0.58 (PR #36 admin-merged without Windows CI), so the
+    # protection was invalid. Fixed by fix/mf-decoder-main10-windows-rs-0.58-api.
+    ("crates/media-win/src/mf/encoder.rs", 1, 603),
 ]
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 

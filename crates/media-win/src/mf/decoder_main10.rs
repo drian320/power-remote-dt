@@ -43,9 +43,26 @@ use windows::Win32::Media::MediaFoundation::{
     MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_LOCALMFT, MFT_ENUM_FLAG_SORTANDFILTER,
     MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
     MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_REGISTER_TYPE_INFO, MF_E_NOTACCEPTING,
-    MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_CONTENT_LIGHT_LEVEL,
-    MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_MASTERING_DISPLAY_INFO, MF_MT_SUBTYPE,
-    MF_MT_TRANSFER_FUNCTION, MF_MT_VIDEO_PRIMARIES, MF_MT_YUV_MATRIX, MF_SA_D3D11_AWARE,
+    MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_FRAME_SIZE,
+    MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_MT_TRANSFER_FUNCTION, MF_MT_VIDEO_PRIMARIES,
+    MF_MT_YUV_MATRIX, MF_SA_D3D11_AWARE,
+};
+
+// MF_MT_MASTERING_DISPLAY_INFO and MF_MT_CONTENT_LIGHT_LEVEL are absent from
+// windows-rs 0.58; define them manually from mfapi.h.
+// {10AD2D3B-5E1D-414F-9A41-EE89EE39A8E5}
+const MF_MT_MASTERING_DISPLAY_INFO: windows::core::GUID = windows::core::GUID {
+    data1: 0x10AD_2D3B,
+    data2: 0x5E1D,
+    data3: 0x414F,
+    data4: [0x9A, 0x41, 0xEE, 0x89, 0xEE, 0x39, 0xA8, 0xE5],
+};
+// {10AD2D3B-5E1D-414F-9A41-EE89EE39A8E6}
+const MF_MT_CONTENT_LIGHT_LEVEL: windows::core::GUID = windows::core::GUID {
+    data1: 0x10AD_2D3B,
+    data2: 0x5E1D,
+    data3: 0x414F,
+    data4: [0x9A, 0x41, 0xEE, 0x89, 0xEE, 0x39, 0xA8, 0xE6],
 };
 
 use crate::d3d11::{D3d11Device, D3d11Texture, TextureFormat};
@@ -321,7 +338,7 @@ impl MfHevcMain10Decoder {
             .GetBlob(
                 &MF_MT_MASTERING_DISPLAY_INFO,
                 &mut mastering_buf,
-                &mut mastering_actual,
+                Some(&mut mastering_actual as *mut u32),
             )
             .is_ok()
             && mastering_actual as usize <= mastering_buf.len();
@@ -330,7 +347,11 @@ impl MfHevcMain10Decoder {
         let mut cll_buf = [0u8; 4];
         let mut cll_actual: u32 = 0;
         let cll_ok = attrs
-            .GetBlob(&MF_MT_CONTENT_LIGHT_LEVEL, &mut cll_buf, &mut cll_actual)
+            .GetBlob(
+                &MF_MT_CONTENT_LIGHT_LEVEL,
+                &mut cll_buf,
+                Some(&mut cll_actual as *mut u32),
+            )
             .is_ok()
             && cll_actual as usize <= cll_buf.len();
 
@@ -783,15 +804,17 @@ unsafe fn read_attr_blob(
 ) -> Option<Vec<u8>> {
     use windows::Win32::Media::MediaFoundation::IMFAttributes;
     let attrs: IMFAttributes = mt.cast().ok()?;
-    // First call: query required blob size.
+    // First call: query required blob size (pass None for buf, Some for size out-param).
     let mut blob_size: u32 = 0;
-    let _ = attrs.GetBlob(key, &mut [], &mut blob_size);
+    let _ = attrs.GetBlob(key, &mut [], Some(&mut blob_size as *mut u32));
     if blob_size == 0 {
         return None;
     }
     let mut buf = vec![0u8; blob_size as usize];
     let mut actual: u32 = 0;
-    attrs.GetBlob(key, &mut buf, &mut actual).ok()?;
+    attrs
+        .GetBlob(key, &mut buf, Some(&mut actual as *mut u32))
+        .ok()?;
     buf.truncate(actual as usize);
     Some(buf)
 }
