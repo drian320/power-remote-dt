@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>net.example.PowerRemoteDt</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Power Remote DT</name>
+  <summary>Ultra-low-latency cross-platform remote desktop</summary>
+  <description>
+    <p>Power Remote DT (prdt) is a Rust-implemented remote-desktop
+    host+client targeting sub-frame end-to-end latency. Supports
+    H.264 (OpenH264 + VA-API) and HEVC (VA-API + NVENC) hardware
+    paths; Wayland and X11 capture; PipeWire portal integration.</p>
+  </description>
+  <launchable type="desktop-id">net.example.PowerRemoteDt.desktop</launchable>
+  <url type="homepage">https://github.com/${OWNER}/${REPO}</url>
+  <provides>
+    <binary>prdt</binary>
+  </provides>
+  <releases>
+    <release version="${VERSION}" date="${BUILD_DATE}"/>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>

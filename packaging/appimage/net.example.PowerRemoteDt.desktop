@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Power Remote DT
+Comment=Ultra-low-latency cross-platform remote desktop
+Exec=prdt
+Icon=net.example.PowerRemoteDt
+Categories=Network;RemoteAccess;
+Terminal=false
+StartupNotify=false
+StartupWMClass=prdt

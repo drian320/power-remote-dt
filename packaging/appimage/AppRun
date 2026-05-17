@@ -1,0 +1,43 @@
+#!/bin/sh
+# AppRun — entry point for prdt AppImage.
+# Responsibilities:
+#  1. Set HERE = the directory containing this AppRun (after squashfs mount).
+#  2. Prepend HERE/usr/lib to LD_LIBRARY_PATH so bundled libs resolve before host.
+#  3. Prepend HERE/usr/bin to PATH (defensive; prdt is the only binary).
+#  4. Soft-probe NVIDIA / VAAPI driver presence and emit a one-line diagnostic
+#     to stderr if the user asked for an encoder we can't satisfy. Advisory only.
+#  5. Detect Wayland vs X11 session and log to stderr (info).
+#  6. Do NOT override LIBVA_DRIVERS_PATH (host's VA drivers stay discoverable).
+#  7. exec the bundled prdt with all args.
+
+set -e
+HERE="$(dirname "$(readlink -f "$0")")"
+export LD_LIBRARY_PATH="$HERE/usr/lib:${LD_LIBRARY_PATH:-}"
+export PATH="$HERE/usr/bin:$PATH"
+
+# Wayland vs X11 (info only)
+case "${XDG_SESSION_TYPE:-unknown}" in
+    wayland) echo "[prdt-appimage] Wayland session detected." >&2 ;;
+    x11)     echo "[prdt-appimage] X11 session detected." >&2 ;;
+    *)       echo "[prdt-appimage] Unknown session type: ${XDG_SESSION_TYPE:-unset}. Will try X11/Wayland autodetect." >&2 ;;
+esac
+
+# Soft NVENC/NVDEC probe: only if user asked for an nvenc/nvdec encoder.
+for arg in "$@"; do
+    case "$arg" in
+        *nvenc*|*nvdec*)
+            if ! /sbin/ldconfig -p 2>/dev/null | grep -q libnvidia-encode.so.1; then
+                echo "[prdt-appimage] WARNING: --encoder/--decoder nvenc/nvdec requested but libnvidia-encode.so.1 not found on host." >&2
+                echo "[prdt-appimage]   Install the NVIDIA proprietary driver (matching your GPU's compute capability) to enable hardware encode." >&2
+            fi
+            ;;
+        *vaapi*)
+            if [ ! -e /dev/dri/renderD128 ]; then
+                echo "[prdt-appimage] WARNING: --encoder/--decoder vaapi requested but /dev/dri/renderD128 not present." >&2
+                echo "[prdt-appimage]   Install Mesa VA drivers (mesa-va-drivers / intel-media-va-driver) and ensure your user is in the 'render' or 'video' group." >&2
+            fi
+            ;;
+    esac
+done
+
+exec "$HERE/usr/bin/prdt" "$@"
