@@ -1,0 +1,148 @@
+# fetch-ffmpeg-windows.ps1
+#
+# Download the pre-built BtbN FFmpeg Windows DLLs (lgpl-shared, n6.1.1) and
+# expand them into target/windows-ffmpeg/{bin,lib,include}/.
+#
+# Usage (from repo root):
+#   .\scripts\fetch-ffmpeg-windows.ps1
+#
+# On success writes target/windows-ffmpeg/env.ps1 which exports:
+#   $env:FFMPEG_DLL_PATH    — path to target\windows-ffmpeg\bin
+#   $env:FFMPEG_INCLUDE_DIR — path to target\windows-ffmpeg\include
+#   $env:FFMPEG_LIB_DIR     — path to target\windows-ffmpeg\lib
+#
+# Source that file, then build:
+#   . .\target\windows-ffmpeg\env.ps1
+#   cargo build -p prdt-media-win --features media-win-ffmpeg
+#
+# Bootstrap (first download / pin update):
+#   Set $env:ALLOW_UNVERIFIED_SHA256=1 to skip sha256 check.
+#   The script will print the actual hash; paste it into
+#   packaging/windows/ffmpeg-manifest.json and unset the env var.
+#   Never run with ALLOW_UNVERIFIED_SHA256=1 in CI.
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$RepoRoot = Split-Path -Parent $PSScriptRoot
+$ManifestPath = Join-Path $RepoRoot 'packaging\windows\ffmpeg-manifest.json'
+$OutDir = Join-Path $RepoRoot 'target\windows-ffmpeg'
+$EnvFile = Join-Path $OutDir 'env.ps1'
+
+# Short-circuit if already expanded (cache hit in CI via actions/cache).
+if (Test-Path $EnvFile) {
+    Write-Output "target\windows-ffmpeg already present — skipping download."
+    . $EnvFile
+    exit 0
+}
+
+if (-not (Test-Path $ManifestPath)) {
+    Write-Error "Manifest not found: $ManifestPath"
+    exit 1
+}
+
+$Manifest = Get-Content $ManifestPath -Raw | ConvertFrom-Json
+
+$Url       = $Manifest.url
+$MirrorUrl = $Manifest.mirror_url
+$Expected  = $Manifest.sha256
+$Files     = $Manifest.expected_files
+
+$TempZip = Join-Path $env:TEMP 'ffmpeg-bundle.zip'
+
+function Verify-Or-Die {
+    param([string]$FilePath, [string]$ExpectedHash)
+
+    if ($ExpectedHash -like '*VERIFY_AT_PR_TIME_RUN_sha256sum_AFTER_FIRST_DOWNLOAD*') {
+        $Actual = (Get-FileHash -Algorithm SHA256 -Path $FilePath).Hash.ToLower()
+        Write-Warning "sha256 placeholder detected for $FilePath"
+        Write-Warning "Bootstrap: run once with `$env:ALLOW_UNVERIFIED_SHA256=1, then paste this hash into packaging/windows/ffmpeg-manifest.json:"
+        Write-Warning "  $Actual"
+        if ($env:ALLOW_UNVERIFIED_SHA256 -eq '1') {
+            Write-Warning 'ALLOW_UNVERIFIED_SHA256=1 set — proceeding without verification (bootstrap mode only).'
+            return
+        }
+        Write-Error 'Refusing to proceed without sha256 verification. Set ALLOW_UNVERIFIED_SHA256=1 ONLY for first-download bootstrap (never in CI).'
+        exit 1
+    }
+
+    $Actual = (Get-FileHash -Algorithm SHA256 -Path $FilePath).Hash.ToLower()
+    $ExpectedNorm = $ExpectedHash.ToLower()
+    if ($Actual -ne $ExpectedNorm) {
+        Write-Error "FATAL: sha256 mismatch for $FilePath"
+        Write-Error "  expected: $ExpectedNorm"
+        Write-Error "  actual:   $Actual"
+        Write-Error "  The upstream binary CHANGED at the pinned URL — investigate before bumping."
+        exit 1
+    }
+    Write-Output "sha256 OK: $FilePath"
+}
+
+function Download-Bundle {
+    param([string]$SourceUrl, [string]$Dest)
+    Write-Output "Downloading $SourceUrl ..."
+    try {
+        Invoke-WebRequest -Uri $SourceUrl -OutFile $Dest -UseBasicParsing
+    } catch {
+        Write-Error "Download failed from $SourceUrl : $_"
+        exit 1
+    }
+}
+
+# Try primary URL first; fall back to mirror.
+try {
+    Download-Bundle -SourceUrl $Url -Dest $TempZip
+} catch {
+    Write-Warning "Primary URL failed — trying mirror: $MirrorUrl"
+    Download-Bundle -SourceUrl $MirrorUrl -Dest $TempZip
+}
+
+Verify-Or-Die -FilePath $TempZip -ExpectedHash $Expected
+
+# Expand into a temp staging dir, then move to target/windows-ffmpeg.
+$StagingDir = Join-Path $env:TEMP 'ffmpeg-bundle-staging'
+if (Test-Path $StagingDir) { Remove-Item $StagingDir -Recurse -Force }
+New-Item -ItemType Directory -Path $StagingDir | Out-Null
+
+Write-Output "Expanding archive ..."
+Expand-Archive -Path $TempZip -DestinationPath $StagingDir -Force
+
+# BtbN zips contain a single top-level versioned directory.
+$Inner = Get-ChildItem -Path $StagingDir -Directory | Select-Object -First 1
+if (-not $Inner) {
+    Write-Error "Expected a top-level directory inside the zip; none found."
+    exit 1
+}
+
+if (Test-Path $OutDir) { Remove-Item $OutDir -Recurse -Force }
+Move-Item -Path $Inner.FullName -Destination $OutDir
+
+# Verify expected files are present.
+$Missing = @()
+foreach ($Rel in $Files) {
+    $Full = Join-Path $OutDir ($Rel -replace '/', '\')
+    if (-not (Test-Path $Full)) { $Missing += $Rel }
+}
+if ($Missing.Count -gt 0) {
+    Write-Error "Missing expected files after extraction:`n$($Missing -join "`n")"
+    exit 1
+}
+Write-Output "All expected files present."
+
+# Write env.ps1 for callers.
+$BinDir     = Join-Path $OutDir 'bin'
+$IncludeDir = Join-Path $OutDir 'include'
+$LibDir     = Join-Path $OutDir 'lib'
+
+@"
+# Auto-generated by fetch-ffmpeg-windows.ps1 — do not edit manually.
+`$env:FFMPEG_DLL_PATH    = '$BinDir'
+`$env:FFMPEG_INCLUDE_DIR = '$IncludeDir'
+`$env:FFMPEG_LIB_DIR     = '$LibDir'
+"@ | Set-Content -Path $EnvFile -Encoding UTF8
+
+Write-Output ""
+Write-Output "FFmpeg DLLs ready at: $OutDir"
+Write-Output "To build with FFmpeg support:"
+Write-Output "  . .\target\windows-ffmpeg\env.ps1"
+Write-Output "  cargo build -p prdt-media-win --features media-win-ffmpeg"
