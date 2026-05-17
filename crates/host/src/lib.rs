@@ -149,8 +149,11 @@ pub struct Args {
     /// `PRDT_PREFER_NVENC=1` (any value in `{1,true,yes,on}`, case-insensitive)
     /// to prefer NVENC instead.
     ///
-    /// On Windows: `auto | nvenc | mf | openh264`. `auto` picks
-    /// `nvenc > mf > openh264`.
+    /// On Windows: `auto | nvenc | mf | openh264 | mf-nvenc-hevc |
+    /// mf-nvenc-hevc-main10 | ffmpeg-nvenc-hevc | ffmpeg-nvenc-hevc-main10`.
+    /// `auto` picks `nvenc > mf > openh264`. The `ffmpeg-*` variants require
+    /// building with `--features media-win-ffmpeg-nvenc` (8-bit) or
+    /// `--features media-win-ffmpeg-nvenc-main10` (HDR10 Main10).
     ///
     /// Available choices depend on Cargo features compiled into this binary.
     #[arg(long, default_value = "auto")]
