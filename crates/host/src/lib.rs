@@ -1457,7 +1457,7 @@ fn to_policy_codec(c: prdt_protocol::Codec) -> prdt_media_policy::Codec {
     match c {
         Codec::H264 => prdt_media_policy::Codec::H264,
         Codec::H265 => prdt_media_policy::Codec::H265,
-        Codec::Av1 => {
+        Codec::Av1 | Codec::H265Main10 => {
             tracing::warn!(
                 "prdt_protocol::Codec::Av1 not supported by prdt_media_policy in P5A; \
                  falling back to H264 for policy ranking (codec hot-swap deferred to P5C)"

@@ -73,6 +73,30 @@ pub fn linux_supported_codecs(encoder_arg: &str) -> Vec<prdt_protocol::Codec> {
     }
 }
 
+/// Pre-existing codec variants (variant_index 0/1/2) safe to send to any client.
+#[allow(dead_code)] // used by supported_codecs_for; wired in Task #7
+fn linux_supported_codecs_base() -> Vec<prdt_protocol::Codec> {
+    vec![
+        prdt_protocol::Codec::H265,
+        prdt_protocol::Codec::H264,
+        prdt_protocol::Codec::Av1,
+    ]
+}
+
+/// R15 mitigation: only advertise `Codec::H265Main10` (variant_index=3) to
+/// clients whose inbound `Hello.codec` was already `H265Main10`. Pre-PR1
+/// clients sending `H264`, `H265`, or `Av1` receive a HelloAck containing
+/// only pre-existing variants 0/1/2 — bincode never encounters an unknown
+/// variant_index, so the message decodes cleanly.
+#[allow(dead_code)] // wired into linux_supported_codecs in Task #7
+pub(crate) fn supported_codecs_for(hello_codec: prdt_protocol::Codec) -> Vec<prdt_protocol::Codec> {
+    let mut v = linux_supported_codecs_base();
+    if hello_codec == prdt_protocol::Codec::H265Main10 {
+        v.push(prdt_protocol::Codec::H265Main10);
+    }
+    v
+}
+
 /// Build a boxed `VideoProducer` for the Linux path. Resolves the requested
 /// backend via [`normalize_encoder`] and constructs the matching producer
 /// (FFmpeg VAAPI HEVC, FFmpeg NVENC HEVC, or the SW OpenH264 fallback).
@@ -1113,6 +1137,30 @@ mod tests {
     fn linux_normalize_encoder_npp_arm_falls_back_without_feature() {
         assert_eq!(normalize_encoder("ffmpeg-nvenc-hevc-npp"), "openh264");
         assert_eq!(normalize_encoder("nvenc-npp"), "openh264");
+    }
+
+    // R15 mitigation: pre-PR1 clients must never receive H265Main10 in HelloAck.
+    #[test]
+    fn supported_codecs_for_excludes_main10_for_legacy_codecs() {
+        use prdt_protocol::Codec;
+        for legacy in [Codec::H265, Codec::H264, Codec::Av1] {
+            let codecs = supported_codecs_for(legacy);
+            assert!(
+                !codecs.contains(&Codec::H265Main10),
+                "H265Main10 must not appear for legacy hello_codec {:?}",
+                legacy
+            );
+        }
+    }
+
+    #[test]
+    fn supported_codecs_for_includes_main10_for_main10_client() {
+        use prdt_protocol::Codec;
+        let codecs = supported_codecs_for(Codec::H265Main10);
+        assert!(
+            codecs.contains(&Codec::H265Main10),
+            "H265Main10 must appear when hello_codec is H265Main10"
+        );
     }
 
     /// `build_video_producer` with `ffmpeg-nvenc-hevc-npp` selects the NPP
