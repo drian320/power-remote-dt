@@ -13,6 +13,8 @@ pub mod d3d11;
 pub mod dxgi;
 pub mod encoder_trait;
 pub mod error;
+#[cfg(feature = "media-win-ffmpeg")]
+pub mod ffmpeg;
 pub mod mf;
 pub mod nvdec;
 pub mod nvenc;
