@@ -158,6 +158,7 @@ async fn w3_smoke_probe_plus_noise_plus_hello() {
             MonitorRect::new(0, 0, 1920, 1080),
             MonitorRect::new(0, 0, 1920, 1080),
             &[Codec::H265],
+            |_| vec![Codec::H265],
             Duration::from_secs(5),
         )
         .await

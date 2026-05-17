@@ -103,6 +103,7 @@ async fn w1_smoke_signaling_noise_hello_ack_completes() {
             MonitorRect::new(0, 0, 1920, 1080),
             MonitorRect::new(0, 0, 1920, 1080),
             &[Codec::H265],
+            |_| vec![Codec::H265],
             Duration::from_secs(5),
         )
         .await

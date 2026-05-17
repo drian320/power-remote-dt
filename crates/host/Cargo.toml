@@ -66,6 +66,15 @@ ffmpeg-encode-hevc-nvenc-npp = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", 
 ffmpeg-encode-hevc-nvenc-npp-ffmpeg5 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-nvenc-npp-ffmpeg5", "ffmpeg-encode-hevc-nvenc-npp-any"]
 ffmpeg-encode-hevc-nvenc-npp-ffmpeg7 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-nvenc-npp-ffmpeg7", "ffmpeg-encode-hevc-nvenc-npp-any"]
 ffmpeg-encode-hevc-nvenc-npp-any = []
+# P3 — HEVC Main10 encode (VAAPI + NVENC). Shallow forwards onto prdt-media-ffmpeg.
+ffmpeg-encode-hevc-vaapi-main10 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-vaapi-main10", "ffmpeg-encode-hevc-vaapi-main10-any"]
+ffmpeg-encode-hevc-vaapi-main10-ffmpeg5 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-vaapi-main10-ffmpeg5", "ffmpeg-encode-hevc-vaapi-main10-any"]
+ffmpeg-encode-hevc-vaapi-main10-ffmpeg7 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-vaapi-main10-ffmpeg7", "ffmpeg-encode-hevc-vaapi-main10-any"]
+ffmpeg-encode-hevc-vaapi-main10-any = []
+ffmpeg-encode-hevc-nvenc-main10 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-nvenc-main10", "ffmpeg-encode-hevc-nvenc-main10-any"]
+ffmpeg-encode-hevc-nvenc-main10-ffmpeg5 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-nvenc-main10-ffmpeg5", "ffmpeg-encode-hevc-nvenc-main10-any"]
+ffmpeg-encode-hevc-nvenc-main10-ffmpeg7 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-nvenc-main10-ffmpeg7", "ffmpeg-encode-hevc-nvenc-main10-any"]
+ffmpeg-encode-hevc-nvenc-main10-any = []
 
 # P2 — HEVC decode features forwarded onto prdt-media-linux. The viewer pulls
 # prdt-media-linux transitively (Linux platform consumer construction lives

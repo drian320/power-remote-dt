@@ -181,16 +181,20 @@ pub struct HostHandshakeResult {
 
 /// Host-side: await Hello, respond with HelloAck or HelloReject.
 ///
-/// `host_supported_codecs` is the full set of codecs this host can drive.
-/// If `Hello.codec` is in the set, the handshake succeeds and the negotiated
-/// codec is the viewer's request. Otherwise the host sends a HelloReject and
-/// returns `Err(TransportError::HelloRejected(_))`.
+/// `host_supported_codecs` is the full set of codecs this host can drive;
+/// used for the codec-negotiation check (`Hello.codec` must be in this set).
+///
+/// `ack_codecs_for` is called with the viewer's `Hello.codec` to produce the
+/// `host_supported_codecs` list placed in the HelloAck. This allows callers to
+/// filter the advertised set based on the inbound codec (R15 mitigation: hosts
+/// must not advertise `Codec::H265Main10` to pre-PR1 clients).  Pass
+/// `|_| host_supported_codecs.to_vec()` to reproduce the previous behaviour.
 ///
 /// Auth is delegated to `hook` — after codec/version checks pass, the hook
 /// receives the raw Hello and the peer's Noise pubkey and returns either
 /// `AuthDecision::Grant(perms)` or `AuthDecision::Reject { .. }`.
 #[allow(clippy::too_many_arguments)]
-pub async fn host_handshake<T: Transport, A: AuthHook>(
+pub async fn host_handshake<T: Transport, A: AuthHook, F>(
     transport: &T,
     hook: &A,
     peer_pubkey_b64: &str,
@@ -200,8 +204,12 @@ pub async fn host_handshake<T: Transport, A: AuthHook>(
     host_monitor_rect: MonitorRect,
     host_virtual_desktop_rect: MonitorRect,
     host_supported_codecs: &[Codec],
+    ack_codecs_for: F,
     wait_timeout: Duration,
-) -> Result<HostHandshakeResult, TransportError> {
+) -> Result<HostHandshakeResult, TransportError>
+where
+    F: Fn(Codec) -> Vec<Codec>,
+{
     let supported = host_supported_codecs.to_vec();
     let fut = async {
         loop {
@@ -272,7 +280,7 @@ pub async fn host_handshake<T: Transport, A: AuthHook>(
                 host_monitor_rect,
                 host_virtual_desktop_rect,
                 negotiated_codec: codec,
-                host_supported_codecs: supported.clone(),
+                host_supported_codecs: ack_codecs_for(codec),
                 granted_permissions,
             };
             transport.send_control(ack).await?;
@@ -322,6 +330,7 @@ mod tests {
         host_supported_codecs: &[Codec],
         wait_timeout: Duration,
     ) -> Result<HostHandshakeResult, TransportError> {
+        let supported = host_supported_codecs.to_vec();
         host_handshake(
             transport,
             &GrantAllHook,
@@ -332,6 +341,7 @@ mod tests {
             host_monitor_rect,
             host_virtual_desktop_rect,
             host_supported_codecs,
+            |_| supported.clone(),
             wait_timeout,
         )
         .await
@@ -584,6 +594,7 @@ mod tests {
                 MonitorRect::new(0, 0, 1920, 1080),
                 MonitorRect::new(0, 0, 1920, 1080),
                 &[Codec::H265],
+                |_| vec![Codec::H265],
                 Duration::from_millis(500),
             )
             .await
