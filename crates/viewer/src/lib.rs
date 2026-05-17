@@ -2213,10 +2213,31 @@ fn spawn_worker_tasks(
                                         Err(e) => Err(format!("decode: {e}")),
                                     }
                                 }
-                                // PR3: Windows-native H265Main10 decode (F8 follow-up) is
-                                // not yet implemented. The Hdr10 consumer is wired for the
-                                // render path but has no decoder yet — drop frames and
-                                // request IDR until F8 lands the MF Main10 decode path.
+                                // F8 — Windows-native HEVC Main10 decode via MfHevcMain10Consumer.
+                                // Sibling of the Hdr10 arm (which serves the Linux-decode-on-Windows
+                                // path). Both arms terminate at PlatformFrame::Nv12_10.
+                                #[cfg(all(
+                                    feature = "media-win-hdr10",
+                                    feature = "media-win-hevc-main10"
+                                ))]
+                                PlatformConsumer::HevcMain10Mf {
+                                    consumer,
+                                    latest_texture,
+                                } => {
+                                    match consumer.submit(frame).await {
+                                        Ok(()) => {
+                                            if let Some(pair) = consumer.take_latest() {
+                                                *latest_texture = Some(pair);
+                                            }
+                                            Ok(())
+                                        }
+                                        Err(e) => Err(format!("{e:?}")),
+                                    }
+                                }
+                                // PR3 Hdr10 arm — unchanged, serves the Linux-decode-on-Windows
+                                // path (FFmpeg P010 frames over wire). When media-win-hevc-main10
+                                // is off, the H265Main10 codec on Windows hits this arm in
+                                // stub-and-drop mode (preserved exactly as PR3 shipped it).
                                 #[cfg(feature = "media-win-hdr10")]
                                 PlatformConsumer::Hdr10 { .. } => {
                                     idr_req.mark();
@@ -2242,6 +2263,15 @@ fn spawn_worker_tasks(
                                 }
                                 #[cfg(feature = "media-win-hdr10")]
                                 PlatformConsumer::Hdr10 { latest_texture, .. } => {
+                                    latest_texture.take().map(|(tex, hdr10)| {
+                                        PlatformFrame::Nv12_10 { tex, hdr10 }
+                                    })
+                                }
+                                #[cfg(all(
+                                    feature = "media-win-hdr10",
+                                    feature = "media-win-hevc-main10"
+                                ))]
+                                PlatformConsumer::HevcMain10Mf { latest_texture, .. } => {
                                     latest_texture.take().map(|(tex, hdr10)| {
                                         PlatformFrame::Nv12_10 { tex, hdr10 }
                                     })

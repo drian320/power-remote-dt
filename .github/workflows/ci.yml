@@ -87,6 +87,26 @@ jobs:
             }
           }
           Write-Output "PASS: all SetHDRMetaData call sites are cfg-gated on media-win-hdr10"
+      # ── F8 byte-identity guard (A9) ──────────────────────────────────────────
+      # Must run before the F8 cargo compile cells so CI fails fast on any
+      # modification inside the named protected regions (decoder.rs + consumer.rs).
+      - name: F8 — byte-identity guard (A9, check-8bit-helpers-byte-identity.py)
+        shell: bash
+        run: python3 scripts/check-8bit-helpers-byte-identity.py
+      # ── F8 compile gates (A1 / A2 / A3) ─────────────────────────────────────
+      # A1: 8-bit-only build (no media-win-hevc-main10) — decoder_main10 compiled
+      # out; existing H265Decoder unaffected.
+      - name: F8 — cargo check prdt-media-win without media-win-hevc-main10 (A1, 8-bit regression)
+        run: cargo check -p prdt-media-win --target x86_64-pc-windows-msvc
+      # A2: new module alone — decoder_main10.rs must compile with the feature on.
+      - name: F8 — cargo check prdt-media-win with media-win-hevc-main10 (A2, new module compile gate)
+        run: cargo check -p prdt-media-win --target x86_64-pc-windows-msvc --features media-win-hevc-main10
+      # A3: full HDR10 + Main10 integration compile gate.
+      - name: F8 — cargo check prdt-client with media-win-hdr10,media-win-hevc-main10 (A3, integration gate)
+        run: cargo check -p prdt-client --target x86_64-pc-windows-msvc --features media-win-hdr10,media-win-hevc-main10
+      # Lint: clippy on the new module (F8.A12 clippy cell).
+      - name: F8 — cargo clippy prdt-media-win with media-win-hevc-main10 (A12 lint gate)
+        run: cargo clippy -p prdt-media-win --target x86_64-pc-windows-msvc --features media-win-hevc-main10 -- -D warnings
 
   media-ffmpeg-compile:
     runs-on: ubuntu-latest

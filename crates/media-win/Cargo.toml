@@ -58,3 +58,13 @@ i420-upload = ["dep:prdt-media-sw"]
 # HDR toggle on. Hard-fails with MediaError::HdrUnavailable when HDR probes
 # fail (no silent precision loss — see plan §PR3 Step 4 change #6).
 media-win-hdr10 = []
+# F8 — Windows-native HEVC Main10 decode via Media Foundation. Off by default.
+# Enabling this feature implicitly enables media-win-hdr10 (the SW fallback
+# path uses CpuP010Uploader from the HDR10 feature; declared as a feature
+# dependency below to make this additive rather than a compile_error guard).
+#
+# Hard-fails with MediaError::DecoderNotAvailable when no HEVC Main10 MFT
+# is registered on the host (e.g. server SKU without Desktop Experience).
+# No silent fallback to 8-bit (the 8-bit MFT cannot parse a 10-bit
+# bitstream — it would emit corrupted NV12).
+media-win-hevc-main10 = ["media-win-hdr10"]

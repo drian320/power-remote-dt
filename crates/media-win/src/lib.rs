@@ -38,10 +38,14 @@ pub use d3d11::{
 pub use dxgi::{enumerate_outputs_for_adapter, AcquiredFrame, DesktopDuplication, OutputInfo};
 pub use encoder_trait::{EncodedH265Frame, Hevc265Encoder, HwHevcEncoder};
 pub use error::{MediaError, Result};
+#[cfg(feature = "media-win-hevc-main10")]
+pub use mf::MfHevcMain10Decoder;
 pub use mf::{H265Decoder, MfH265Encoder};
 pub use nvdec::NvdecD3d11Consumer;
 pub use nvenc::NvencEncoderConfig;
 #[cfg(prdt_nvenc_bindings)]
 pub use nvenc::{NvEncLibrary, NvencEncoder};
+#[cfg(feature = "media-win-hevc-main10")]
+pub use pipeline::MfHevcMain10Consumer;
 pub use pipeline::{DxgiNvencProducer, MfD3d11Consumer};
 pub use platform::MmcssScope;

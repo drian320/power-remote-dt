@@ -1,9 +1,13 @@
 //! Media Foundation H.265 decoder and encoder support.
 
 pub mod decoder;
+#[cfg(feature = "media-win-hevc-main10")]
+pub mod decoder_main10;
 pub mod encoder;
 
 pub use decoder::H265Decoder;
+#[cfg(feature = "media-win-hevc-main10")]
+pub use decoder_main10::MfHevcMain10Decoder;
 pub use encoder::MfH265Encoder;
 
 use std::sync::OnceLock;

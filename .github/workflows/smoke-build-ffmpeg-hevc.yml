@@ -371,15 +371,16 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-      - name: Build prdt with media-win-hdr10 feature (PR3 — Windows HDR10 display smoke)
-        # Produces a separate artifact for manual HDR10 smoke testing on an
-        # HDR10-capable Windows display (LG C2 OLED / Samsung Odyssey G7 /
-        # similar). Requires Windows 11 22H2+ with the HDR toggle ON in display
-        # settings. Hard-fails at runtime with MediaError::HdrUnavailable if the
-        # display or driver does not advertise HDR10 capability via DXGI probes
-        # (IDXGIOutput6::GetDesc1 + IDXGISwapChain3::CheckColorSpaceSupport).
+      - name: Build prdt with media-win-hdr10,media-win-hevc-main10 features (F8 — Windows HDR10 + Main10 smoke)
+        # Produces a separate artifact for manual HDR10 + HEVC Main10 smoke
+        # testing on an HDR10-capable Windows display. Rebuilds the PR3
+        # prdt-windows-x86_64-hdr10.exe artifact with the F8 Main10 decoder
+        # included. Pre-F8 users who specifically wanted HDR10-without-decode
+        # can revert via `--features media-win-hdr10` in local builds.
+        # Requires Windows 11 22H2+ with the HDR toggle ON and the "HEVC Video
+        # Extensions" UWP package (ProductId 9NMZLZ57R3T7) installed.
         run: |
-          cargo build --release -p prdt-client --features media-win-hdr10 --target x86_64-pc-windows-msvc
+          cargo build --release -p prdt-client --features media-win-hdr10,media-win-hevc-main10 --target x86_64-pc-windows-msvc
 
       - name: Stage HDR10 artifact
         shell: bash
