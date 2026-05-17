@@ -265,6 +265,64 @@ jobs:
               --target x86_64-unknown-linux-gnu \
               -- -D warnings
           '
+      # ── P3 Main10 encode cells ───────────────────────────────────────────────
+      # 8-bit helpers byte-identity guard (runs first so violations fail fast).
+      - name: 8-bit helpers byte-identity guard (PR1 prerequisite)
+        run: |
+          git fetch origin master --depth 50
+          python3 scripts/check-8bit-helpers-byte-identity.py
+      # VAAPI Main10 cells (2 backends × 4 ABI variants; no NPP Main10 per change #4).
+      - name: VAAPI-Main10 — cargo check (ffmpeg5 explicit ABI, dev-container)
+        run: ./scripts/dev-container.sh bash -c 'cargo check -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-vaapi-main10-ffmpeg5 --target x86_64-unknown-linux-gnu'
+      - name: VAAPI-Main10 — clippy (deny warnings, ffmpeg5 ABI, dev-container)
+        run: ./scripts/dev-container.sh bash -c 'cargo clippy -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-vaapi-main10-ffmpeg5 --target x86_64-unknown-linux-gnu -- -D warnings'
+      - name: VAAPI-Main10 — cargo check (ffmpeg6 default ABI, native runner)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: cargo check -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-vaapi-main10 --target x86_64-unknown-linux-gnu
+      - name: VAAPI-Main10 — cargo check (ffmpeg7 explicit ABI, native runner, check-only)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: cargo check -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-vaapi-main10-ffmpeg7 --target x86_64-unknown-linux-gnu
+      # NVENC Main10 cells.
+      - name: NVENC-Main10 — cargo check (ffmpeg5 explicit ABI, dev-container)
+        run: ./scripts/dev-container.sh bash -c 'cargo check -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-nvenc-main10-ffmpeg5 --target x86_64-unknown-linux-gnu'
+      - name: NVENC-Main10 — clippy (deny warnings, ffmpeg5 ABI, dev-container)
+        run: ./scripts/dev-container.sh bash -c 'cargo clippy -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-nvenc-main10-ffmpeg5 --target x86_64-unknown-linux-gnu -- -D warnings'
+      - name: NVENC-Main10 — cargo check (ffmpeg6 default ABI, native runner)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: cargo check -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-nvenc-main10 --target x86_64-unknown-linux-gnu
+      - name: NVENC-Main10 — cargo check (ffmpeg7 explicit ABI, native runner, check-only)
+        env:
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+        run: cargo check -p prdt-media-ffmpeg --features ffmpeg-encode-hevc-nvenc-main10-ffmpeg7 --target x86_64-unknown-linux-gnu
+      # 5-way co-resolution cell: 8-bit + 10-bit features must unify to ffmpeg7
+      # without conflict (A1.10 — same python heredoc pattern as A11.b above).
+      - name: 5-way encode co-resolution (8-bit + 10-bit features unify cleanly; 8-bit NPP still co-resolves)
+        run: |
+          ./scripts/dev-container.sh bash -c '
+            cargo metadata --format-version 1 \
+              --features ffmpeg-encode-hevc-vaapi,ffmpeg-encode-hevc-vaapi-main10,ffmpeg-encode-hevc-nvenc,ffmpeg-encode-hevc-nvenc-main10,ffmpeg-encode-hevc-nvenc-npp \
+              --manifest-path crates/media-ffmpeg/Cargo.toml \
+              --filter-platform x86_64-unknown-linux-gnu \
+            | python3 -c "
+          import json, sys
+          m = json.load(sys.stdin)
+          for node in m[\"resolve\"][\"nodes\"]:
+              if node[\"id\"].startswith(\"registry+https://github.com/rust-lang/crates.io-index#rusty_ffmpeg@\") \
+                 or node[\"id\"].startswith(\"rusty_ffmpeg \"):
+                  enabled = set(node[\"features\"])
+                  assert \"ffmpeg7\" in enabled, f\"expected ffmpeg7 in unified rusty_ffmpeg features, got {enabled}\"
+                  print(f\"OK: 5-way co-resolution unifies to ffmpeg7: {sorted(enabled)}\")
+                  sys.exit(0)
+          sys.exit(\"rusty_ffmpeg not found in resolved graph\")
+          "
+          ' || { echo "::error::5-way co-resolution: rusty_ffmpeg did not resolve to ffmpeg7 (Cargo unification broken)"; exit 1; }
       # --- Safety + grep guards ---
       - name: Safety-comment lint
         run: ./scripts/dev-container.sh bash -c 'python3 scripts/check-safety-comments.py crates/media-ffmpeg/src/'
