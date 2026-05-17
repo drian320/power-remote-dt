@@ -38,6 +38,17 @@ pub enum MediaError {
     #[error("HDR10 unavailable: {reason}")]
     HdrUnavailable { reason: String },
 
+    /// HEVC Main10 (or another codec-profile combination) decoder MFT is not
+    /// available on this host — typically because the OS SKU lacks the HEVC
+    /// Video Extensions UWP codec package, or because the Windows 10 build
+    /// predates 1709 (the first SKU shipping the Microsoft Hybrid HEVC decoder
+    /// MFT). Callers MUST surface this to the user; no silent fallback to a
+    /// different codec profile (the 8-bit MFT cannot parse a 10-bit bitstream).
+    /// `reason` includes a remediation pointer to the Microsoft Store package
+    /// (ProductId 9NMZLZ57R3T7 — paid; or 9N4WGH0Z6VHQ — free OEM variant).
+    #[error("decoder not available: {codec}: {reason}")]
+    DecoderNotAvailable { codec: String, reason: String },
+
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 
@@ -143,5 +154,17 @@ mod tests {
         assert!(s.contains("device removed"));
         assert!(s.contains("Present"));
         assert!(s.contains("887a0005"));
+    }
+
+    #[test]
+    fn decoder_not_available_display_is_readable() {
+        let e = MediaError::DecoderNotAvailable {
+            codec: "HEVC Main10".into(),
+            reason: "no MFT registered. Install HEVC Video Extensions (ProductId 9NMZLZ57R3T7)"
+                .into(),
+        };
+        let s = e.to_string();
+        assert!(s.contains("HEVC Main10"));
+        assert!(s.contains("9NMZLZ57R3T7"));
     }
 }

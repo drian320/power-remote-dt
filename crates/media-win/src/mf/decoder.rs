@@ -57,6 +57,12 @@ pub struct H265Decoder {
     _dev: D3d11Device,
 }
 
+// region: 8-bit-mf-decoder
+//
+// Protected by scripts/check-8bit-helpers-byte-identity.py.
+// DO NOT modify any line between these markers without an explicit
+// RALPLAN-DR review that updates the byte-identity guard.
+
 impl H265Decoder {
     pub fn new(dev: &D3d11Device, width: u32, height: u32) -> Result<Self> {
         super::ensure_mf_runtime()?;
@@ -480,6 +486,8 @@ impl H265Decoder {
         }
     }
 }
+
+// endregion: 8-bit-mf-decoder
 
 #[cfg(test)]
 mod tests {
