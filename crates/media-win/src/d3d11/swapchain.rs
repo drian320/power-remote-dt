@@ -33,10 +33,11 @@ use windows::Win32::Graphics::Dxgi::{
 };
 
 #[cfg(feature = "media-win-hdr10")]
+use windows::Win32::Graphics::Dxgi::Common::DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+#[cfg(feature = "media-win-hdr10")]
 use windows::Win32::Graphics::Dxgi::{
     IDXGIFactory6, IDXGIOutput6, IDXGISwapChain3, IDXGISwapChain4,
-    DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
-    DXGI_HDR_METADATA_HDR10, DXGI_HDR_METADATA_TYPE_HDR10,
+    DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, DXGI_HDR_METADATA_HDR10, DXGI_HDR_METADATA_TYPE_HDR10,
     DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT,
 };
 
@@ -216,14 +217,11 @@ impl SwapChain {
                 .cast()
                 .map_err(|e| MediaError::dxgi("IDXGISwapChain1 -> IDXGISwapChain3 (probe)", e))?;
 
-            let mut support_flags = 0u32;
-            // SAFETY: CheckColorSpaceSupport writes the support bitmask into
-            // the provided u32 out-param.
-            probe3
-                .CheckColorSpaceSupport(
-                    DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020,
-                    &mut support_flags,
-                )
+            // SAFETY: CheckColorSpaceSupport returns the support bitmask
+            // for the given color space; windows-rs 0.58 exposes it as a
+            // single-arg method returning Result<u32>.
+            let support_flags = probe3
+                .CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)
                 .map_err(|e| MediaError::dxgi("CheckColorSpaceSupport", e))?;
 
             if support_flags & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT.0 as u32 == 0 {
@@ -301,14 +299,15 @@ impl SwapChain {
                 MaxFrameAverageLightLevel: m.max_frame_average_light_level,
             };
 
-            // SAFETY: SetHDRMetaData reads exactly `size` bytes from the pointer.
-            // `blob` is valid for the duration of this call.
+            // SAFETY: windows-rs 0.58 takes the metadata as `Option<&[u8]>`;
+            // it derives the byte length from the slice. Build a typed slice
+            // over `blob`'s bytes for the duration of the call.
+            let blob_bytes = std::slice::from_raw_parts(
+                &blob as *const DXGI_HDR_METADATA_HDR10 as *const u8,
+                std::mem::size_of::<DXGI_HDR_METADATA_HDR10>(),
+            );
             swap4
-                .SetHDRMetaData(
-                    DXGI_HDR_METADATA_TYPE_HDR10,
-                    std::mem::size_of::<DXGI_HDR_METADATA_HDR10>() as u32,
-                    Some(&blob as *const DXGI_HDR_METADATA_HDR10 as *const std::ffi::c_void),
-                )
+                .SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10, Some(blob_bytes))
                 .map_err(|e| MediaError::dxgi("SetHDRMetaData", e))?;
         }
         Ok(())
