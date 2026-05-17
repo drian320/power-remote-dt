@@ -59,35 +59,46 @@ pub struct Nv12Frame {
     pub pts_us: u64,
 }
 
-/// HDR10 SMPTE 2086 mastering display + MaxCLL/MaxFALL.
+/// HDR10 SMPTE 2086 mastering display + MaxCLL/MaxFALL metadata.
+///
+/// Field units match the `DXGI_HDR_METADATA_HDR10` struct:
+/// - `display_primaries` and `white_point`: CIE 1931 xy chromaticity,
+///   units of 0.00002 (i.e. 50000 = 1.0).
+/// - `min/max_mastering_luminance`: units of 0.0001 cd/m².
+/// - `max_content_light_level` / `max_frame_average_light_level`: cd/m².
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Hdr10Metadata {
     /// Display primaries in CIE 1931 xy chromaticity coords (units of 0.00002).
-    /// Order: R, G, B.
+    /// Order: R (index 0), G (index 1), B (index 2).
     pub display_primaries: [(u16, u16); 3],
     /// White point in CIE 1931 xy (units of 0.00002).
     pub white_point: (u16, u16),
-    /// Min/max display mastering luminance (units of 0.0001 cd/m²).
+    /// Min display mastering luminance (units of 0.0001 cd/m²).
     pub min_mastering_luminance: u32,
+    /// Max display mastering luminance (units of 0.0001 cd/m²).
     pub max_mastering_luminance: u32,
-    /// MaxCLL / MaxFALL (cd/m²).
+    /// MaxCLL (cd/m²).
     pub max_content_light_level: u16,
+    /// MaxFALL (cd/m²).
     pub max_frame_average_light_level: u16,
 }
 
 /// P010LE-formatted Main10 4:2:0 frame on CPU memory. Y/UV planes carry
-/// `u16` samples in 16-bit containers with the **valid 10 bits in the high
-/// part** of each container (libavcodec P010LE convention).
+/// `u16` samples in 16-bit containers with the valid 10 bits in the
+/// **high** part of each container (libavcodec P010LE convention).
 #[derive(Debug, Clone)]
 pub struct Nv12Frame16 {
     pub width: u32,
     pub height: u32,
+    /// Y plane, length >= `stride_y * height` (in u16 elements).
     pub y: Vec<u16>,
+    /// Interleaved UV plane (U,V,U,V,…), length >= `stride_uv * (height / 2)`.
     pub uv: Vec<u16>,
-    /// Stride in units of u16 elements.
+    /// Row stride in units of u16 elements.
     pub stride_y: u32,
     pub stride_uv: u32,
     pub pts_us: u64,
+    /// HDR10 mastering display metadata, present when the bitstream carries it.
     pub hdr10: Option<Hdr10Metadata>,
 }
 

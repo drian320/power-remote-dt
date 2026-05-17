@@ -7,6 +7,8 @@ pub mod adapter;
 pub mod core_adapter;
 #[cfg(feature = "i420-upload")]
 pub mod cpu_i420_upload;
+#[cfg(feature = "media-win-hdr10")]
+pub mod cpu_p010_upload;
 pub mod d3d11;
 pub mod dxgi;
 pub mod encoder_trait;
@@ -21,10 +23,14 @@ pub mod synthetic;
 
 #[cfg(feature = "i420-upload")]
 pub use cpu_i420_upload::CpuI420Uploader;
+#[cfg(feature = "media-win-hdr10")]
+pub use cpu_p010_upload::CpuP010Uploader;
 
 #[cfg(prdt_nvdec_bindings)]
 pub use crate::nvdec::decoder::DualPlaneFrame;
 pub use adapter::{enumerate_adapters, pick_adapter_by_index, pick_default_adapter, AdapterInfo};
+#[cfg(feature = "media-win-hdr10")]
+pub use d3d11::Nv12ShaderRendererP010;
 pub use d3d11::{
     D3d11Device, D3d11Texture, DualPlaneYuvRenderer, Nv12Renderer, Nv12ShaderRenderer, SwapChain,
     TextureFormat,

@@ -53,3 +53,8 @@ cpu-nv12 = []
 # conversion helper. Distinct from `cpu-nv12` (which is a *readback* path
 # used only by NVDEC regression tests).
 i420-upload = ["dep:prdt-media-sw"]
+# PR3 — Windows D3D11 HDR10 display path (P010 shader renderer + HDR10
+# swapchain). Off by default; requires an HDR10-capable display and Windows
+# HDR toggle on. Hard-fails with MediaError::HdrUnavailable when HDR probes
+# fail (no silent precision loss — see plan §PR3 Step 4 change #6).
+media-win-hdr10 = []

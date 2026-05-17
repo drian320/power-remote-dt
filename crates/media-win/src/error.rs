@@ -31,6 +31,13 @@ pub enum MediaError {
     #[error("MMCSS task registration failed: {reason}")]
     MmcssFailed { reason: String },
 
+    /// HDR10 swapchain construction failed because no HDR-capable display was
+    /// detected or the driver/compositor does not support HDR10 presentation.
+    /// Callers may surface this to the user; opt-in SDR-fallback is via the
+    /// `media-win-hdr-to-sdr-fallback` feature (not the default).
+    #[error("HDR10 unavailable: {reason}")]
+    HdrUnavailable { reason: String },
+
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 

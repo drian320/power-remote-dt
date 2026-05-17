@@ -370,3 +370,28 @@ jobs:
           path: artifacts/
           retention-days: 30
           if-no-files-found: error
+
+      - name: Build prdt with media-win-hdr10 feature (PR3 — Windows HDR10 display smoke)
+        # Produces a separate artifact for manual HDR10 smoke testing on an
+        # HDR10-capable Windows display (LG C2 OLED / Samsung Odyssey G7 /
+        # similar). Requires Windows 11 22H2+ with the HDR toggle ON in display
+        # settings. Hard-fails at runtime with MediaError::HdrUnavailable if the
+        # display or driver does not advertise HDR10 capability via DXGI probes
+        # (IDXGIOutput6::GetDesc1 + IDXGISwapChain3::CheckColorSpaceSupport).
+        run: |
+          cargo build --release -p prdt-client --features media-win-hdr10 --target x86_64-pc-windows-msvc
+
+      - name: Stage HDR10 artifact
+        shell: bash
+        run: |
+          cp target/x86_64-pc-windows-msvc/release/prdt.exe artifacts/prdt-windows-x86_64-hdr10.exe
+          (cd artifacts && sha256sum prdt-windows-x86_64-hdr10.exe > prdt-windows-x86_64-hdr10.exe.sha256)
+          ls -la artifacts/prdt-windows-x86_64-hdr10*
+
+      - name: Upload HDR10 workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prdt-windows-x86_64-hdr10
+          path: artifacts/prdt-windows-x86_64-hdr10*
+          retention-days: 30
+          if-no-files-found: error

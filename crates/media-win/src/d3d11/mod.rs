@@ -7,6 +7,8 @@ pub mod device;
 pub mod dual_plane_renderer;
 pub mod nv12_renderer;
 pub mod nv12_shader_renderer;
+#[cfg(feature = "media-win-hdr10")]
+pub mod nv12_shader_renderer_p010;
 pub mod swapchain;
 pub mod texture;
 
@@ -17,5 +19,7 @@ pub use device::D3d11Device;
 pub use dual_plane_renderer::DualPlaneYuvRenderer;
 pub use nv12_renderer::Nv12Renderer;
 pub use nv12_shader_renderer::Nv12ShaderRenderer;
+#[cfg(feature = "media-win-hdr10")]
+pub use nv12_shader_renderer_p010::Nv12ShaderRendererP010;
 pub use swapchain::SwapChain;
 pub use texture::{D3d11Texture, TextureFormat};

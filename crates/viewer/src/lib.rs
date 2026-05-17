@@ -2213,6 +2213,15 @@ fn spawn_worker_tasks(
                                         Err(e) => Err(format!("decode: {e}")),
                                     }
                                 }
+                                // PR3: Windows-native H265Main10 decode (F8 follow-up) is
+                                // not yet implemented. The Hdr10 consumer is wired for the
+                                // render path but has no decoder yet — drop frames and
+                                // request IDR until F8 lands the MF Main10 decode path.
+                                #[cfg(feature = "media-win-hdr10")]
+                                PlatformConsumer::Hdr10 { .. } => {
+                                    idr_req.mark();
+                                    Ok(())
+                                }
                             };
                             if let Err(e) = submit_result {
                                 warn!(error = %e, seq, is_kf, nal_len, "consumer.submit error");
@@ -2230,6 +2239,12 @@ fn spawn_worker_tasks(
                                 }
                                 PlatformConsumer::Openh264 { latest_texture, .. } => {
                                     latest_texture.take().map(PlatformFrame::Nv12)
+                                }
+                                #[cfg(feature = "media-win-hdr10")]
+                                PlatformConsumer::Hdr10 { latest_texture, .. } => {
+                                    latest_texture.take().map(|(tex, hdr10)| {
+                                        PlatformFrame::Nv12_10 { tex, hdr10 }
+                                    })
                                 }
                             };
                             if let Some(frame) = frame_opt {
