@@ -1,0 +1,22 @@
+{
+  "comment": "FFmpeg pre-built Windows shared DLLs. Pinned for media-win-ffmpeg feature. Mirror to a private S3 bucket if BtbN repo churns; see Risk R2 mitigation in .omc/plans/2026-05-18-windows-ffmpeg-coexist-mf.md.",
+  "ffmpeg_version": "6.1.1",
+  "btbn_release_tag": "autobuild-2024-01-15-12-43",
+  "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2024-01-15-12-43/ffmpeg-n6.1.1-26-g806c2d9c72-win64-lgpl-shared-6.1.zip",
+  "mirror_url": "https://prdt-windows-ffmpeg-mirror.s3.amazonaws.com/ffmpeg-n6.1.1-win64-lgpl-shared.zip",
+  "sha256": "VERIFY_AT_PR_TIME_RUN_sha256sum_AFTER_FIRST_DOWNLOAD",
+  "expected_files": [
+    "bin/avcodec-60.dll",
+    "bin/avformat-60.dll",
+    "bin/avutil-58.dll",
+    "bin/swscale-7.dll",
+    "bin/swresample-4.dll",
+    "lib/avcodec.lib",
+    "lib/avformat.lib",
+    "lib/avutil.lib",
+    "lib/swscale.lib",
+    "lib/swresample.lib",
+    "include/libavcodec/avcodec.h",
+    "include/libavutil/avutil.h"
+  ]
+}

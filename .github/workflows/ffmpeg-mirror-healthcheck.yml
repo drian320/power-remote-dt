@@ -1,0 +1,66 @@
+name: FFmpeg mirror health-check
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # 06:00 UTC every Monday
+  workflow_dispatch:
+
+jobs:
+  healthcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse manifest URLs
+        id: manifest
+        run: |
+          URL=$(jq -r '.url' packaging/windows/ffmpeg-manifest.json)
+          MIRROR=$(jq -r '.mirror_url' packaging/windows/ffmpeg-manifest.json)
+          echo "url=$URL"       >> "$GITHUB_OUTPUT"
+          echo "mirror=$MIRROR" >> "$GITHUB_OUTPUT"
+
+      - name: HEAD upstream BtbN URL
+        run: |
+          set -euo pipefail
+          URL='${{ steps.manifest.outputs.url }}'
+          echo "Checking upstream: $URL"
+          HTTP=$(curl -fsI --max-time 30 -o /dev/null -w '%{http_code}' "$URL" || true)
+          echo "HTTP status: $HTTP"
+          if [[ "$HTTP" != 2* ]]; then
+            echo "FAIL: upstream URL returned HTTP $HTTP"
+            exit 1
+          fi
+          echo "PASS: upstream URL OK ($HTTP)"
+
+      - name: HEAD mirror URL
+        run: |
+          set -euo pipefail
+          MIRROR='${{ steps.manifest.outputs.mirror }}'
+          echo "Checking mirror: $MIRROR"
+          HTTP=$(curl -fsI --max-time 30 -o /dev/null -w '%{http_code}' "$MIRROR" || true)
+          echo "HTTP status: $HTTP"
+          if [[ "$HTTP" != 2* ]]; then
+            echo "FAIL: mirror URL returned HTTP $HTTP"
+            exit 1
+          fi
+          echo "PASS: mirror URL OK ($HTTP)"
+
+      - name: Open issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              title: 'infra: FFmpeg mirror health-check failed',
+              body: [
+                '## FFmpeg mirror health-check failed',
+                '',
+                `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+                '',
+                'One or both of the URLs in `packaging/windows/ffmpeg-manifest.json` returned a non-2xx response.',
+                'See the rotation runbook in `docs/superpowers/windows-ffmpeg-mirror.md`.',
+              ].join('\n'),
+              labels: ['infra:ffmpeg-mirror'],
+            });
