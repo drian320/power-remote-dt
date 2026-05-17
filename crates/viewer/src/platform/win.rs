@@ -13,6 +13,8 @@ use prdt_input_win::{
 #[cfg(feature = "media-win-hdr10")]
 use prdt_media_core::Hdr10Metadata;
 use prdt_media_sw::Openh264Decoder;
+#[cfg(feature = "media-win-hevc-main10")]
+use prdt_media_win::MfHevcMain10Consumer;
 #[cfg(prdt_nvdec_bindings)]
 use prdt_media_win::NvdecD3d11Consumer;
 use prdt_media_win::{
@@ -89,6 +91,15 @@ pub enum PlatformConsumer {
     #[cfg(feature = "media-win-hdr10")]
     Hdr10 {
         uploader: CpuP010Uploader,
+        latest_texture: Option<(D3d11Texture, Option<Hdr10Metadata>)>,
+    },
+    /// F8 — Windows-native HEVC Main10 decode via MF. The `MfHevcMain10Consumer`
+    /// pumps the MF decoder and delivers R13-isolated P010 GPU textures directly
+    /// (D3D11VA path) or via `CpuP010Uploader` (SW fallback). Requires both
+    /// `media-win-hdr10` (for `CpuP010Uploader`) and `media-win-hevc-main10`.
+    #[cfg(all(feature = "media-win-hdr10", feature = "media-win-hevc-main10"))]
+    HevcMain10Mf {
+        consumer: MfHevcMain10Consumer,
         latest_texture: Option<(D3d11Texture, Option<Hdr10Metadata>)>,
     },
 }
@@ -412,7 +423,27 @@ pub fn build_consumer(
         ("nvdec", Codec::H265) => Err(super::ConsumerError::Init(
             "nvdec requested but built without prdt_nvdec_bindings cfg".into(),
         )),
-        #[cfg(feature = "media-win-hdr10")]
+        #[cfg(all(feature = "media-win-hdr10", feature = "media-win-hevc-main10"))]
+        (_, Codec::H265Main10) => {
+            match prdt_media_win::MfHevcMain10Consumer::new(dev, width, height) {
+                Ok(consumer) => Ok(PlatformConsumer::HevcMain10Mf {
+                    consumer,
+                    latest_texture: None,
+                }),
+                Err(prdt_media_win::MediaError::DecoderNotAvailable { codec, reason }) => {
+                    // F8 Principle 3: loud-fail. Do NOT fall back to the PR3 Hdr10 path —
+                    // the host has negotiated Main10 NAL bytes; the PR3 Hdr10 path expects
+                    // pre-decoded P010 CPU frames over the wire, not encoded NAL units.
+                    Err(super::ConsumerError::Init(format!(
+                        "HEVC Main10 decoder unavailable: {codec}: {reason}"
+                    )))
+                }
+                Err(e) => Err(super::ConsumerError::Init(format!(
+                    "MfHevcMain10Consumer::new: {e}"
+                ))),
+            }
+        }
+        #[cfg(all(feature = "media-win-hdr10", not(feature = "media-win-hevc-main10")))]
         (_, Codec::H265Main10) => {
             build_consumer_hdr10(width, height, dev)
         }

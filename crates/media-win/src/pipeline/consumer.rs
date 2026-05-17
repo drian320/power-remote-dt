@@ -131,9 +131,7 @@ impl MfHevcMain10Consumer {
     }
 
     /// Consume the latest decoded (texture, hdr10) pair.
-    pub fn take_latest(
-        &self,
-    ) -> Option<(D3d11Texture, Option<prdt_media_core::Hdr10Metadata>)> {
+    pub fn take_latest(&self) -> Option<(D3d11Texture, Option<prdt_media_core::Hdr10Metadata>)> {
         self.latest.lock().unwrap().take()
     }
 }
