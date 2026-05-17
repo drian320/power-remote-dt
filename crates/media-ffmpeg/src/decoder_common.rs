@@ -7,6 +7,10 @@
 //! its own single `av_hwframe_transfer_data as hw_download` call site
 //! (CI grep guard at `ci.yml:115-130`).
 
+// Hdr10Metadata + Nv12Frame16 are referenced only by Main10 decode paths;
+// under 8-bit-only feature combos (e.g. ffmpeg-decode-hevc-sw-ffmpeg5) they
+// look unused, which trips `-D warnings`. Allow on the import line itself.
+#[allow(unused_imports)]
 use prdt_media_core::{DecodeError, Hdr10Metadata, Nv12Frame, Nv12Frame16};
 
 use crate::error::FfmpegError;
