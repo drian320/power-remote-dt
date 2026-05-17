@@ -27,6 +27,45 @@ encrypted with Noise_NK (Curve25519 + ChaCha20-Poly1305 + BLAKE2s). See
 - [ ] Phase 3c: File transfer, multi-monitor
 - [x] Phase 3d: Authentication hardening (handshake timeout, known-hosts, rekey support)
 
+## Linux — Install via AppImage (no apt needed)
+
+The AppImage bundles FFmpeg 6 + VA-API client + PipeWire client + the
+GTK 3 stack, so you can run `prdt` on any modern glibc desktop distro
+(Ubuntu 22.04+, Debian 12+, Fedora 39+, etc.) without `apt install`-ing
+anything beyond `libfuse2`:
+
+```sh
+curl -L -o prdt.AppImage https://github.com/drian320/power-remote-dt/releases/download/<tag>/prdt-<tag>-x86_64.AppImage
+chmod +x prdt.AppImage
+./prdt.AppImage --help
+```
+
+**Hardware encode/decode**: VA-API works out of the box on Intel + AMD
+GPUs (you need `mesa-va-drivers` or `intel-media-va-driver` installed —
+most desktop distros ship them by default). NVIDIA encode/decode requires
+the proprietary NVIDIA driver installed on the host (the AppImage does not
+bundle proprietary NVIDIA libs).
+
+**What's NOT in the AppImage**: CUDA NPP (GPU BGRA→NV12) is excluded to
+keep the AppImage under 150 MB. NPP users should build from source until a
+separate `prdt-cuda-x86_64.AppImage` variant ships (tracked as
+F-AppImage-1).
+
+**AppImage vs bare ELF (`prdt-linux-x86_64`)**:
+
+| Aspect | AppImage | Bare ELF |
+|---|---|---|
+| Filename | `prdt-<ver>-x86_64.AppImage` (~145 MB) | `prdt-linux-x86_64` (~25 MB) |
+| Feature set | B-3 (VAAPI + NVENC + NVDEC + Main10 HEVC) | default (`vaapi-h264` only) |
+| Runtime deps user must install | only `libfuse2` (or use `--appimage-extract-and-run` if no FUSE) | full apt list: `libasound2t64`, `libavcodec*`, `libva*`, `libpipewire-0.3-0`, etc. |
+| glibc floor | 2.35 (Ubuntu 22.04) | ubuntu-24.04 build |
+| Distro coverage | Ubuntu 22.04+, Debian 12+, Fedora 39+, Arch, openSUSE | glibc-based only — Alpine/musl excluded for AppImage |
+
+**FUSE-less hosts**: if `libfuse2` isn't available (container, locked
+sysadmin policy, some WSL setups), run
+`./prdt.AppImage --appimage-extract-and-run host …` — squashfs is
+extracted to /tmp at launch, ~1.5 s slower startup but no FUSE needed.
+
 ## Building
 
 Requires Rust stable (>= 1.78), Windows 11 + NVIDIA GPU, NVIDIA Video

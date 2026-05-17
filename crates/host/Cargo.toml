@@ -55,6 +55,7 @@ ffmpeg-encode-hevc-vaapi-ffmpeg7 = ["dep:prdt-media-core", "dep:prdt-media-ffmpe
 ffmpeg-encode-hevc-vaapi-any = []
 ffmpeg-encode-hevc-nvenc = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-nvenc", "ffmpeg-encode-hevc-nvenc-any"]
 ffmpeg-encode-hevc-nvenc-ffmpeg5 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-nvenc-ffmpeg5", "ffmpeg-encode-hevc-nvenc-any"]
+ffmpeg-encode-hevc-nvenc-ffmpeg6 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-nvenc", "ffmpeg-encode-hevc-nvenc-any"]
 ffmpeg-encode-hevc-nvenc-ffmpeg7 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-nvenc-ffmpeg7", "ffmpeg-encode-hevc-nvenc-any"]
 # Marker feature enabled by all three NVENC ABI variants above; use this in
 # cfg() attributes so any ABI choice activates NVENC code paths and tests.
@@ -69,10 +70,12 @@ ffmpeg-encode-hevc-nvenc-npp-any = []
 # P3 — HEVC Main10 encode (VAAPI + NVENC). Shallow forwards onto prdt-media-ffmpeg.
 ffmpeg-encode-hevc-vaapi-main10 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-vaapi-main10", "ffmpeg-encode-hevc-vaapi-main10-any"]
 ffmpeg-encode-hevc-vaapi-main10-ffmpeg5 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-vaapi-main10-ffmpeg5", "ffmpeg-encode-hevc-vaapi-main10-any"]
+ffmpeg-encode-hevc-vaapi-main10-ffmpeg6 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-vaapi-main10-ffmpeg6", "ffmpeg-encode-hevc-vaapi-main10-any"]
 ffmpeg-encode-hevc-vaapi-main10-ffmpeg7 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-vaapi-main10-ffmpeg7", "ffmpeg-encode-hevc-vaapi-main10-any"]
 ffmpeg-encode-hevc-vaapi-main10-any = []
 ffmpeg-encode-hevc-nvenc-main10 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-nvenc-main10", "ffmpeg-encode-hevc-nvenc-main10-any"]
 ffmpeg-encode-hevc-nvenc-main10-ffmpeg5 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-nvenc-main10-ffmpeg5", "ffmpeg-encode-hevc-nvenc-main10-any"]
+ffmpeg-encode-hevc-nvenc-main10-ffmpeg6 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-nvenc-main10-ffmpeg6", "ffmpeg-encode-hevc-nvenc-main10-any"]
 ffmpeg-encode-hevc-nvenc-main10-ffmpeg7 = ["dep:prdt-media-core", "dep:prdt-media-ffmpeg", "prdt-media-ffmpeg/ffmpeg-encode-hevc-nvenc-main10-ffmpeg7", "ffmpeg-encode-hevc-nvenc-main10-any"]
 ffmpeg-encode-hevc-nvenc-main10-any = []
 

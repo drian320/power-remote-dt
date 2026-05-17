@@ -1,0 +1,30 @@
+# Proprietary NVIDIA libs — must NOT be bundled (license + driver-version coupling).
+# libavcodec dlopen-loads these; they are lazy-loaded from the host driver at runtime.
+libnvidia-encode.so*
+libnvidia-encode.so.1*
+libnvcuvid.so*
+libnvcuvid.so.1*
+libcuda.so*
+libcuda.so.1*
+libcudart.so*
+libcudart.so.12*
+libnppc.so*
+libnppc.so.12*
+libnppi*.so*
+libnppi*.so.12*
+libnvidia-ml.so*
+# VA-API backend drivers — host provides these via LIBVA_DRIVERS_PATH discovery.
+# The client library libva.so.2 IS bundled; only the backend drivers are excluded.
+iHD_drv_video.so
+i965_drv_video.so
+radeonsi_drv_video.so
+# GLIBC + libstdc++ — never bundle per AppImage best practices.
+# The host's glibc handles forward-compat; bundling an older glibc breaks
+# host apps that share LD_LIBRARY_PATH with a newer glibc.
+libc.so*
+libpthread.so*
+libdl.so*
+libm.so*
+librt.so*
+libstdc++.so*
+libgcc_s.so*

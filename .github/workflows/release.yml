@@ -108,6 +108,15 @@ jobs:
             ./prdt --help
             ```
 
+            **Install on Linux via AppImage** (recommended — bundles FFmpeg 6 + VA-API + PipeWire, no apt install needed beyond `libfuse2`):
+            ```bash
+            curl -fsSL -o prdt.AppImage https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/prdt-${{ github.ref_name }}-x86_64.AppImage
+            chmod +x prdt.AppImage
+            ./prdt.AppImage --help
+            ```
+
+            **AppImage vs bare ELF**: the AppImage has the **B-3 feature set** (VAAPI + NVENC + NVDEC + Main10 HEVC); the bare `prdt-linux-x86_64` has the **default feature set** (VAAPI H.264 only — you `apt install ffmpeg` separately for HEVC). Pick the AppImage unless you specifically need a smaller download or run on a glibc-incompatible distro (Alpine/musl, NixOS without `appimage-run`).
+
             **Install on a Windows box (PowerShell):**
             ```powershell
             curl.exe -L -o prdt.exe https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/prdt-windows-x86_64.exe
@@ -128,6 +137,135 @@ jobs:
 
             Linux build: `ubuntu-24.04`. Runtime deps: `libasound2t64` (or `libasound2`), `libstdc++6`, `libwayland-client0`, `libpipewire-0.3-0` (any modern desktop Linux running PipeWire).
             Windows build: `windows-latest` (MSVC). Runtime deps: Windows 10 1809+ with Media Foundation H.264/H.265 codecs (default on most installs).
+
+  release-linux-appimage:
+    name: Build Linux x86_64 AppImage
+    # No `needs: release-linux` — this job is INDEPENDENT (builds its own
+    # ELF with the B-3 feature set). The bare ELF (default features) and
+    # this AppImage's internal ELF (B-3 features) are different builds by
+    # design; see plan §MAJOR-5 for rationale.
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Install AppImage build host deps + Rust build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            patchelf desktop-file-utils file appstream \
+            libfuse2 \
+            libavcodec-dev libavutil-dev libavformat-dev libavfilter-dev libavdevice-dev \
+            libswresample-dev libswscale-dev \
+            libva-dev libva-drm2 libva-x11-2 \
+            libpipewire-0.3-dev libopenh264-dev \
+            libgtk-3-dev libayatana-appindicator3-dev \
+            nv-codec-headers \
+            shellcheck \
+            pkg-config \
+            libglib2.0-dev libdbus-1-dev \
+            libxcb-shm0-dev libxcb-randr0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libwayland-dev libssl-dev \
+            libpango1.0-dev libcairo2-dev \
+            libgdk-pixbuf-2.0-dev libatk1.0-dev \
+            libasound2-dev libspa-0.2-dev \
+            libxdo-dev
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Shellcheck AppRun + build script
+        run: |
+          shellcheck packaging/appimage/AppRun
+          shellcheck scripts/build-appimage.sh
+
+      - name: Validate desktop file
+        run: desktop-file-validate packaging/appimage/net.example.PowerRemoteDt.desktop
+
+      - name: Validate AppStream metadata (V7)
+        run: appstreamcli validate --no-net packaging/appimage/net.example.PowerRemoteDt.appdata.xml || true
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          elif [[ -n "${{ github.event.inputs.ref }}" ]]; then
+            echo "VERSION=${{ github.event.inputs.ref }}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=dev-${GITHUB_SHA:0:7}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build prdt with AppImage B-3 feature set
+        run: |
+          cargo build --release -p prdt-client \
+            --target x86_64-unknown-linux-gnu \
+            --features \
+            vaapi-h264,\
+            ffmpeg-encode-hevc-vaapi-ffmpeg6,\
+            ffmpeg-decode-hevc-vaapi-ffmpeg6,\
+            ffmpeg-decode-hevc-sw-ffmpeg6,\
+            ffmpeg-encode-hevc-nvenc-ffmpeg6,\
+            ffmpeg-decode-hevc-nvdec-ffmpeg6,\
+            ffmpeg-encode-hevc-vaapi-main10-ffmpeg6,\
+            ffmpeg-encode-hevc-nvenc-main10-ffmpeg6,\
+            ffmpeg-decode-hevc-vaapi-main10-ffmpeg6,\
+            ffmpeg-decode-hevc-nvdec-main10-ffmpeg6
+
+      - name: Build AppImage
+        run: |
+          PRDT_BIN=target/x86_64-unknown-linux-gnu/release/prdt \
+          VERSION=${{ steps.ver.outputs.VERSION }} \
+          ARCH=x86_64 \
+            ./scripts/build-appimage.sh
+
+      - name: Container smoke test on Ubuntu 22.04 (A2)
+        run: |
+          docker run --rm -v $PWD/dist:/dist ubuntu:22.04 bash -c "
+            apt-get update -qq &&
+            apt-get install -y -qq --no-install-recommends libfuse2 ca-certificates &&
+            timeout 5 /dist/prdt-${{ steps.ver.outputs.VERSION }}-x86_64.AppImage --help
+          "
+
+      - name: Container smoke test — FUSE-less (--appimage-extract-and-run, M-1)
+        run: |
+          docker run --rm -v $PWD/dist:/dist ubuntu:22.04 bash -c "
+            apt-get update -qq &&
+            apt-get install -y -qq --no-install-recommends ca-certificates &&
+            timeout 10 /dist/prdt-${{ steps.ver.outputs.VERSION }}-x86_64.AppImage --appimage-extract-and-run --help
+          "
+
+      - name: Upload AppImage as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prdt-linux-x86_64-appimage
+          path: dist/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Attach AppImage to GitHub Release
+        if: |
+          startsWith(github.ref, 'refs/tags/') ||
+          (github.event_name == 'workflow_dispatch' && (
+            startsWith(github.event.inputs.ref, 'phase-') ||
+            startsWith(github.event.inputs.ref, 'v')
+          ))
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.ref || github.ref_name }}
+          files: |
+            dist/prdt-${{ steps.ver.outputs.VERSION }}-x86_64.AppImage
+            dist/prdt-${{ steps.ver.outputs.VERSION }}-x86_64.AppImage.sha256
+          fail_on_unmatched_files: true
 
   release-windows:
     name: Build Windows x86_64 release binary
