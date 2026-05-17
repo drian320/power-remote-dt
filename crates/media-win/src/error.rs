@@ -49,6 +49,12 @@ pub enum MediaError {
     #[error("decoder not available: {codec}: {reason}")]
     DecoderNotAvailable { codec: String, reason: String },
 
+    /// A hardware encoder (e.g. `hevc_nvenc`) is not available on this host —
+    /// typically because no compatible GPU or driver is present. Callers may
+    /// fall back to a software or MF encoder path.
+    #[error("encoder not available: {codec}: {reason}")]
+    EncoderNotAvailable { codec: String, reason: String },
+
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 
