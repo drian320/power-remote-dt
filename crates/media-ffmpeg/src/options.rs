@@ -86,6 +86,124 @@ pub(crate) unsafe fn apply_low_latency_hevc_nvenc(ctx: *mut AVCodecContext, t: &
     }
 }
 
+// HEVC Main10 profile = 2 (AV_PROFILE_HEVC_MAIN_10). Same numeric value across
+// FFmpeg 5/6/7 — use a literal to avoid per-version import noise.
+const AV_PROFILE_HEVC_MAIN_10: i32 = 2;
+
+/// Apply low-latency HEVC Main10 settings for the `hevc_vaapi` backend.
+/// Duplicates `apply_low_latency_hevc_vaapi` body then overrides profile +
+/// pix_fmt for 10-bit. The 8-bit twin MUST stay byte-identical (CI guard F4.b).
+///
+/// # Safety
+/// Same contract as [`apply_low_latency_hevc_common`].
+#[cfg(feature = "ffmpeg-encode-hevc-vaapi-main10-any")]
+pub(crate) unsafe fn apply_low_latency_hevc_vaapi_main10(
+    ctx: *mut AVCodecContext,
+    t: &EncoderTunables,
+) {
+    // SAFETY: caller guarantees ctx is valid; delegate then layer VAAPI Main10 bits.
+    unsafe {
+        (*ctx).bit_rate = t.bitrate_bps as i64;
+        (*ctx).rc_max_rate = t.bitrate_bps as i64;
+        (*ctx).rc_buffer_size = (t.bitrate_bps / t.fps.max(1)) as i32;
+        (*ctx).gop_size = t.gop_size as i32;
+        (*ctx).max_b_frames = 0;
+        (*ctx).time_base = AVRational {
+            num: 1,
+            den: t.fps as i32,
+        };
+        (*ctx).framerate = AVRational {
+            num: t.fps as i32,
+            den: 1,
+        };
+        (*ctx).profile = AV_PROFILE_HEVC_MAIN_10;
+        (*ctx).flags &= !(AV_CODEC_FLAG_GLOBAL_HEADER as i32);
+        (*ctx).pix_fmt = AV_PIX_FMT_VAAPI;
+        // Color metadata for HDR10 (BT.2020 PQ). Constants are free u32 items
+        // in rusty_ffmpeg::ffi — not enum variants.
+        (*ctx).color_primaries = rusty_ffmpeg::ffi::AVCOL_PRI_BT2020;
+        (*ctx).color_trc = rusty_ffmpeg::ffi::AVCOL_TRC_SMPTE2084;
+        (*ctx).colorspace = rusty_ffmpeg::ffi::AVCOL_SPC_BT2020_NCL;
+        (*ctx).color_range = rusty_ffmpeg::ffi::AVCOL_RANGE_MPEG;
+    }
+}
+
+/// Apply low-latency HEVC Main10 settings for the `hevc_nvenc` backend.
+/// Duplicates `apply_low_latency_hevc_nvenc` body then overrides profile +
+/// pix_fmt for 10-bit. The 8-bit twin MUST stay byte-identical (CI guard F4.b).
+///
+/// # Safety
+/// Same contract as [`apply_low_latency_hevc_common`].
+#[cfg(feature = "ffmpeg-encode-hevc-nvenc-main10-any")]
+pub(crate) unsafe fn apply_low_latency_hevc_nvenc_main10(
+    ctx: *mut AVCodecContext,
+    t: &EncoderTunables,
+) {
+    // SAFETY: caller guarantees ctx is valid; delegate then layer NVENC Main10 bits.
+    unsafe {
+        (*ctx).bit_rate = t.bitrate_bps as i64;
+        (*ctx).rc_max_rate = t.bitrate_bps as i64;
+        (*ctx).rc_buffer_size = (t.bitrate_bps / t.fps.max(1)) as i32;
+        (*ctx).gop_size = t.gop_size as i32;
+        (*ctx).max_b_frames = 0;
+        (*ctx).time_base = AVRational {
+            num: 1,
+            den: t.fps as i32,
+        };
+        (*ctx).framerate = AVRational {
+            num: t.fps as i32,
+            den: 1,
+        };
+        (*ctx).profile = AV_PROFILE_HEVC_MAIN_10;
+        (*ctx).flags &= !(AV_CODEC_FLAG_GLOBAL_HEADER as i32);
+        (*ctx).pix_fmt = AV_PIX_FMT_CUDA;
+        // Color metadata for HDR10 (BT.2020 PQ). Constants are free u32 items
+        // in rusty_ffmpeg::ffi — not enum variants.
+        (*ctx).color_primaries = rusty_ffmpeg::ffi::AVCOL_PRI_BT2020;
+        (*ctx).color_trc = rusty_ffmpeg::ffi::AVCOL_TRC_SMPTE2084;
+        (*ctx).colorspace = rusty_ffmpeg::ffi::AVCOL_SPC_BT2020_NCL;
+        (*ctx).color_range = rusty_ffmpeg::ffi::AVCOL_RANGE_MPEG;
+    }
+}
+
+/// Build the private-data dictionary for `hevc_vaapi` Main10 low-latency CBR encode.
+/// Duplicates `build_priv_data_dict` — same keys, same values. The 8-bit twin
+/// MUST stay byte-identical (CI guard F4.b).
+#[cfg(feature = "ffmpeg-encode-hevc-vaapi-main10-any")]
+pub(crate) fn build_priv_data_dict_vaapi_main10(
+    gop_size: u32,
+) -> Result<NonNull<AVDictionary>, FfmpegError> {
+    let mut dict: *mut AVDictionary = ptr::null_mut();
+    dict_set(&mut dict, "async_depth", "1")?;
+    dict_set(&mut dict, "rc_mode", "CBR")?;
+    dict_set(&mut dict, "forced_idr", "1")?;
+    dict_set(&mut dict, "low_power", "0")?;
+    dict_set(&mut dict, "idr_interval", &gop_size.to_string())?;
+
+    NonNull::new(dict).ok_or_else(|| FfmpegError::HwDevice("av_dict_set produced null dict".into()))
+}
+
+/// Build the private-data dictionary for `hevc_nvenc` Main10 low-latency CBR encode.
+/// Duplicates `build_priv_data_dict_nvenc` — same keys, same values. The 8-bit
+/// twin MUST stay byte-identical (CI guard F4.b).
+#[cfg(feature = "ffmpeg-encode-hevc-nvenc-main10-any")]
+pub(crate) fn build_priv_data_dict_nvenc_main10(
+    gop_size: u32,
+) -> Result<NonNull<AVDictionary>, FfmpegError> {
+    let mut dict: *mut AVDictionary = ptr::null_mut();
+    dict_set(&mut dict, "preset", "p1")?;
+    dict_set(&mut dict, "tune", "ull")?;
+    dict_set(&mut dict, "rc", "cbr")?;
+    dict_set(&mut dict, "zerolatency", "1")?;
+    dict_set(&mut dict, "rc-lookahead", "0")?;
+    dict_set(&mut dict, "bf", "0")?;
+    dict_set(&mut dict, "g", &gop_size.to_string())?;
+    dict_set(&mut dict, "forced-idr", "1")?;
+    dict_set(&mut dict, "delay", "0")?;
+
+    NonNull::new(dict).ok_or_else(|| FfmpegError::HwDevice("av_dict_set produced null dict".into()))
+}
+
 fn dict_set(dict: &mut *mut AVDictionary, key: &str, value: &str) -> Result<(), FfmpegError> {
     let k = CString::new(key).expect("key has no interior nul");
     let v = CString::new(value).expect("value has no interior nul");

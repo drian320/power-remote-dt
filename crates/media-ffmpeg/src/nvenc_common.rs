@@ -19,6 +19,8 @@ use rusty_ffmpeg::ffi::{
 
 use crate::error::FfmpegError;
 use crate::options::{apply_low_latency_hevc_nvenc, build_priv_data_dict_nvenc, EncoderTunables};
+#[cfg(feature = "ffmpeg-encode-hevc-nvenc-main10-any")]
+use crate::options::{apply_low_latency_hevc_nvenc_main10, build_priv_data_dict_nvenc_main10};
 
 /// AVERROR(EAGAIN) = -(EAGAIN) = -11 on Linux.
 pub(crate) const AVERROR_EAGAIN: i32 = -11;
@@ -72,6 +74,68 @@ pub(crate) fn open_nvenc_codec_context(
 
     // 4. Open codec with priv_data_dict (avcodec_open2 consumes the dict).
     let dict = match build_priv_data_dict_nvenc(tunables.gop_size) {
+        Ok(d) => d,
+        Err(e) => {
+            let mut p = codec_ctx_ptr;
+            // SAFETY: codec_ctx_ptr is the unique owner; this frees its
+            // hw_frames_ctx ref too.
+            unsafe { avcodec_free_context(&mut p) };
+            return Err(e);
+        }
+    };
+    // SAFETY: codec_ctx_ptr, codec, and dict are all valid; avcodec_open2
+    // frees dict on success or failure.
+    let ret = unsafe { avcodec_open2(codec_ctx_ptr, codec, &mut dict.as_ptr()) };
+    if ret < 0 {
+        let mut p = codec_ctx_ptr;
+        // SAFETY: codec_ctx_ptr is the unique owner.
+        unsafe { avcodec_free_context(&mut p) };
+        return Err(FfmpegError::OpenCodec(ret));
+    }
+
+    // SAFETY: avcodec_alloc_context3 succeeded; pointer is non-null.
+    Ok(unsafe { NonNull::new_unchecked(codec_ctx_ptr) })
+}
+
+/// Open and configure an NVENC codec context for HEVC Main10 (profile=main10,
+/// pix_fmt=P010LE, HDR10 color metadata; all other tunables identical to the
+/// 8-bit `open_nvenc_codec_context`). Duplicates the 8-bit body — the twin
+/// MUST stay byte-identical (CI guard F4.b).
+///
+/// OWNERSHIP contract is identical to [`open_nvenc_codec_context`].
+#[cfg(feature = "ffmpeg-encode-hevc-nvenc-main10-any")]
+pub(crate) fn open_nvenc_codec_context_main10(
+    tunables: &EncoderTunables,
+    hw_frames_ctx: NonNull<rusty_ffmpeg::ffi::AVBufferRef>,
+) -> Result<NonNull<AVCodecContext>, FfmpegError> {
+    // 1. Probe encoder.
+    // SAFETY: string literal is a valid nul-terminated C string.
+    let codec = unsafe { avcodec_find_encoder_by_name(c"hevc_nvenc".as_ptr()) };
+    if codec.is_null() {
+        let mut p = hw_frames_ctx.as_ptr();
+        // SAFETY: hw_frames_ctx is a unique AVBufferRef ref the caller owns.
+        unsafe { rusty_ffmpeg::ffi::av_buffer_unref(&mut p) };
+        return Err(FfmpegError::EncoderNotFound("hevc_nvenc"));
+    }
+
+    // 2. Allocate context + apply Main10 tunables.
+    // SAFETY: codec is a valid non-null AVCodec pointer.
+    let codec_ctx_ptr = unsafe { avcodec_alloc_context3(codec) };
+    if codec_ctx_ptr.is_null() {
+        let mut p = hw_frames_ctx.as_ptr();
+        // SAFETY: ditto contract — consume on error.
+        unsafe { rusty_ffmpeg::ffi::av_buffer_unref(&mut p) };
+        return Err(FfmpegError::OpenCodec(-1));
+    }
+    // SAFETY: codec_ctx_ptr is a freshly allocated, unopened AVCodecContext.
+    unsafe { apply_low_latency_hevc_nvenc_main10(codec_ctx_ptr, tunables) };
+
+    // 3. Attach hw_frames_ctx — avcodec_open2 will take ownership of the ref.
+    // SAFETY: codec_ctx_ptr is valid and not yet opened.
+    unsafe { (*codec_ctx_ptr).hw_frames_ctx = hw_frames_ctx.as_ptr() };
+
+    // 4. Open codec with priv_data_dict (avcodec_open2 consumes the dict).
+    let dict = match build_priv_data_dict_nvenc_main10(tunables.gop_size) {
         Ok(d) => d,
         Err(e) => {
             let mut p = codec_ctx_ptr;

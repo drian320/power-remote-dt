@@ -32,6 +32,22 @@ compile_error!(
     "feature 'ffmpeg-encode-hevc-nvenc-npp' is not available on this target (Linux-only in P2.5)"
 );
 
+#[cfg(all(
+    feature = "ffmpeg-encode-hevc-vaapi-main10-any",
+    not(target_os = "linux")
+))]
+compile_error!(
+    "feature 'ffmpeg-encode-hevc-vaapi-main10' is not available on this target (Linux-only in P3)"
+);
+
+#[cfg(all(
+    feature = "ffmpeg-encode-hevc-nvenc-main10-any",
+    not(target_os = "linux")
+))]
+compile_error!(
+    "feature 'ffmpeg-encode-hevc-nvenc-main10' is not available on this target (Linux-only in P3)"
+);
+
 // Per A11: the NPP marker should always be enabled via one of the three
 // -npp{,-ffmpeg5,-ffmpeg7} variants, each of which transitively enables the
 // matching NVENC ABI variant. This arm catches catastrophic feature graph
@@ -110,6 +126,8 @@ pub mod decoder_common;
 pub mod hevc_nvdec_decoder;
 #[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-any", target_os = "linux"))]
 pub mod hevc_nvenc_encoder;
+#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-main10-any", target_os = "linux"))]
+pub mod hevc_nvenc_main10_encoder;
 #[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-npp-any", target_os = "linux"))]
 pub mod hevc_nvenc_npp_encoder;
 #[cfg(all(feature = "ffmpeg-decode-hevc-sw-any", target_os = "linux"))]
@@ -118,6 +136,8 @@ pub mod hevc_sw_decoder;
 pub mod hevc_vaapi_decoder;
 #[cfg(all(feature = "ffmpeg-encode-hevc-vaapi-any", target_os = "linux"))]
 pub mod hevc_vaapi_encoder;
+#[cfg(all(feature = "ffmpeg-encode-hevc-vaapi-main10-any", target_os = "linux"))]
+pub mod hevc_vaapi_main10_encoder;
 #[cfg(all(
     any(
         feature = "ffmpeg-encode-hevc-vaapi-any",
@@ -181,6 +201,10 @@ pub use decoder_common::HevcDecoderBackend;
 pub use hevc_nvdec_decoder::{HevcNvdecFfmpegDecoder, HevcNvdecFfmpegDecoderConfig};
 #[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-any", target_os = "linux"))]
 pub use hevc_nvenc_encoder::{HevcNvencFfmpegEncoder, HevcNvencFfmpegEncoderConfig};
+#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-main10-any", target_os = "linux"))]
+pub use hevc_nvenc_main10_encoder::{
+    HevcNvencMain10FfmpegEncoder, HevcNvencMain10FfmpegEncoderConfig,
+};
 #[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-npp-any", target_os = "linux"))]
 pub use hevc_nvenc_npp_encoder::{HevcNvencNppFfmpegEncoder, HevcNvencNppFfmpegEncoderConfig};
 #[cfg(all(feature = "ffmpeg-decode-hevc-sw-any", target_os = "linux"))]
@@ -189,3 +213,7 @@ pub use hevc_sw_decoder::{HevcSwFfmpegDecoder, HevcSwFfmpegDecoderConfig};
 pub use hevc_vaapi_decoder::{HevcVaapiFfmpegDecoder, HevcVaapiFfmpegDecoderConfig};
 #[cfg(all(feature = "ffmpeg-encode-hevc-vaapi-any", target_os = "linux"))]
 pub use hevc_vaapi_encoder::{HevcVaapiFfmpegEncoder, HevcVaapiFfmpegEncoderConfig};
+#[cfg(all(feature = "ffmpeg-encode-hevc-vaapi-main10-any", target_os = "linux"))]
+pub use hevc_vaapi_main10_encoder::{
+    HevcVaapiMain10FfmpegEncoder, HevcVaapiMain10FfmpegEncoderConfig,
+};
