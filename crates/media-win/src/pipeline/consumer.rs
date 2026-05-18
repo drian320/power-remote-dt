@@ -107,6 +107,7 @@ pub struct MfHevcMain10Consumer {
     decoder: crate::mf::MfHevcMain10Decoder,
     /// On D3D11VA path: holds (GPU P010 texture, hdr10_metadata).
     /// On SW fallback: holds the uploaded texture from CpuP010Uploader + per-frame metadata.
+    #[allow(clippy::type_complexity)]
     latest: Arc<Mutex<Option<(D3d11Texture, Option<prdt_media_core::Hdr10Metadata>)>>>,
     /// Only `Some` on the SW fallback path (when `decoder.d3d11_aware() == false`).
     sw_uploader: Option<crate::CpuP010Uploader>,
