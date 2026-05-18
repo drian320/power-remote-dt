@@ -692,9 +692,13 @@ mod inner {
                     dev,
                     HevcNvencFfmpegEncoderWindowsAdapterConfig::default(),
                 );
+                // Note: the adapter holds raw FFmpeg pointers and does not
+                // derive Debug, so we project to `result.as_ref().err()` (just
+                // the error variant, which IS Debug) for the panic message.
                 assert!(
                     matches!(result, Err(MediaError::EncoderNotAvailable { .. })),
-                    "expected EncoderNotAvailable when hevc_nvenc not found, got: {result:?}"
+                    "expected EncoderNotAvailable when hevc_nvenc not found, got Err: {:?}",
+                    result.as_ref().err()
                 );
             }
             // If encoder IS available, new() might succeed or fail with a
