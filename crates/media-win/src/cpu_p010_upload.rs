@@ -64,7 +64,7 @@ impl CpuP010Uploader {
             self.height = fh;
         }
 
-        self.dev.with_context(|ctx| {
+        self.dev.with_context(|ctx| -> Result<()> {
             unsafe {
                 // SAFETY: Map with WRITE on a STAGING texture blocks until
                 // the GPU is done reading from it (D3D11 guarantees this).
