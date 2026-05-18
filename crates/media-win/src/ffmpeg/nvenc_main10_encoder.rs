@@ -295,7 +295,7 @@ mod inner {
             // 6. Allocate staging texture and BGRA CPU buffer.
             let staging =
                 D3d11Texture::new_staging(&device, cfg.width, cfg.height, TextureFormat::Bgra8)
-                    .map_err(|e| {
+                    .inspect_err(|_e| {
                         unsafe { sws_freeContext(sws_ctx) };
                         let mut hw = hw_frame.as_ptr();
                         unsafe { av_frame_free(&mut hw) };
@@ -307,7 +307,6 @@ mod inner {
                         unsafe { av_buffer_unref(&mut fb) };
                         let mut p = hw_device_buf.as_ptr();
                         unsafe { av_buffer_unref(&mut p) };
-                        e
                     })?;
 
             let bgra_buf = vec![0u8; (cfg.width * cfg.height * 4) as usize];

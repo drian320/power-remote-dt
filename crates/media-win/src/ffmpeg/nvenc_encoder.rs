@@ -34,7 +34,10 @@ mod inner {
     const AV_PROFILE_HEVC_MAIN: i32 = 1;
     // AVERROR(EAGAIN) = -11 on Windows (same POSIX mapping as Linux).
     const AVERROR_EAGAIN: i32 = -11;
-    // AVERROR_EOF = FFERRTAG('E','O','F',' ')
+    // AVERROR_EOF = FFERRTAG('E','O','F',' '). Kept for symmetry with the
+    // EAGAIN handling above; consumed once the encoder learns to flush on
+    // shutdown (currently the encode loop drops the codec without draining).
+    #[allow(dead_code)]
     const AVERROR_EOF: i32 = -0x5fb9b0bb_i32;
 
     pub struct HevcNvencFfmpegEncoderWindowsAdapterConfig {
@@ -291,7 +294,7 @@ mod inner {
             // 6. Allocate staging texture and BGRA CPU buffer.
             let staging =
                 D3d11Texture::new_staging(&device, cfg.width, cfg.height, TextureFormat::Bgra8)
-                    .map_err(|e| {
+                    .inspect_err(|_e| {
                         // SAFETY: cleanup in reverse order.
                         unsafe { sws_freeContext(sws_ctx) };
                         let mut hw = hw_frame.as_ptr();
@@ -304,7 +307,6 @@ mod inner {
                         unsafe { av_buffer_unref(&mut fb) };
                         let mut p = hw_device_buf.as_ptr();
                         unsafe { av_buffer_unref(&mut p) };
-                        e
                     })?;
 
             let bgra_buf = vec![0u8; (cfg.width * cfg.height * 4) as usize];
