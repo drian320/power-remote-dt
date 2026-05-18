@@ -21,6 +21,15 @@ libloading = "0.8"
 # acquiring a Mutex on the hot path. Not in workspace deps because no other
 # crate currently consumes it.
 arc-swap = "1"
+# rusty_ffmpeg Windows binding: exact-pinned to =0.16.7 (matches the Linux
+# pin in crates/media-ffmpeg/Cargo.toml). The `package` rename makes it clear
+# in error messages that this is the Windows-side dep; Cargo treats it as a
+# separate dep graph entry from the Linux-gated one in media-ffmpeg. Enabled
+# only when the media-win-ffmpeg feature is active. ABI: ffmpeg7 matches the
+# BtbN n7.1.4 pin in packaging/windows/ffmpeg-manifest.json (the original
+# n6.1.1 pin was garbage-collected upstream — BtbN only ships current major
+# branches on rotating autobuilds, so we follow current LTS).
+rusty_ffmpeg-win = { version = "=0.16.7", package = "rusty_ffmpeg", optional = true, default-features = false, features = ["ffmpeg7"] }
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",
@@ -68,3 +77,37 @@ media-win-hdr10 = []
 # No silent fallback to 8-bit (the 8-bit MFT cannot parse a 10-bit
 # bitstream — it would emit corrupted NV12).
 media-win-hevc-main10 = ["media-win-hdr10"]
+# PR1 — Windows FFmpeg coexistence path. Opt-in at compile time; default OFF
+# so the baseline .exe size is unchanged for users who do not need FFmpeg.
+# ABI: ffmpeg7, matching the BtbN n7.1.4 pin in
+# packaging/windows/ffmpeg-manifest.json. See plan
+# .omc/plans/2026-05-18-windows-ffmpeg-coexist-mf.md §Principle 2 + Choice B-2.
+# (Originally planned for n6.1.1; bumped after BtbN garbage-collected the
+# 2024-01 6.1 release. Functionally equivalent — both 6.1 and 7.1 expose the
+# same HEVC encode/decode + NVENC/VAAPI surfaces we depend on.)
+#
+# Umbrella feature: enables rusty_ffmpeg Windows bindings + the ffmpeg/ module.
+media-win-ffmpeg = ["dep:rusty_ffmpeg-win", "media-win-ffmpeg-any"]
+# Marker: enabled by media-win-ffmpeg (and transitively by every per-codec
+# sub-feature). Use in cfg() to gate top-level ffmpeg module scaffolding.
+media-win-ffmpeg-any = []
+
+# NVENC sub-features. Each transitively enables the umbrella so callers can
+# express intent with a single feature. The -main10 variant enables its 8-bit
+# twin plus the FFmpeg HDR10 marker (gates hdr10_sidedata.rs parser).
+media-win-ffmpeg-nvenc = ["media-win-ffmpeg", "media-win-ffmpeg-nvenc-any"]
+media-win-ffmpeg-nvenc-any = []
+media-win-ffmpeg-nvenc-main10 = ["media-win-ffmpeg-nvenc", "media-win-ffmpeg-hdr10-any", "media-win-ffmpeg-nvenc-main10-any"]
+media-win-ffmpeg-nvenc-main10-any = []
+
+# NVDEC sub-features. The -main10 variant also enables media-win-hdr10 (the
+# pre-existing MF-side HDR10 feature from PR #35) so the existing shader
+# renderer and swapchain plumbing is wired in for the FFmpeg decode path too.
+media-win-ffmpeg-nvdec = ["media-win-ffmpeg", "media-win-ffmpeg-nvdec-any"]
+media-win-ffmpeg-nvdec-any = []
+media-win-ffmpeg-nvdec-main10 = ["media-win-ffmpeg-nvdec", "media-win-hdr10", "media-win-ffmpeg-hdr10-any", "media-win-ffmpeg-nvdec-main10-any"]
+media-win-ffmpeg-nvdec-main10-any = []
+
+# HDR10 marker for FFmpeg-side feature combinations. Mirrors the role of
+# media-win-hdr10 for MF-side code; gates hdr10_sidedata.rs parser.
+media-win-ffmpeg-hdr10-any = []
