@@ -25,9 +25,11 @@ arc-swap = "1"
 # pin in crates/media-ffmpeg/Cargo.toml). The `package` rename makes it clear
 # in error messages that this is the Windows-side dep; Cargo treats it as a
 # separate dep graph entry from the Linux-gated one in media-ffmpeg. Enabled
-# only when the media-win-ffmpeg feature is active. ABI: ffmpeg6 matches the
-# BtbN n6.1.1 pin in packaging/windows/ffmpeg-manifest.json.
-rusty_ffmpeg-win = { version = "=0.16.7", package = "rusty_ffmpeg", optional = true, default-features = false, features = ["ffmpeg6"] }
+# only when the media-win-ffmpeg feature is active. ABI: ffmpeg7 matches the
+# BtbN n7.1.4 pin in packaging/windows/ffmpeg-manifest.json (the original
+# n6.1.1 pin was garbage-collected upstream — BtbN only ships current major
+# branches on rotating autobuilds, so we follow current LTS).
+rusty_ffmpeg-win = { version = "=0.16.7", package = "rusty_ffmpeg", optional = true, default-features = false, features = ["ffmpeg7"] }
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",
@@ -77,9 +79,12 @@ media-win-hdr10 = []
 media-win-hevc-main10 = ["media-win-hdr10"]
 # PR1 — Windows FFmpeg coexistence path. Opt-in at compile time; default OFF
 # so the baseline .exe size is unchanged for users who do not need FFmpeg.
-# ABI: ffmpeg6, matching the BtbN n6.1.1 pin in
+# ABI: ffmpeg7, matching the BtbN n7.1.4 pin in
 # packaging/windows/ffmpeg-manifest.json. See plan
 # .omc/plans/2026-05-18-windows-ffmpeg-coexist-mf.md §Principle 2 + Choice B-2.
+# (Originally planned for n6.1.1; bumped after BtbN garbage-collected the
+# 2024-01 6.1 release. Functionally equivalent — both 6.1 and 7.1 expose the
+# same HEVC encode/decode + NVENC/VAAPI surfaces we depend on.)
 #
 # Umbrella feature: enables rusty_ffmpeg Windows bindings + the ffmpeg/ module.
 media-win-ffmpeg = ["dep:rusty_ffmpeg-win", "media-win-ffmpeg-any"]
