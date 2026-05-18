@@ -120,6 +120,7 @@ pub(crate) unsafe fn copy_nv12_planes(
     feature = "ffmpeg-decode-hevc-vaapi-main10-any",
     feature = "ffmpeg-decode-hevc-nvdec-main10-any",
 ))]
+#[allow(clippy::too_many_arguments)]
 pub(crate) unsafe fn copy_p010_planes(
     y_ptr: *const u8,
     uv_ptr: *const u8,
@@ -212,8 +213,8 @@ pub(crate) unsafe fn extract_hdr10_sidecar(
             ((r.num as i64 * 50000) / r.den as i64).clamp(0, u16::MAX as i64) as u16
         };
         // display_primaries[i] = (x, y); order R, G, B as per SMPTE 2086.
-        for i in 0..3usize {
-            display_primaries[i] = (
+        for (i, slot) in display_primaries.iter_mut().enumerate() {
+            *slot = (
                 rat_to_u16(md.display_primaries[i][0]),
                 rat_to_u16(md.display_primaries[i][1]),
             );
