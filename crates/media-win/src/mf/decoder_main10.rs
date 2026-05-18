@@ -531,6 +531,7 @@ impl MfHevcMain10Decoder {
     ///   1. Lazy-inits `self.private_texture_pool` (3 reusable private P010 textures).
     ///   2. Calls `ID3D11DeviceContext::CopyResource(private_dst, mft_src)`.
     ///   3. Wraps `private_dst` as `D3d11Texture(TextureFormat::P010)` and returns it.
+    ///
     /// The MFT-owned source texture is dropped at the end of this call.
     pub fn process_output_texture_p010(
         &mut self,
@@ -827,7 +828,7 @@ unsafe fn read_attr_blob(
 /// - `MF_MT_MASTERING_DISPLAY_INFO`: 24 bytes —
 ///   `MT_CUSTOM_MASTERING_DISPLAY_INFO` struct:
 ///   * bytes 0-11:  6× `u16` display primaries (R.x, R.y, G.x, G.y, B.x, B.y)
-///                  in units of 0.00002.
+///     in units of 0.00002.
 ///   * bytes 12-15: 2× `u16` white point (x, y) in units of 0.00002.
 ///   * bytes 16-19: `u32` max mastering luminance in units of 1 cd/m².
 ///   * bytes 20-23: `u32` min mastering luminance in units of 0.0001 cd/m².
