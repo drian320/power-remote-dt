@@ -16,6 +16,20 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=avformat");
     println!("cargo:rustc-link-search=native=/usr/lib/x86_64-linux-gnu");
 
+    // P3 Main10 encoders (hevc_vaapi_main10_encoder.rs, hevc_nvenc_main10_encoder.rs)
+    // call sws_getContext / sws_scale / sws_freeContext for the CPU-side BGRA8 →
+    // P010LE conversion path. rusty_ffmpeg's FFMPEG_DLL_PATH only resolves
+    // libavcodec; libswscale must be linked explicitly here. The Linux smoke
+    // runner installs libswscale-dev as part of the FFmpeg dev packages, so
+    // /usr/lib/x86_64-linux-gnu/libswscale.so is on the link search path above.
+    if std::env::var("CARGO_FEATURE_FFMPEG_ENCODE_HEVC_VAAPI_MAIN10_ANY").is_ok()
+        || std::env::var("CARGO_FEATURE_FFMPEG_ENCODE_HEVC_NVENC_MAIN10_ANY").is_ok()
+    {
+        println!("cargo:rustc-link-lib=dylib=swscale");
+        println!("cargo:rerun-if-env-changed=CARGO_FEATURE_FFMPEG_ENCODE_HEVC_VAAPI_MAIN10_ANY");
+        println!("cargo:rerun-if-env-changed=CARGO_FEATURE_FFMPEG_ENCODE_HEVC_NVENC_MAIN10_ANY");
+    }
+
     // P2.5: NPP feature pulls in CUDA + NPP runtime libs. Step 0 Dockerfile
     // installs the official NVIDIA CUDA repo packages cuda-cudart-dev-12-4 +
     // libnpp-dev-12-4 at /usr/local/cuda-12.4/{lib64,include}. On non-CUDA
