@@ -1,14 +1,21 @@
 name: CI
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
 
 jobs:
   check:
     runs-on: windows-latest
     steps:
+      # fetch-depth: 0 so check-8bit-helpers-byte-identity.py can resolve
+      # `origin/master` (it reads master file content for marker-anchored
+      # ranges and runs `git diff origin/master` for fixed line ranges).
+      # Default shallow clone (depth=1) drops origin/master and the script
+      # exits with `fatal: invalid object name 'origin/master'`.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
