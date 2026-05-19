@@ -95,7 +95,9 @@ mod encoder_dispatch_tests {
         let adapter =
             prdt_media_win::pick_default_adapter().expect("default adapter for test runner");
         let dev = D3d11Device::create(&adapter).expect("D3D11 device for test runner");
-        let err = pick_encoder(
+        // VideoEncoderBackend does not derive Debug (it holds raw encoder
+        // handles), so we can't use `.expect_err()` — match directly.
+        let result = pick_encoder(
             "ffmpeg-nvenc-hevc-main10",
             &adapter,
             &dev,
@@ -103,8 +105,11 @@ mod encoder_dispatch_tests {
             1080,
             8_000_000,
             Codec::H265Main10,
-        )
-        .expect_err("pick_encoder must bail without media-win-ffmpeg-nvenc-main10");
+        );
+        let err = match result {
+            Ok(_) => panic!("pick_encoder must bail without media-win-ffmpeg-nvenc-main10"),
+            Err(e) => e,
+        };
         let msg = format!("{err:#}");
         let expected =
             "encoder \"ffmpeg-nvenc-hevc-main10\" requires building with --features media-win-ffmpeg-nvenc-main10";
