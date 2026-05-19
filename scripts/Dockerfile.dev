@@ -53,8 +53,15 @@ RUN apt-get update -qq && \
         pkg-config \
         build-essential \
         clang \
-        libclang-dev && \
+        libclang-dev \
+        ffmpeg && \
     rm -rf /var/lib/apt/lists/*
+# `ffmpeg` (CLI) + libx265-199 (transitive via ffmpeg) are used by the
+# F-WIN-FFMPEG PR3.5 hdr10-parity fixture-regeneration procedure
+# (crates/media-win/tests/fixtures/README.md). The CLI is not pulled by
+# any production build — only by maintainers regenerating the vendored
+# .hevc fixture; deleting it would force fixture regeneration to happen
+# on a host with ffmpeg+libx265 installed manually.
 
 # Bake in rustfmt and clippy so ephemeral container invocations have them.
 RUN rustup component add rustfmt clippy
