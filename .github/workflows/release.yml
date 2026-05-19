@@ -220,6 +220,19 @@ jobs:
         # YAML block scalar + bash `\<newline>` line continuation injects the indent
         # whitespace into the joined line and cargo then parses each feature as a
         # separate argv slot ("unexpected argument 'vaapi-h264,' found").
+        #
+        # rusty_ffmpeg's build.rs dispatches on FFMPEG_DLL_PATH at line 591 of its
+        # build.rs: when set, it takes the `dynamic_linking()` path (just links
+        # -lavcodec from the given .so's parent dir). Without it, it falls through
+        # to `linking()` which panics unless FFMPEG_PKG_CONFIG_PATH /
+        # FFMPEG_LIBS_DIR / the link_system_ffmpeg feature is set. The dev
+        # container sets these env vars via docker run -e (see
+        # scripts/dev-container.sh); CI's bare-host AppImage build needs them
+        # exported explicitly. Paths match Ubuntu 24.04 multiarch (provided by
+        # the libavcodec-dev / libavutil-dev installed above).
+        env:
+          FFMPEG_DLL_PATH: /usr/lib/x86_64-linux-gnu/libavcodec.so
+          FFMPEG_INCLUDE_DIR: /usr/include/x86_64-linux-gnu
         run: |
           cargo build --release -p prdt-client \
             --target x86_64-unknown-linux-gnu \
