@@ -243,7 +243,11 @@ done
 # for), so even with the dep present the plugin gives up. prdt links against
 # GTK3 (libayatana-appindicator3 + libgtk-3 — see the apt list above), so
 # pinning to 3 is correct.
-OUT="$DIST/prdt-${VERSION}-${ARCH}.AppImage"
+mkdir -p "$DIST"
+# `$OUT` must be absolute — section 12's `--appimage-extract` step runs from
+# inside a mktemp dir, so a relative path would fail with command-not-found
+# (exit 127) the moment we `cd` away from the repo root.
+OUT="$(cd "$DIST" && pwd)/prdt-${VERSION}-${ARCH}.AppImage"
 DEPLOY_GTK_VERSION=3 OUTPUT="$OUT" linuxdeploy --output appimage --appdir "$APPDIR" \
     --executable "$APPDIR/usr/bin/prdt" \
     --desktop-file "$APPDIR/usr/share/applications/net.example.PowerRemoteDt.desktop" \
