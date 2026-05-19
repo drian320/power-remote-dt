@@ -203,6 +203,38 @@ jobs:
         shell: bash
         run: python3 scripts/check-8bit-helpers-byte-identity.py
 
+      # ── F-WIN-FFMPEG PR3 cells ────────────────────────────────────────────────
+      # PR3 adds NVDEC decoder dispatch (8-bit + Main10) behind the
+      # media-win-ffmpeg-nvdec / media-win-ffmpeg-nvdec-main10 feature flags.
+      # DLL env vars are inherited from the export step above.
+
+      - name: F-WIN-FFMPEG — cargo check with media-win-ffmpeg-nvdec (PR3.A1)
+        run: cargo check -p prdt-media-win --target x86_64-pc-windows-msvc --features media-win-ffmpeg-nvdec
+
+      - name: F-WIN-FFMPEG — cargo check with media-win-ffmpeg-nvdec-main10 (PR3.A2)
+        run: cargo check -p prdt-media-win --target x86_64-pc-windows-msvc --features media-win-ffmpeg-nvdec-main10
+
+      - name: F-WIN-FFMPEG — cargo clippy with media-win-ffmpeg-nvdec-main10 (PR3.A3)
+        run: cargo clippy -p prdt-media-win --target x86_64-pc-windows-msvc --features media-win-ffmpeg-nvdec-main10 -- -D warnings
+
+      - name: F-WIN-FFMPEG — decoder context creation unit test (PR3.A4)
+        # windows-latest has no NVIDIA GPU; test must return DecoderNotAvailable,
+        # NOT panic. FFMPEG_DLL_PATH is set in env (above) but Windows DLL search
+        # ignores it — prepend the bin dir to PATH so the loader resolves avcodec-61.dll
+        # at test runtime (STATUS_DLL_NOT_FOUND otherwise).
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:FFMPEG_DLL_PATH;$env:PATH"
+          cargo test -p prdt-media-win --target x86_64-pc-windows-msvc --features media-win-ffmpeg-nvdec-main10 --lib ffmpeg::nvdec_main10_decoder::inner::tests::context_creation_no_gpu_main10
+
+      - name: F-WIN-FFMPEG — MF byte-identity guard re-assertion (PR3.byte-id-mf)
+        shell: bash
+        run: python3 scripts/check-8bit-helpers-byte-identity.py
+
+      # PR3.hdr10-parity — follow-up: MF vs FFmpeg NVDEC HDR10 metadata parity
+      # test with vendored fixture. Deferred to a subsequent PR after CI matrix
+      # is stable. See crates/media-win/tests/hdr10_parity.rs stub.
+
   media-ffmpeg-compile:
     runs-on: ubuntu-latest
     steps:

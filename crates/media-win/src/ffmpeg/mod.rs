@@ -14,3 +14,28 @@ pub use nvenc_encoder::HevcNvencFfmpegEncoderWindowsAdapter;
 pub mod nvenc_main10_encoder;
 #[cfg(feature = "media-win-ffmpeg-nvenc-main10-any")]
 pub use nvenc_main10_encoder::HevcNvencMain10FfmpegEncoderWindowsAdapter;
+
+// PR3 — NVDEC decoder modules.
+//
+// `hdr10_sei_win` and `hdr10_sidedata` share the same gate because the
+// tracker calls into the sei parser. `media-win-ffmpeg-hdr10-any` is the
+// shared marker (transitively enabled by both `media-win-ffmpeg-nvenc-main10`
+// and `media-win-ffmpeg-nvdec-main10`).
+#[cfg(feature = "media-win-ffmpeg-hdr10-any")]
+pub(crate) mod hdr10_sei_win;
+#[cfg(feature = "media-win-ffmpeg-hdr10-any")]
+pub mod hdr10_sidedata;
+#[cfg(feature = "media-win-ffmpeg-hdr10-any")]
+pub use hdr10_sidedata::Hdr10SidedataTracker;
+
+#[cfg(feature = "media-win-ffmpeg-nvdec-any")]
+pub mod nvdec_decoder;
+#[cfg(feature = "media-win-ffmpeg-nvdec-any")]
+pub use nvdec_decoder::{HevcNvdecFfmpegDecoderWindows, HevcNvdecFfmpegDecoderWindowsConfig};
+
+#[cfg(feature = "media-win-ffmpeg-nvdec-main10-any")]
+pub mod nvdec_main10_decoder;
+#[cfg(feature = "media-win-ffmpeg-nvdec-main10-any")]
+pub use nvdec_main10_decoder::{
+    HevcNvdecMain10FfmpegDecoderWindows, HevcNvdecMain10FfmpegDecoderWindowsConfig,
+};
