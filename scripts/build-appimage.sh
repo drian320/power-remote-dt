@@ -236,8 +236,15 @@ done
 # ---------------------------------------------------------------------------
 # 9. Run linuxdeploy
 # ---------------------------------------------------------------------------
+# DEPLOY_GTK_VERSION=3 is mandatory: linuxdeploy-plugin-gtk's auto-detect
+# probes for `pkg-config gtk{2,3,4}-x11` and bails ("failed to auto-detect
+# GTK version") when none match. On Ubuntu 24.04 runner images, libgtk-3-dev
+# installs gtk+-3.0.pc (not the `-x11` suffix variant the plugin grep'd
+# for), so even with the dep present the plugin gives up. prdt links against
+# GTK3 (libayatana-appindicator3 + libgtk-3 — see the apt list above), so
+# pinning to 3 is correct.
 OUT="$DIST/prdt-${VERSION}-${ARCH}.AppImage"
-OUTPUT="$OUT" linuxdeploy --output appimage --appdir "$APPDIR" \
+DEPLOY_GTK_VERSION=3 OUTPUT="$OUT" linuxdeploy --output appimage --appdir "$APPDIR" \
     --executable "$APPDIR/usr/bin/prdt" \
     --desktop-file "$APPDIR/usr/share/applications/net.example.PowerRemoteDt.desktop" \
     --icon-file "$APPDIR/usr/share/icons/hicolor/256x256/apps/net.example.PowerRemoteDt.svg" \
