@@ -12,3 +12,7 @@ Cargo.lock
 crates/gui-host/assets/*.png
 target-docker/
 tests/fixtures/libnppicc-stub.so
+
+# Wrangler local emulator state — only present when wrangler is run
+# inside the repo for R2 mirror maintenance (see packaging/windows/README.md).
+.wrangler/
