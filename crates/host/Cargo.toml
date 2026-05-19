@@ -118,6 +118,23 @@ ffmpeg-decode-hevc-nvdec-main10-ffmpeg6 = ["prdt-media-linux/ffmpeg-decode-hevc-
 ffmpeg-decode-hevc-nvdec-main10-ffmpeg7 = ["prdt-media-linux/ffmpeg-decode-hevc-nvdec-main10-ffmpeg7", "ffmpeg-decode-hevc-nvdec-main10-any"]
 ffmpeg-decode-hevc-nvdec-main10-any = []
 
+# F-WIN-FFMPEG PR2 — Windows FFmpeg NVENC encoder forwarding. Windows-only
+# (prdt-media-win is `cfg(windows)` dep). Enabling these on Linux errors
+# because the dep is not in scope; the CI cells that exercise the encoder
+# dispatch run with `--target x86_64-pc-windows-msvc`.
+#
+# The host crate cannot directly reference `prdt-media-win/<feature>` in its
+# own `cfg(feature = ...)` attributes — Rust evaluates that against the host
+# crate's OWN feature set, not the dep's. The bug (`cfg(feature =
+# "prdt-media-win/media-win-ffmpeg-nvenc-any")`) was always false, configuring
+# out the FfmpegNvenc dispatch arms silently. The host-local marker feature
+# below is the right shape: forward to prdt-media-win AND set the host marker
+# so cfg attributes resolve correctly.
+media-win-ffmpeg-nvenc = ["prdt-media-win/media-win-ffmpeg-nvenc", "media-win-ffmpeg-nvenc-any"]
+media-win-ffmpeg-nvenc-any = []
+media-win-ffmpeg-nvenc-main10 = ["prdt-media-win/media-win-ffmpeg-nvenc-main10", "media-win-ffmpeg-nvenc-main10-any"]
+media-win-ffmpeg-nvenc-main10-any = []
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
 tempfile = "3"
