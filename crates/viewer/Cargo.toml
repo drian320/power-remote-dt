@@ -86,6 +86,19 @@ media-win-hevc-main10 = [
     "media-win-hdr10",
 ]
 
+# PR3 — Windows FFmpeg NVDEC decoder features. Forwarded onto prdt-media-win.
+# The -main10 variant also enables media-win-hdr10 (via the prdt-media-win
+# feature dependency) so the existing P010 shader renderer + swapchain are wired
+# in automatically.
+media-win-ffmpeg-nvdec = ["prdt-media-win/media-win-ffmpeg-nvdec", "media-win-ffmpeg-nvdec-any"]
+media-win-ffmpeg-nvdec-any = []
+media-win-ffmpeg-nvdec-main10 = [
+    "prdt-media-win/media-win-ffmpeg-nvdec-main10",
+    "media-win-hdr10",
+    "media-win-ffmpeg-nvdec-main10-any",
+]
+media-win-ffmpeg-nvdec-main10-any = []
+
 # P3.2 — HEVC Main10 decode features forwarded onto prdt-media-linux.
 ffmpeg-decode-hevc-sw-main10 = ["prdt-media-linux/ffmpeg-decode-hevc-sw-main10", "ffmpeg-decode-hevc-sw-main10-any"]
 ffmpeg-decode-hevc-sw-main10-ffmpeg5 = ["prdt-media-linux/ffmpeg-decode-hevc-sw-main10-ffmpeg5", "ffmpeg-decode-hevc-sw-main10-any"]

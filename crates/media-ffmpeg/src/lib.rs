@@ -105,6 +105,13 @@ compile_error!(
 
 pub mod error;
 
+// Cross-platform HDR10 SEI parser (NOT gated on target_os = "linux").
+// Callable from crates/media-win via the `ffmpeg` umbrella feature.
+#[cfg(feature = "ffmpeg")]
+pub mod hdr10_sei;
+#[cfg(feature = "ffmpeg")]
+pub use hdr10_sei::extract_hdr10_sidecar;
+
 #[cfg(all(
     any(
         feature = "ffmpeg-encode-hevc-vaapi-any",

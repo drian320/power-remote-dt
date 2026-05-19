@@ -447,6 +447,62 @@ pub fn build_consumer(
         (_, Codec::H265Main10) => {
             build_consumer_hdr10(width, height, dev)
         }
+        // PR3 — Windows FFmpeg NVDEC 8-bit path.
+        // Constructs HevcNvdecFfmpegDecoderWindows; on CI (no GPU) the decoder
+        // fails with DecoderNotAvailable — callers handle gracefully.
+        #[cfg(feature = "media-win-ffmpeg-nvdec-any")]
+        ("ffmpeg-nvdec-hevc", Codec::H265) => {
+            use prdt_media_win::ffmpeg::{
+                HevcNvdecFfmpegDecoderWindows, HevcNvdecFfmpegDecoderWindowsConfig,
+            };
+            HevcNvdecFfmpegDecoderWindows::new(HevcNvdecFfmpegDecoderWindowsConfig {
+                width,
+                height,
+                cuda_device_index: None,
+            })
+            .map_err(|e| {
+                super::ConsumerError::Init(format!("HevcNvdecFfmpegDecoderWindows::new: {e}"))
+            })?;
+            // TODO(PR3-followup): wrap in a dedicated PlatformConsumer variant once the
+            // full viewer recv-loop integration is wired. For now the decoder is
+            // constructed (proving the feature compiles + runtime path works) and the
+            // call falls through to the MF consumer as a placeholder.
+            let mf = MfD3d11Consumer::new(dev, width, height).map_err(|e| {
+                super::ConsumerError::Init(format!(
+                    "MfD3d11Consumer::new (ffmpeg-nvdec fallback): {e}"
+                ))
+            })?;
+            Ok(PlatformConsumer::Mf(mf))
+        }
+        // PR3 — Windows FFmpeg NVDEC Main10 path.
+        #[cfg(feature = "media-win-ffmpeg-nvdec-main10-any")]
+        ("ffmpeg-nvdec-hevc-main10", Codec::H265Main10) => {
+            use prdt_media_win::ffmpeg::{
+                HevcNvdecMain10FfmpegDecoderWindows, HevcNvdecMain10FfmpegDecoderWindowsConfig,
+            };
+            HevcNvdecMain10FfmpegDecoderWindows::new(HevcNvdecMain10FfmpegDecoderWindowsConfig {
+                width,
+                height,
+                cuda_device_index: None,
+            })
+            .map_err(|e| {
+                super::ConsumerError::Init(format!(
+                    "HevcNvdecMain10FfmpegDecoderWindows::new: {e}"
+                ))
+            })?;
+            // TODO(PR3-followup): wrap in a dedicated PlatformConsumer variant once the
+            // full viewer recv-loop integration is wired. Falls through to HDR10 placeholder.
+            #[cfg(feature = "media-win-hdr10")]
+            {
+                build_consumer_hdr10(width, height, dev)
+            }
+            #[cfg(not(feature = "media-win-hdr10"))]
+            {
+                Err(super::ConsumerError::Init(
+                    "ffmpeg-nvdec-hevc-main10 requires the media-win-hdr10 feature".into(),
+                ))
+            }
+        }
         (other_decoder, other_codec) => Err(super::ConsumerError::Init(format!(
             "unsupported decoder/codec combination on Windows: decoder={other_decoder}, codec={other_codec:?}"
         ))),

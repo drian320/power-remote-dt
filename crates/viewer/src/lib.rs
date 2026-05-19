@@ -159,7 +159,10 @@ pub struct Args {
     #[arg(
         long,
         default_value = "nvdec",
-        value_parser = ["mf", "nvdec", "openh264", "auto"],
+        value_parser = [
+            "mf", "nvdec", "openh264", "auto",
+            "ffmpeg-nvdec-hevc", "ffmpeg-nvdec-hevc-main10",
+        ],
     )]
     decoder: String,
 
@@ -392,6 +395,15 @@ enum DecoderChoice {
         feature = "ffmpeg-decode-hevc-nvdec-main10-any"
     ))]
     FfmpegHevcMain10,
+    /// Windows FFmpeg NVDEC 8-bit path (PR3). Gated on
+    /// `media-win-ffmpeg-nvdec-any` so CI sees it only when that feature is
+    /// compiled. On Linux this variant is never constructed.
+    #[cfg(all(windows, feature = "media-win-ffmpeg-nvdec-any"))]
+    FfmpegNvdecHevc,
+    /// Windows FFmpeg NVDEC Main10 path (PR3). Gated on
+    /// `media-win-ffmpeg-nvdec-main10-any`.
+    #[cfg(all(windows, feature = "media-win-ffmpeg-nvdec-main10-any"))]
+    FfmpegNvdecHevcMain10,
 }
 
 /// Decide the concrete decoder backend given `--decoder`, the
@@ -608,6 +620,19 @@ fn choose_decoder(
             )
         ))]
         ("auto", Codec::H265Main10) => Ok(DecoderChoice::FfmpegHevcMain10),
+        // PR3 — Windows FFmpeg NVDEC decoder rows. These must appear BEFORE the
+        // (_, Codec::H265Main10) catch-all below so they are not shadowed.
+        #[cfg(all(windows, feature = "media-win-ffmpeg-nvdec-any"))]
+        ("ffmpeg-nvdec-hevc", Codec::H265) => Ok(DecoderChoice::FfmpegNvdecHevc),
+        #[cfg(all(windows, feature = "media-win-ffmpeg-nvdec-main10-any"))]
+        ("ffmpeg-nvdec-hevc-main10", Codec::H265Main10) => Ok(DecoderChoice::FfmpegNvdecHevcMain10),
+        // Without the feature compiled in, surface a clear error rather than falling through.
+        #[cfg(not(all(windows, feature = "media-win-ffmpeg-nvdec-any")))]
+        ("ffmpeg-nvdec-hevc", Codec::H265) => Err(
+            "decoder ffmpeg-nvdec-hevc requested but built without media-win-ffmpeg-nvdec feature; \
+             rebuild with --features media-win-ffmpeg-nvdec"
+                .into(),
+        ),
         // No Main10 feature compiled: reject rather than silently falling back to 8-bit.
         #[cfg(not(all(
             target_os = "linux",
