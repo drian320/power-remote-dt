@@ -228,19 +228,24 @@ for lib in \
     /usr/lib/x86_64-linux-gnu/libpipewire-0.3.so.0 \
     /usr/lib/x86_64-linux-gnu/libopenh264.so.7 \
     /usr/lib/x86_64-linux-gnu/libayatana-appindicator3.so.1 \
-    /usr/lib/x86_64-linux-gnu/libasound.so.2
+    /usr/lib/x86_64-linux-gnu/libasound.so.2 \
+    /usr/lib/x86_64-linux-gnu/libdrm.so.2
 do
     test -f "$lib" || { echo "Missing required lib: $lib"; exit 1; }
     LIB_FLAGS+=(--library "$lib")
 done
-# libasound.so.2 must be force-added: it is a DT_NEEDED dep of prdt (cpal /
-# audiopus link ALSA), but linuxdeploy's *built-in* default exclude list drops
-# it — upstream's rationale is that ALSA dlopen-loads versioned plugins from
-# /usr/lib/.../alsa-lib/ and a bundled libasound can mismatch the host's
-# plugins. We only need the client library resolvable at load time (the
-# plugin path is exercised only when an actual PCM device is opened, which the
-# `--help` smoke test never does), and the release notes promise the AppImage
-# needs nothing beyond libfuse2 — so an explicit `--library` add is correct.
+# libasound.so.2 and libdrm.so.2 must be force-added: both are dropped by
+# linuxdeploy's *built-in* default exclude list, but the AppImage needs them
+# resolvable at load time:
+#   - libasound.so.2 is a direct DT_NEEDED of prdt (cpal / audiopus link ALSA).
+#   - libdrm.so.2 is a transitive DT_NEEDED of the bundled libva-drm.so.2.
+# linuxdeploy excludes them because ALSA dlopen-loads versioned plugins and
+# libdrm is kernel/Mesa-coupled; but an explicit `--library` flag overrides
+# the excludelist, and these client libraries are ABI-stable enough to bundle.
+# The host-coupled bits (ALSA PCM plugins, DRI/GBM backend drivers) are only
+# exercised when a real device/GPU is opened — never on the `--help` smoke
+# test — and the release notes promise the AppImage needs nothing beyond
+# libfuse2, so bundling the client libs is the right call.
 
 # ---------------------------------------------------------------------------
 # 9. Run linuxdeploy
