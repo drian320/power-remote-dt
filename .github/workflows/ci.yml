@@ -189,21 +189,15 @@ jobs:
           cargo test -p prdt-media-win --target x86_64-pc-windows-msvc --features media-win-ffmpeg-nvenc-main10 --lib ffmpeg::nvenc_encoder::tests::context_creation_succeeds
 
       - name: F-WIN-FFMPEG — CLI rejects ffmpeg-nvenc-hevc-main10 without feature (PR2.A5)
-        # Build the client binary WITHOUT any media-win-ffmpeg feature, then run
-        # `prdt host --encoder ffmpeg-nvenc-hevc-main10 --headless` and assert
-        # the exact error string from normalize_encoder bail.
-        shell: pwsh
-        run: |
-          cargo build -p prdt-client --target x86_64-pc-windows-msvc
-          $output = (& target\x86_64-pc-windows-msvc\debug\prdt.exe host --encoder ffmpeg-nvenc-hevc-main10 --headless 2>&1) | Out-String
-          Write-Output $output
-          $expected = 'encoder "ffmpeg-nvenc-hevc-main10" requires building with --features media-win-ffmpeg-nvenc-main10'
-          if ($output -notmatch [regex]::Escape($expected)) {
-            Write-Error "FAIL: expected error string not found in output"
-            exit 1
-          }
-          Write-Output "PASS: correct error emitted for missing ffmpeg feature"
-          exit 0
+        # Asserts the exact bail string emitted by `pick_encoder` when the
+        # caller asks for ffmpeg-nvenc-hevc-main10 but the host crate was not
+        # built with media-win-ffmpeg-nvenc-main10. Implemented as a `cargo
+        # test` rather than an end-to-end binary spawn because the host CLI
+        # runs an event loop and the encoder validation only fires inside
+        # `build_video_producer` (per-session, not pre-session). The unit
+        # test exercises `pick_encoder` directly so the bail surfaces
+        # without an event loop.
+        run: cargo test -p prdt-host --target x86_64-pc-windows-msvc --lib platform::win::encoder_dispatch_tests::pick_encoder_bails_for_ffmpeg_nvenc_hevc_main10_without_feature
 
       - name: F-WIN-FFMPEG — MF byte-identity guard re-assertion (PR2.byte-id-mf)
         shell: bash

@@ -80,6 +80,39 @@ mod encoder_dispatch_tests {
         assert_eq!(backend.backend_name(), "openh264");
         assert!(backend.is_h264());
     }
+
+    /// PR2.A5 — `pick_encoder` must bail with a specific actionable error
+    /// string when an `ffmpeg-nvenc-hevc-main10` encoder is requested but
+    /// `media-win-ffmpeg-nvenc-main10` was not enabled at build time. The
+    /// exact string is contract for tooling/docs; assert it verbatim.
+    ///
+    /// Implemented as a unit test (not an end-to-end CLI smoke) because the
+    /// host CLI runs an event loop and the encoder bail only fires when a
+    /// client session reaches `build_video_producer`. A direct `pick_encoder`
+    /// call avoids spawning the event loop.
+    #[test]
+    fn pick_encoder_bails_for_ffmpeg_nvenc_hevc_main10_without_feature() {
+        let adapter =
+            prdt_media_win::pick_default_adapter().expect("default adapter for test runner");
+        let dev = D3d11Device::create(&adapter).expect("D3D11 device for test runner");
+        let err = pick_encoder(
+            "ffmpeg-nvenc-hevc-main10",
+            &adapter,
+            &dev,
+            1920,
+            1080,
+            8_000_000,
+            Codec::H265Main10,
+        )
+        .expect_err("pick_encoder must bail without media-win-ffmpeg-nvenc-main10");
+        let msg = format!("{err:#}");
+        let expected =
+            "encoder \"ffmpeg-nvenc-hevc-main10\" requires building with --features media-win-ffmpeg-nvenc-main10";
+        assert!(
+            msg.contains(expected),
+            "expected bail message containing {expected:?}, got {msg:?}"
+        );
+    }
 }
 
 // === Moved from dxgi_sw_producer.rs ===
