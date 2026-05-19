@@ -250,8 +250,18 @@ jobs:
         # (libpipewire ABI floor), so bundled .so's reference glibc 2.36-2.38
         # and the V5 floor is now 2.39 (see scripts/build-appimage.sh:326).
         # ubuntu:22.04 ships glibc 2.35 and can no longer run this AppImage.
+        #
+        # This is the FUSE-mounted path (M-1 below covers the FUSE-less
+        # extract-and-run path). A FUSE AppImage self-mounts via libfuse, so
+        # the container needs the /dev/fuse device node + CAP_SYS_ADMIN +
+        # an unconfined apparmor profile; without them mount() fails with
+        # "fuse: device not found" and the AppImage runtime aborts (exit 127).
         run: |
-          docker run --rm -v $PWD/dist:/dist ubuntu:24.04 bash -c "
+          docker run --rm \
+            --device /dev/fuse \
+            --cap-add SYS_ADMIN \
+            --security-opt apparmor:unconfined \
+            -v $PWD/dist:/dist ubuntu:24.04 bash -c "
             apt-get update -qq &&
             apt-get install -y -qq --no-install-recommends libfuse2 ca-certificates &&
             timeout 5 /dist/prdt-${{ steps.ver.outputs.VERSION }}-x86_64.AppImage --help
