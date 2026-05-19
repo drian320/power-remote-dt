@@ -169,7 +169,6 @@ jobs:
             libva-dev libva-drm2 libva-x11-2 \
             libpipewire-0.3-dev libopenh264-dev \
             libgtk-3-dev libayatana-appindicator3-dev \
-            nv-codec-headers \
             shellcheck \
             pkg-config \
             libglib2.0-dev libdbus-1-dev \
@@ -179,6 +178,17 @@ jobs:
             libgdk-pixbuf-2.0-dev libatk1.0-dev \
             libasound2-dev libspa-0.2-dev \
             libxdo-dev
+
+      - name: Install nv-codec-headers (NVENC/NVDEC API headers, from upstream)
+        # Ubuntu 24.04's `nv-codec-headers` package lives in `multiverse`
+        # which the GitHub-hosted runner image no longer enables by default.
+        # Cloning the upstream repo and running `make install` puts the headers
+        # at /usr/local/include where rusty_ffmpeg's bindgen path picks them
+        # up — exactly the same files the apt package shipped. Pin a release
+        # tag so a future upstream API rename can't silently break the build.
+        run: |
+          git clone --depth=1 --branch n12.2.72.0 https://github.com/FFmpeg/nv-codec-headers.git /tmp/nv-codec-headers
+          sudo make -C /tmp/nv-codec-headers PREFIX=/usr/local install
 
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2
