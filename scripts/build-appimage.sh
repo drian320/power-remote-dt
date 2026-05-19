@@ -333,9 +333,15 @@ scan_elf_for_glibc() {
     local elf="$1"
     file "$elf" 2>/dev/null | grep -q "ELF " || return 0
     local hits
+    # `|| true` is mandatory: when an ELF has no glibc 2.36+ refs (which is
+    # the success case for this scan), `grep -oE` exits 1 and `pipefail`
+    # propagates it. Without the catcher, `set -e` then kills the script
+    # silently RIGHT BEFORE V5 PASS prints, and the runner reports a bare
+    # "exit code 1" with no diagnostic — exactly the regression that
+    # turned the AppImage job into a 7-minute mystery failure.
     hits=$(objdump -T "$elf" 2>/dev/null \
         | grep -oE 'GLIBC_2\.(3[6-9]|[4-9][0-9]*)' \
-        | sort -u)
+        | sort -u || true)
     if [ -n "$hits" ]; then
         {
             echo "  $elf:"
