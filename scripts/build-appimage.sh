@@ -323,7 +323,16 @@ if [ -d "$EXTRACT_DIR/squashfs-root/usr/lib/dri" ]; then
 fi
 echo "A5 PASS: no VAAPI backend drivers bundled"
 
-# V5: glibc floor enforcement — floor committed to glibc 2.35 (Ubuntu 22.04).
+# V5: glibc floor enforcement — floor is glibc 2.39 (Ubuntu 24.04 runner).
+# The original plan committed to 2.35 (Ubuntu 22.04 target), but the workflow's
+# `release-linux-appimage` job is pinned to `ubuntu-24.04` because Ubuntu 22.04
+# ships libpipewire 0.3.48 — below the 0.3.55 ABI floor that
+# pipewire-rs 0.9 / libspa-sys-0.9.2 require — and the build script panics
+# regardless of libpipewire-0.3-dev being installed. Once the runner moved
+# forward, every bundled .so (libtasn1, libplacebo, libnuma, libXcursor,
+# librist, libzmq, …) starts referencing GLIBC_2.36-2.38 because that is
+# what Ubuntu 24.04 builds against. So the AppImage target is officially
+# Ubuntu 24.04+; Ubuntu 22.04 is unsupported on this packaging path.
 # Scan prdt binary AND all bundled .so files recursively (covers GTK modules in
 # subdirs, libssl.so.3, libpipewire, etc. that a non-recursive glob would miss).
 GLIBC_VIOLATIONS=$(mktemp)
@@ -333,14 +342,21 @@ scan_elf_for_glibc() {
     local elf="$1"
     file "$elf" 2>/dev/null | grep -q "ELF " || return 0
     local hits
-    # `|| true` is mandatory: when an ELF has no glibc 2.36+ refs (which is
+    # `|| true` is mandatory: when an ELF has no glibc 2.40+ refs (which is
     # the success case for this scan), `grep -oE` exits 1 and `pipefail`
     # propagates it. Without the catcher, `set -e` then kills the script
     # silently RIGHT BEFORE V5 PASS prints, and the runner reports a bare
     # "exit code 1" with no diagnostic — exactly the regression that
     # turned the AppImage job into a 7-minute mystery failure.
+    #
+    # Regex matches GLIBC_2.40 — GLIBC_2.99 (the actual ceiling we enforce —
+    # 2.39 is the floor, anything above is forward-incompatible with the
+    # build runner). `[4-9][0-9]+` requires at least TWO digits so the
+    # version suffix `2.4`, `2.7`, `2.8`, … (legitimate sub-2.35 versions
+    # commonly referenced) does NOT false-match — the previous `[0-9]*`
+    # quantifier allowed zero trailing digits and matched them all.
     hits=$(objdump -T "$elf" 2>/dev/null \
-        | grep -oE 'GLIBC_2\.(3[6-9]|[4-9][0-9]*)' \
+        | grep -oE 'GLIBC_2\.[4-9][0-9]+' \
         | sort -u || true)
     if [ -n "$hits" ]; then
         {
@@ -358,10 +374,10 @@ while IFS= read -r -d '' so_file; do
 done < <(find "$EXTRACT_DIR/squashfs-root/usr/lib" -type f -name '*.so*' -print0)
 
 if [ -s "$GLIBC_VIOLATIONS" ]; then
-    echo "V5 FAIL: glibc 2.36+ symbol references found (floor is 2.35 per N4):" >&2
+    echo "V5 FAIL: glibc 2.40+ symbol references found (floor is 2.39, Ubuntu 24.04 runner):" >&2
     cat "$GLIBC_VIOLATIONS" >&2
     exit 1
 fi
-echo "V5 PASS: no glibc 2.36+ symbols referenced in prdt or any bundled .so (recursive scan)"
+echo "V5 PASS: no glibc 2.40+ symbols referenced in prdt or any bundled .so (recursive scan)"
 
 echo "Build complete: $OUT"
