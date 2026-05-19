@@ -231,9 +231,14 @@ jobs:
         shell: bash
         run: python3 scripts/check-8bit-helpers-byte-identity.py
 
-      # PR3.hdr10-parity — follow-up: MF vs FFmpeg NVDEC HDR10 metadata parity
-      # test with vendored fixture. Deferred to a subsequent PR after CI matrix
-      # is stable. See crates/media-win/tests/hdr10_parity.rs stub.
+      - name: F-WIN-FFMPEG — hdr10 parity test (PR3.hdr10-parity)
+        shell: pwsh
+        # FFMPEG_DLL_PATH already on PATH from earlier env-export step (PR3.A4
+        # added that). The parity test depends on FFmpeg DLLs being loadable
+        # at runtime same as PR3.A4.
+        run: |
+          $env:PATH = "$env:FFMPEG_DLL_PATH;$env:PATH"
+          cargo test -p prdt-media-win --target x86_64-pc-windows-msvc --features "media-win-hevc-main10 media-win-ffmpeg-nvdec-main10" --test hdr10_parity
 
   media-ffmpeg-compile:
     runs-on: ubuntu-latest
