@@ -45,19 +45,21 @@ file "$PRDT_BIN" | grep -q "ELF 64-bit LSB" || { echo "$PRDT_BIN is not an x86_6
 #
 # linuxdeploy: tag 1-alpha-20240109-1 (latest stable numbered release at
 #   plan authoring time; the `continuous` rolling tag is FORBIDDEN per plan §9).
-# linuxdeploy-plugin-gtk: commit 0a939a51 (HEAD of master 2024-04, last
-#   known-good used by KDE Inkscape AppImage CI as of 2025-Q1).
-#   Maintainer publishes no tags; commit-hash pin is the only reproducible
-#   mechanism. Re-check upstream before merge; updating the pin is fine,
-#   just compute the new sha256 with: sha256sum tools/linuxdeploy-plugin-gtk
+# linuxdeploy-plugin-gtk: commit 3b67a1d1c1b0c8268f57f2bce40fe2d33d409cea
+#   (current HEAD of master, last commit 2023-10-04 — repo received no
+#   further commits, maintainer publishes no tags). The previous 8-char
+#   short-sha pin `0a939a51` no longer resolves via raw.githubusercontent
+#   (likely force-pushed away), so the pin was refreshed to the full sha
+#   of current HEAD; updating the pin requires recomputing the sha256
+#   with: sha256sum tools/linuxdeploy-plugin-gtk
 
 LD_TAG="1-alpha-20240109-1"
 LD_URL="https://github.com/linuxdeploy/linuxdeploy/releases/download/${LD_TAG}/linuxdeploy-x86_64.AppImage"
-LD_SHA256="${LD_SHA256:-VERIFY_AT_PR_TIME_RUN_sha256sum_AFTER_FIRST_DOWNLOAD}"
+LD_SHA256="${LD_SHA256:-c86d6540f1df31061f02f539a2d3445f8d7f85cc3994eee1e74cd1ac97b76df0}"
 
-LDG_COMMIT="0a939a51"
+LDG_COMMIT="3b67a1d1c1b0c8268f57f2bce40fe2d33d409cea"
 LDG_URL="https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/${LDG_COMMIT}/linuxdeploy-plugin-gtk.sh"
-LDG_SHA256="${LDG_SHA256:-VERIFY_AT_PR_TIME_RUN_sha256sum_AFTER_FIRST_DOWNLOAD}"
+LDG_SHA256="${LDG_SHA256:-b0f4cbc684a0103a9651f0955b635eaea0096b3a66c0f5a2c2aa337960375171}"
 
 verify_or_die() {
     local file="$1" expected="$2"
