@@ -10,8 +10,8 @@
 //! enables a Linux-only feature on Windows to assert the bail) to fail at
 //! dep build instead of at source compile.
 //!
-//! Cargo cfg gate: `#[cfg(feature = "media-win-ffmpeg-nvdec-main10-any")]`
-//! via `mod.rs`.
+//! Cargo cfg gate: `#[cfg(feature = "media-win-ffmpeg-hdr10-any")]`
+//! via `mod.rs` (shared with `hdr10_sidedata`).
 
 /// Extract HDR10 mastering display + content light level metadata from an
 /// `AVFrame`'s side-data list. Returns `None` if neither SEI is present.
