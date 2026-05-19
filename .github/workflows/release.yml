@@ -108,7 +108,7 @@ jobs:
             ./prdt --help
             ```
 
-            **Install on Linux via AppImage** (recommended — bundles FFmpeg 6 + VA-API + PipeWire, no apt install needed beyond `libfuse2`):
+            **Install on Linux via AppImage** (recommended — bundles FFmpeg 6 + VA-API + PipeWire codecs; needs `libfuse2` plus the standard desktop graphics stack (X11/Wayland + OpenGL), which every Linux desktop already has — minimal/headless environments may need `libgtk-3-0 libgl1 libegl1`):
             ```bash
             curl -fsSL -o prdt.AppImage https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/prdt-${{ github.ref_name }}-x86_64.AppImage
             chmod +x prdt.AppImage
@@ -256,6 +256,17 @@ jobs:
         # the container needs the /dev/fuse device node + CAP_SYS_ADMIN +
         # an unconfined apparmor profile; without them mount() fails with
         # "fuse: device not found" and the AppImage runtime aborts (exit 127).
+        #
+        # Runtime deps installed below: the AppImage bundles its app-specific
+        # libs (FFmpeg, libva client, pipewire client, openh264, appindicator,
+        # libasound, libdrm), but the X11/Wayland/OpenGL desktop graphics
+        # stack is deliberately NOT bundled — libGL/libEGL are GPU-driver-
+        # coupled and bundling them breaks rendering on the host. winit links
+        # libX11 / libxcb / libxkbcommon / libGL as hard DT_NEEDED deps, so a
+        # bare ubuntu:24.04 container can't even load prdt for `--help`.
+        # libgtk-3-0 transitively pulls the whole X11 + cairo + pango + gdk
+        # stack; add the GL/EGL/xkb/wayland-egl pieces winit needs on top.
+        # Any real Linux desktop already has all of these.
         run: |
           docker run --rm \
             --device /dev/fuse \
@@ -263,7 +274,11 @@ jobs:
             --security-opt apparmor:unconfined \
             -v $PWD/dist:/dist ubuntu:24.04 bash -c "
             apt-get update -qq &&
-            apt-get install -y -qq --no-install-recommends libfuse2 ca-certificates &&
+            apt-get install -y -qq --no-install-recommends \
+              libfuse2 ca-certificates \
+              libgtk-3-0 libgl1 libegl1 libxkbcommon0 libxkbcommon-x11-0 \
+              libwayland-client0 libwayland-cursor0 libwayland-egl1 \
+              libxi6 libxrandr2 libxcursor1 libxfixes3 &&
             timeout 5 /dist/prdt-${{ steps.ver.outputs.VERSION }}-x86_64.AppImage --help
           "
 
@@ -271,7 +286,11 @@ jobs:
         run: |
           docker run --rm -v $PWD/dist:/dist ubuntu:24.04 bash -c "
             apt-get update -qq &&
-            apt-get install -y -qq --no-install-recommends ca-certificates &&
+            apt-get install -y -qq --no-install-recommends \
+              ca-certificates \
+              libgtk-3-0 libgl1 libegl1 libxkbcommon0 libxkbcommon-x11-0 \
+              libwayland-client0 libwayland-cursor0 libwayland-egl1 \
+              libxi6 libxrandr2 libxcursor1 libxfixes3 &&
             timeout 10 /dist/prdt-${{ steps.ver.outputs.VERSION }}-x86_64.AppImage --appimage-extract-and-run --help
           "
 
