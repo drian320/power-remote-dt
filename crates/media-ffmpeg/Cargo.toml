@@ -14,18 +14,21 @@ license.workspace = true
 [dependencies]
 prdt-media-core = { path = "../media-core" }
 thiserror = { workspace = true }
-# 0.16.5 carries pre-generated bindings for FFmpeg 5/6/7/7.1/8. Pick the right
-# one via the per-ABI feature below — the FFmpeg major must match what's
-# installed on the build/runtime host (bookworm = ffmpeg5; Ubuntu 24.04 =
-# ffmpeg6 but ffmpeg5 bindings happen to be ABI-stable here; Arch = ffmpeg7).
-# Cross-platform: optional dep used by hdr10_sei.rs on any target (including
-# Windows) when the `ffmpeg` umbrella feature is enabled.
-rusty_ffmpeg = { version = "=0.16.7", optional = true, default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 prdt-media-sw = { path = "../media-sw" }
 prdt-protocol = { path = "../protocol" }
 tracing = { workspace = true }
+# 0.16.5 carries pre-generated bindings for FFmpeg 5/6/7/7.1/8. Pick the right
+# one via the per-ABI feature below — the FFmpeg major must match what's
+# installed on the build/runtime host (bookworm = ffmpeg5; Ubuntu 24.04 =
+# ffmpeg6 but ffmpeg5 bindings happen to be ABI-stable here; Arch = ffmpeg7).
+# Kept Linux-only because rusty_ffmpeg's build.rs requires pkg-config (Linux)
+# or FFMPEG_LIBS_DIR (Windows pre-fetched layout); on Windows, the FFmpeg
+# bindings are mirrored separately by `prdt-media-win` via the renamed
+# `rusty_ffmpeg-win` dep so the BtbN-zip fetch can sequence around the
+# fetch-then-build dependency order.
+rusty_ffmpeg = { version = "=0.16.7", optional = true, default-features = false }
 
 [features]
 default = []

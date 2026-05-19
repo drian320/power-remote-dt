@@ -9,11 +9,6 @@ license.workspace = true
 prdt-media-core = { path = "../media-core" }
 prdt-media-policy = { path = "../media-policy" }
 prdt-media-sw = { path = "../media-sw", optional = true }
-# PR3: cross-platform HDR10 SEI parser. Optional — enabled only when
-# media-win-ffmpeg-hdr10-any is active (see [features] below). The `ffmpeg`
-# umbrella feature on prdt-media-ffmpeg unlocks `hdr10_sei::extract_hdr10_sidecar`
-# which is NOT target_os-gated; the rest of prdt-media-ffmpeg stays Linux-only.
-prdt-media-ffmpeg = { path = "../media-ffmpeg", optional = true, features = ["ffmpeg"] }
 prdt-protocol = { path = "../protocol" }
 async-trait = "0.1"
 thiserror = { workspace = true }

@@ -16,6 +16,8 @@ pub mod nvenc_main10_encoder;
 pub use nvenc_main10_encoder::HevcNvencMain10FfmpegEncoderWindowsAdapter;
 
 // PR3 — NVDEC decoder modules.
+#[cfg(feature = "media-win-ffmpeg-nvdec-main10-any")]
+pub(crate) mod hdr10_sei_win;
 #[cfg(feature = "media-win-ffmpeg-hdr10-any")]
 pub mod hdr10_sidedata;
 #[cfg(feature = "media-win-ffmpeg-hdr10-any")]

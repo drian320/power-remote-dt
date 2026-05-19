@@ -36,7 +36,7 @@ mod inner {
             frame: *const rusty_ffmpeg_win::ffi::AVFrame,
         ) -> Option<Hdr10Metadata> {
             // SAFETY: caller guarantees `frame` is a valid AVFrame for the call duration.
-            let meta = unsafe { prdt_media_ffmpeg::extract_hdr10_sidecar(frame as *const _) };
+            let meta = unsafe { crate::ffmpeg::hdr10_sei_win::extract_hdr10_sidecar(frame) };
             if let Some(m) = meta {
                 self.last = Some(m);
             }

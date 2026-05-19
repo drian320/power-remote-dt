@@ -105,11 +105,16 @@ compile_error!(
 
 pub mod error;
 
-// Cross-platform HDR10 SEI parser (NOT gated on target_os = "linux").
-// Callable from crates/media-win via the `ffmpeg` umbrella feature.
-#[cfg(feature = "ffmpeg")]
+// HDR10 SEI parser. Gated on `feature = "ffmpeg"` AND `target_os = "linux"`
+// because `rusty_ffmpeg` is a Linux-only dep here (Windows uses the
+// separate `rusty_ffmpeg-win` package via `prdt-media-win::ffmpeg::hdr10_sei_win`,
+// which is a sibling copy of this same math). Cross-platform sharing was
+// attempted in PR3 but `rusty_ffmpeg`'s build.rs requires FFMPEG_LIBS_DIR
+// on Windows, which is only set after the per-job fetch step runs — making
+// the dep unsafe to enable across all Windows feature combinations.
+#[cfg(all(feature = "ffmpeg", target_os = "linux"))]
 pub mod hdr10_sei;
-#[cfg(feature = "ffmpeg")]
+#[cfg(all(feature = "ffmpeg", target_os = "linux"))]
 pub use hdr10_sei::extract_hdr10_sidecar;
 
 #[cfg(all(

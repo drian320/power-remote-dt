@@ -2,8 +2,8 @@
 //! Sibling of `nvdec_decoder.rs` (8-bit). Key differences:
 //!   - Output pixel format: `AV_PIX_FMT_P010LE` (10-bit 4:2:0) after hw_download.
 //!   - Emits `Nv12Frame16` (P010LE planes).
-//!   - HDR10 SEI sidecar extracted via `prdt_media_ffmpeg::extract_hdr10_sidecar`
-//!     (cross-platform parser from crates/media-ffmpeg/src/hdr10_sei.rs).
+//!   - HDR10 SEI sidecar extracted via `crate::ffmpeg::hdr10_sei_win::extract_hdr10_sidecar`
+//!     (Windows-side sibling of `crates/media-ffmpeg/src/hdr10_sei.rs`).
 //!
 //! Cargo cfg gate: `#[cfg(feature = "media-win-ffmpeg-nvdec-main10-any")]`.
 
@@ -274,7 +274,7 @@ mod inner {
 
             // Extract HDR10 sidecar from the SW frame (side-data propagated by hw_download).
             // SAFETY: sw is a valid AVFrame after successful hw_download.
-            let hdr10 = unsafe { prdt_media_ffmpeg::extract_hdr10_sidecar(sw as *const _) };
+            let hdr10 = unsafe { crate::ffmpeg::hdr10_sei_win::extract_hdr10_sidecar(sw) };
 
             // SAFETY: hw_download populated sw with CPU-side P010LE planes.
             let (y_ptr, uv_ptr, y_stride_bytes, uv_stride_bytes, w, h, pts) = unsafe {
