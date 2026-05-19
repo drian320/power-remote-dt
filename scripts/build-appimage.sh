@@ -321,6 +321,7 @@ scan_elf_for_glibc() {
     if [ -n "$hits" ]; then
         {
             echo "  $elf:"
+            # shellcheck disable=SC2086  # intentional word-split: $hits is newline-separated GLIBC symbols, one per line
             printf '    %s\n' $hits
         } >> "$GLIBC_VIOLATIONS"
     fi
