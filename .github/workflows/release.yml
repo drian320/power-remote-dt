@@ -216,20 +216,14 @@ jobs:
           fi
 
       - name: Build prdt with AppImage B-3 feature set
+        # Features must be a single comma-separated arg with no embedded whitespace —
+        # YAML block scalar + bash `\<newline>` line continuation injects the indent
+        # whitespace into the joined line and cargo then parses each feature as a
+        # separate argv slot ("unexpected argument 'vaapi-h264,' found").
         run: |
           cargo build --release -p prdt-client \
             --target x86_64-unknown-linux-gnu \
-            --features \
-            vaapi-h264,\
-            ffmpeg-encode-hevc-vaapi-ffmpeg6,\
-            ffmpeg-decode-hevc-vaapi-ffmpeg6,\
-            ffmpeg-decode-hevc-sw-ffmpeg6,\
-            ffmpeg-encode-hevc-nvenc-ffmpeg6,\
-            ffmpeg-decode-hevc-nvdec-ffmpeg6,\
-            ffmpeg-encode-hevc-vaapi-main10-ffmpeg6,\
-            ffmpeg-encode-hevc-nvenc-main10-ffmpeg6,\
-            ffmpeg-decode-hevc-vaapi-main10-ffmpeg6,\
-            ffmpeg-decode-hevc-nvdec-main10-ffmpeg6
+            --features vaapi-h264,ffmpeg-encode-hevc-vaapi-ffmpeg6,ffmpeg-decode-hevc-vaapi-ffmpeg6,ffmpeg-decode-hevc-sw-ffmpeg6,ffmpeg-encode-hevc-nvenc-ffmpeg6,ffmpeg-decode-hevc-nvdec-ffmpeg6,ffmpeg-encode-hevc-vaapi-main10-ffmpeg6,ffmpeg-encode-hevc-nvenc-main10-ffmpeg6,ffmpeg-decode-hevc-vaapi-main10-ffmpeg6,ffmpeg-decode-hevc-nvdec-main10-ffmpeg6
 
       - name: Build AppImage
         run: |
