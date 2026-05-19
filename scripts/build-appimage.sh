@@ -227,11 +227,20 @@ for lib in \
     /usr/lib/x86_64-linux-gnu/libva-x11.so.2 \
     /usr/lib/x86_64-linux-gnu/libpipewire-0.3.so.0 \
     /usr/lib/x86_64-linux-gnu/libopenh264.so.7 \
-    /usr/lib/x86_64-linux-gnu/libayatana-appindicator3.so.1
+    /usr/lib/x86_64-linux-gnu/libayatana-appindicator3.so.1 \
+    /usr/lib/x86_64-linux-gnu/libasound.so.2
 do
     test -f "$lib" || { echo "Missing required lib: $lib"; exit 1; }
     LIB_FLAGS+=(--library "$lib")
 done
+# libasound.so.2 must be force-added: it is a DT_NEEDED dep of prdt (cpal /
+# audiopus link ALSA), but linuxdeploy's *built-in* default exclude list drops
+# it — upstream's rationale is that ALSA dlopen-loads versioned plugins from
+# /usr/lib/.../alsa-lib/ and a bundled libasound can mismatch the host's
+# plugins. We only need the client library resolvable at load time (the
+# plugin path is exercised only when an actual PCM device is opened, which the
+# `--help` smoke test never does), and the release notes promise the AppImage
+# needs nothing beyond libfuse2 — so an explicit `--library` add is correct.
 
 # ---------------------------------------------------------------------------
 # 9. Run linuxdeploy
