@@ -292,15 +292,20 @@ trap 'rm -rf "$EXTRACT_DIR"' EXIT
 
 LDD_OUT=$(ldd "$EXTRACT_DIR/squashfs-root/usr/bin/prdt" 2>/dev/null || true)
 
-# A3: bundled libs must resolve inside the AppImage, not to host system paths
+# A3: bundled libs must resolve inside the AppImage, not to host system paths.
+# linuxdeploy sets the prdt binary's rpath to $ORIGIN/../lib, so ldd resolves
+# bundled libs through `squashfs-root/usr/bin/../lib/`, NOT the canonicalized
+# `squashfs-root/usr/lib/`. The match must accept either spelling — what we
+# actually care about is the `squashfs-root/` prefix (i.e. NOT a host path
+# like /lib/x86_64-linux-gnu/).
 if echo "$LDD_OUT" \
     | grep -E "(libavcodec|libavutil|libavformat|libva\.|libpipewire-0\.3|libgtk-3)\.so" \
-    | grep -qv "squashfs-root/usr/lib"; then
+    | grep -qv "squashfs-root/"; then
     echo "A3 FAIL: external host lib referenced for a bundled library:"
     echo "$LDD_OUT" | grep -E "(libavcodec|libavutil|libavformat|libva\.|libpipewire-0\.3|libgtk-3)\.so"
     exit 1
 fi
-echo "A3 PASS: all bundled libs resolve to squashfs-root/usr/lib"
+echo "A3 PASS: all bundled libs resolve under squashfs-root/"
 
 # A4: no proprietary NVIDIA libs bundled
 if find "$EXTRACT_DIR/squashfs-root/usr/lib" \
