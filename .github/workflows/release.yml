@@ -245,17 +245,21 @@ jobs:
           ARCH=x86_64 \
             ./scripts/build-appimage.sh
 
-      - name: Container smoke test on Ubuntu 22.04 (A2)
+      - name: Container smoke test on Ubuntu 24.04 (A2)
+        # Was 22.04 originally. AppImage build moved to ubuntu-24.04 runner
+        # (libpipewire ABI floor), so bundled .so's reference glibc 2.36-2.38
+        # and the V5 floor is now 2.39 (see scripts/build-appimage.sh:326).
+        # ubuntu:22.04 ships glibc 2.35 and can no longer run this AppImage.
         run: |
-          docker run --rm -v $PWD/dist:/dist ubuntu:22.04 bash -c "
+          docker run --rm -v $PWD/dist:/dist ubuntu:24.04 bash -c "
             apt-get update -qq &&
             apt-get install -y -qq --no-install-recommends libfuse2 ca-certificates &&
             timeout 5 /dist/prdt-${{ steps.ver.outputs.VERSION }}-x86_64.AppImage --help
           "
 
-      - name: Container smoke test — FUSE-less (--appimage-extract-and-run, M-1)
+      - name: Container smoke test — FUSE-less (--appimage-extract-and-run, M-1, Ubuntu 24.04)
         run: |
-          docker run --rm -v $PWD/dist:/dist ubuntu:22.04 bash -c "
+          docker run --rm -v $PWD/dist:/dist ubuntu:24.04 bash -c "
             apt-get update -qq &&
             apt-get install -y -qq --no-install-recommends ca-certificates &&
             timeout 10 /dist/prdt-${{ steps.ver.outputs.VERSION }}-x86_64.AppImage --appimage-extract-and-run --help
