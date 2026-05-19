@@ -235,7 +235,14 @@ mod tests {
         }
         #[cfg(not(prdt_nvdec_bindings))]
         {
-            let err = result.expect_err("new should fail without bindings");
+            // NvdecD3d11Consumer holds raw NVDEC handles and does not derive
+            // Debug, so `Result::expect_err` (which would format the Ok variant
+            // in its panic message) cannot satisfy its `T: Debug` bound. Match
+            // directly on the result instead.
+            let err = match result {
+                Ok(_) => panic!("new should fail without bindings"),
+                Err(e) => e,
+            };
             match err {
                 MediaError::Other(msg) => {
                     assert!(

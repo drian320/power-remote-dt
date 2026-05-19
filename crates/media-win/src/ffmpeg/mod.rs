@@ -4,3 +4,13 @@
 //! This file exists so `cargo check --features media-win-ffmpeg` proves the
 //! build.rs env-var wiring and rusty_ffmpeg dep resolve correctly before any
 //! encoder/decoder code depends on them.
+
+#[cfg(feature = "media-win-ffmpeg-nvenc-any")]
+pub mod nvenc_encoder;
+#[cfg(feature = "media-win-ffmpeg-nvenc-any")]
+pub use nvenc_encoder::HevcNvencFfmpegEncoderWindowsAdapter;
+
+#[cfg(feature = "media-win-ffmpeg-nvenc-main10-any")]
+pub mod nvenc_main10_encoder;
+#[cfg(feature = "media-win-ffmpeg-nvenc-main10-any")]
+pub use nvenc_main10_encoder::HevcNvencMain10FfmpegEncoderWindowsAdapter;

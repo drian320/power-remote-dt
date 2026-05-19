@@ -54,6 +54,10 @@ pub enum HwHevcEncoder {
     #[cfg(prdt_nvenc_bindings)]
     Nvenc(Box<NvencEncoder>),
     Mf(Box<MfH265Encoder>),
+    #[cfg(feature = "media-win-ffmpeg-nvenc-any")]
+    FfmpegNvec(Box<crate::ffmpeg::HevcNvencFfmpegEncoderWindowsAdapter>),
+    #[cfg(feature = "media-win-ffmpeg-nvenc-main10-any")]
+    FfmpegNvecMain10(Box<crate::ffmpeg::HevcNvencMain10FfmpegEncoderWindowsAdapter>),
 }
 
 impl Hevc265Encoder for HwHevcEncoder {
@@ -67,6 +71,10 @@ impl Hevc265Encoder for HwHevcEncoder {
             #[cfg(prdt_nvenc_bindings)]
             Self::Nvenc(e) => e.encode(texture, force_idr, timestamp_us),
             Self::Mf(e) => e.encode(texture, force_idr, timestamp_us),
+            #[cfg(feature = "media-win-ffmpeg-nvenc-any")]
+            Self::FfmpegNvec(e) => e.encode(texture, force_idr, timestamp_us),
+            #[cfg(feature = "media-win-ffmpeg-nvenc-main10-any")]
+            Self::FfmpegNvecMain10(e) => e.encode(texture, force_idr, timestamp_us),
         }
     }
 
@@ -75,6 +83,10 @@ impl Hevc265Encoder for HwHevcEncoder {
             #[cfg(prdt_nvenc_bindings)]
             Self::Nvenc(e) => e.set_target_bitrate(bps),
             Self::Mf(e) => e.set_target_bitrate(bps),
+            #[cfg(feature = "media-win-ffmpeg-nvenc-any")]
+            Self::FfmpegNvec(e) => e.set_target_bitrate(bps),
+            #[cfg(feature = "media-win-ffmpeg-nvenc-main10-any")]
+            Self::FfmpegNvecMain10(e) => e.set_target_bitrate(bps),
         }
     }
 
@@ -83,6 +95,10 @@ impl Hevc265Encoder for HwHevcEncoder {
             #[cfg(prdt_nvenc_bindings)]
             Self::Nvenc(e) => e.backend_name(),
             Self::Mf(e) => e.backend_name(),
+            #[cfg(feature = "media-win-ffmpeg-nvenc-any")]
+            Self::FfmpegNvec(e) => e.backend_name(),
+            #[cfg(feature = "media-win-ffmpeg-nvenc-main10-any")]
+            Self::FfmpegNvecMain10(e) => e.backend_name(),
         }
     }
 }
@@ -97,5 +113,19 @@ impl From<NvencEncoder> for HwHevcEncoder {
 impl From<MfH265Encoder> for HwHevcEncoder {
     fn from(e: MfH265Encoder) -> Self {
         Self::Mf(Box::new(e))
+    }
+}
+
+#[cfg(feature = "media-win-ffmpeg-nvenc-any")]
+impl From<crate::ffmpeg::HevcNvencFfmpegEncoderWindowsAdapter> for HwHevcEncoder {
+    fn from(e: crate::ffmpeg::HevcNvencFfmpegEncoderWindowsAdapter) -> Self {
+        Self::FfmpegNvec(Box::new(e))
+    }
+}
+
+#[cfg(feature = "media-win-ffmpeg-nvenc-main10-any")]
+impl From<crate::ffmpeg::HevcNvencMain10FfmpegEncoderWindowsAdapter> for HwHevcEncoder {
+    fn from(e: crate::ffmpeg::HevcNvencMain10FfmpegEncoderWindowsAdapter) -> Self {
+        Self::FfmpegNvecMain10(Box::new(e))
     }
 }
