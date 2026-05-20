@@ -39,39 +39,17 @@ enum Cmd {
     },
 }
 
-#[cfg(windows)]
+/// Windows + Linux dispatcher. As of GUI modernization P2 the no-subcommand
+/// path opens the unified launcher GUI (RustDesk-style: one window, "This
+/// Device" + "Connect" tabs) on **both** OSes — the egui/eframe stack is
+/// cross-platform, so the Linux "deferred to L2" bail is gone.
+#[cfg(any(windows, target_os = "linux"))]
 fn main() -> anyhow::Result<()> {
     use clap::Parser as _;
 
     match Cli::parse().cmd {
-        // No subcommand → unified GUI (RustDesk-style: one window, two tabs).
+        // No subcommand → unified GUI.
         None => prdt_gui_client::run_client_gui(None),
-        Some(Cmd::Host { args }) => {
-            let argv = std::iter::once(OsString::from("prdt-host")).chain(args);
-            let host_args = prdt_host::Args::parse_from(argv);
-            prdt_host::run_with_args(host_args)
-        }
-        Some(Cmd::Connect { args }) | Some(Cmd::Viewer { args }) => {
-            let argv = std::iter::once(OsString::from("prdt-viewer")).chain(args);
-            let viewer_args = prdt_viewer::Args::parse_from(argv);
-            prdt_viewer::run_with_args(viewer_args)
-        }
-    }
-}
-
-/// Linux dispatcher: `prdt host` and `prdt connect` / `prdt viewer` work
-/// on Linux as of L1.5b. The GUI (`None`) remains Windows-only — deferred
-/// to L2 per the plan §3 scope. Invoking GUI on Linux exits with an
-/// informative non-zero status.
-#[cfg(target_os = "linux")]
-fn main() -> anyhow::Result<()> {
-    use clap::Parser as _;
-
-    match Cli::parse().cmd {
-        None => Err(anyhow::anyhow!(
-            "GUI mode is not yet implemented on Linux (deferred to L2). \
-             Use `prdt host` or `prdt connect` to run the Linux CLI."
-        )),
         Some(Cmd::Host { args }) => {
             let argv = std::iter::once(OsString::from("prdt-host")).chain(args);
             let host_args = prdt_host::Args::parse_from(argv);

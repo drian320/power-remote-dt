@@ -22,6 +22,8 @@ prdt-gui-client = { path = "../gui-client" }
 [target.'cfg(target_os = "linux")'.dependencies]
 prdt-host = { path = "../host", default-features = false }
 prdt-viewer = { path = "../viewer" }
+# GUI modernization P2: the unified launcher GUI is now available on Linux.
+prdt-gui-client = { path = "../gui-client" }
 
 [features]
 # Default keeps cros-libva-backed VAAPI H.264 (existing CI behaviour).

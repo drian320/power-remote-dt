@@ -13,9 +13,12 @@ anyhow = "1"
 tokio = { workspace = true }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = { workspace = true }
-
-[target.'cfg(windows)'.dependencies]
-prdt-host = { path = "../host" }
+# GUI modernization P2: the unified launcher is now cross-platform (Linux +
+# Windows). These deps moved out of [target.'cfg(windows)'] — ClientApp's
+# logic is platform-neutral (spawns `prdt connect`, runs the host listener
+# via tokio), so the previous Windows-only gating was a scope decision, not a
+# technical constraint.
+prdt-host = { path = "../host", default-features = false }
 prdt-viewer = { path = "../viewer" }
 prdt-gui-host = { path = "../gui-host" }
 prdt-crypto = { path = "../crypto" }
