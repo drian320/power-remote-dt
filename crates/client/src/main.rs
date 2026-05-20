@@ -52,12 +52,12 @@ fn main() -> anyhow::Result<()> {
         None => prdt_gui_client::run_client_gui(None),
         Some(Cmd::Host { args }) => {
             let argv = std::iter::once(OsString::from("prdt-host")).chain(args);
-            let host_args = prdt_host::Args::parse_from(argv);
+            let host_args = prdt_host::parse_args_with_config(argv);
             prdt_host::run_with_args(host_args)
         }
         Some(Cmd::Connect { args }) | Some(Cmd::Viewer { args }) => {
             let argv = std::iter::once(OsString::from("prdt-viewer")).chain(args);
-            let viewer_args = prdt_viewer::Args::parse_from(argv);
+            let viewer_args = prdt_viewer::parse_args_with_config(argv);
             prdt_viewer::run_with_args(viewer_args)
         }
     }

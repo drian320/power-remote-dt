@@ -264,6 +264,65 @@ pub struct Args {
     pub no_auth_prompt: bool,
 }
 
+/// Parse `argv` into [`Args`], overlaying `config.toml` as the baseline so the
+/// effective precedence is **explicit CLI flag > config.toml value > clap
+/// default**. Fields supplied explicitly on the command line are detected via
+/// `ArgMatches::value_source(id) == Some(ValueSource::CommandLine)` and are
+/// never overridden by config. The config path is `--config` if given, else
+/// `prdt_gui_common::default_config_path()`.
+pub fn parse_args_with_config(argv: impl IntoIterator<Item = std::ffi::OsString>) -> Args {
+    use clap::parser::ValueSource;
+    use clap::{CommandFactory, FromArgMatches};
+
+    let argv: Vec<std::ffi::OsString> = argv.into_iter().collect();
+    let matches = Args::command().get_matches_from(&argv);
+    let mut args = Args::from_arg_matches(&matches).expect("from_arg_matches");
+
+    let on_cli = |id: &str| matches.value_source(id) == Some(ValueSource::CommandLine);
+
+    let config_path = args
+        .config
+        .clone()
+        .or_else(prdt_gui_common::default_config_path);
+    let cfg = match config_path {
+        Some(path) => match prdt_gui_common::Config::load(&path) {
+            Ok(c) => c,
+            Err(_) => return args,
+        },
+        None => return args,
+    };
+    let viewer = &cfg.viewer;
+
+    if !on_cli("resolution") {
+        args.resolution = viewer.default_resolution.clone();
+    }
+    if !on_cli("fps") {
+        args.fps = viewer.default_fps;
+    }
+    if !on_cli("decoder") {
+        args.decoder = viewer.decoder.clone();
+    }
+    if !on_cli("codec") {
+        args.codec = viewer.codec.clone();
+    }
+    if !on_cli("recv_dir") {
+        args.recv_dir = viewer.recv_dir.clone();
+    }
+    if !on_cli("signaling_url") && !viewer.signaling_url.is_empty() {
+        if let Ok(url) = viewer.signaling_url.parse::<url::Url>() {
+            args.signaling_url = Some(url);
+        }
+    }
+    if !on_cli("known_hosts") {
+        args.known_hosts = Some(viewer.known_hosts.clone());
+    }
+    if !on_cli("known_host_ids") {
+        args.known_host_ids = viewer.known_host_ids.clone();
+    }
+
+    args
+}
+
 /// Normalize a user-supplied host_id for signaling: 9-digit numeric inputs
 /// get the standard `XXX-XXX-XXX` dashed form; all other inputs are returned
 /// verbatim.
@@ -3286,5 +3345,68 @@ mod tests {
         // applies. Only host/host-pubkey/signaling-url skip the launcher.
         let args = Args::try_parse_from(["prdt-viewer", "--decoder", "openh264"]).unwrap();
         assert!(!has_explicit_connection_target(&args));
+    }
+
+    fn write_config_with_fps(dir: &std::path::Path, fps: u32) -> std::path::PathBuf {
+        let mut cfg = prdt_gui_common::Config::default();
+        cfg.viewer.default_fps = fps;
+        let path = dir.join("config.toml");
+        cfg.save(&path).expect("save config");
+        path
+    }
+
+    #[test]
+    fn explicit_flag_wins_over_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config_with_fps(dir.path(), 50);
+        let args = super::parse_args_with_config(
+            [
+                "prdt-viewer",
+                "--config",
+                path.to_str().unwrap(),
+                "--fps",
+                "99",
+                "--headless",
+            ]
+            .into_iter()
+            .map(std::ffi::OsString::from),
+        );
+        assert_eq!(args.fps, 99);
+    }
+
+    #[test]
+    fn config_fills_unset_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config_with_fps(dir.path(), 50);
+        let args = super::parse_args_with_config(
+            [
+                "prdt-viewer",
+                "--config",
+                path.to_str().unwrap(),
+                "--headless",
+            ]
+            .into_iter()
+            .map(std::ffi::OsString::from),
+        );
+        assert_eq!(args.fps, 50);
+    }
+
+    #[test]
+    fn missing_config_uses_clap_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does-not-exist.toml");
+        let args = super::parse_args_with_config(
+            [
+                "prdt-viewer",
+                "--config",
+                path.to_str().unwrap(),
+                "--headless",
+            ]
+            .into_iter()
+            .map(std::ffi::OsString::from),
+        );
+        // Config::load creates a default file; the default fps is 60 in both
+        // clap and Config, so this also confirms no panic on a fresh config.
+        assert_eq!(args.fps, 60);
     }
 }

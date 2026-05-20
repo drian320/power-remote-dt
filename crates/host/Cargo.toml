@@ -152,7 +152,6 @@ prdt-media-win = { path = "../media-win" }
 prdt-media-sw = { path = "../media-sw" }
 prdt-input-win = { path = "../input-win" }
 tokio-util = { version = "0.7", features = ["rt"] }
-prdt-gui-common = { path = "../gui-common" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(prdt_nvdec_bindings)', 'cfg(prdt_nvenc_bindings)'] }
