@@ -6,21 +6,17 @@
 //! because the viewer owns a `winit` event loop and a D3D11 swapchain that
 //! cannot coexist with the egui window in the same process today.
 
-#![cfg_attr(not(windows), allow(dead_code))]
-
-#[cfg(windows)]
 mod app;
 
 use std::path::PathBuf;
-#[allow(unused_imports)] // used only in #[cfg(windows)] code; pre-existing on master
 use std::sync::{Arc, Mutex};
 
-#[allow(unused_imports)] // used only in #[cfg(windows)] code; pre-existing on master
 use prdt_gui_common::{install_jp_font, Config};
 
 /// Run the unified client GUI as a blocking call. Returns when the user
-/// closes the window.
-#[cfg(windows)]
+/// closes the window. Cross-platform as of GUI modernization P2 (Linux +
+/// Windows); the egui/eframe stack is identical on both, so there is no
+/// platform split here.
 pub fn run_client_gui(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     let config_path = config_path
         .or_else(prdt_gui_common::default_config_path)
@@ -58,9 +54,4 @@ pub fn run_client_gui(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     drop(_enter);
     drop(runtime);
     Ok(())
-}
-
-#[cfg(not(windows))]
-pub fn run_client_gui(_config_path: Option<PathBuf>) -> anyhow::Result<()> {
-    anyhow::bail!("prdt GUI currently only supports Windows")
 }
