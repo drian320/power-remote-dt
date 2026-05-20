@@ -1077,4 +1077,113 @@ mod tests {
             "needs_idr must be cleared after successful decode"
         );
     }
+
+    // ---- P0 GUI-modernization baseline freeze ----------------------------
+    // Golden digests of the CPU NV12/P010 → BGRA converters for deterministic
+    // gradient inputs. P3 replaces these CPU loops with a wgpu fragment shader;
+    // the shader output must reproduce these references within tolerance. If
+    // you intentionally change the conversion math, recompute the constant
+    // from the failure message. See .omc/plans/gui-modernization-design.md §8.
+    #[cfg(any(
+        feature = "ffmpeg-decode-hevc-sw-any",
+        feature = "ffmpeg-decode-hevc-vaapi-any",
+        feature = "ffmpeg-decode-hevc-nvdec-any",
+        feature = "ffmpeg-decode-hevc-sw-main10-any",
+        feature = "ffmpeg-decode-hevc-vaapi-main10-any",
+        feature = "ffmpeg-decode-hevc-nvdec-main10-any"
+    ))]
+    fn fnv1a64(bytes: &[u8]) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for &b in bytes {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h
+    }
+
+    #[cfg(any(
+        feature = "ffmpeg-decode-hevc-sw-any",
+        feature = "ffmpeg-decode-hevc-vaapi-any",
+        feature = "ffmpeg-decode-hevc-nvdec-any"
+    ))]
+    #[test]
+    fn nv12_to_bgra_gradient_golden_digest() {
+        let (w, h) = (64usize, 64usize);
+        let mut y = vec![0u8; w * h];
+        for j in 0..h {
+            for i in 0..w {
+                y[j * w + i] = ((i.wrapping_mul(5)).wrapping_add(j.wrapping_mul(3))) as u8;
+            }
+        }
+        // Interleaved UV at half resolution: stride_uv counts bytes (= w).
+        let mut uv = vec![0u8; w * (h / 2)];
+        for j in 0..(h / 2) {
+            for i in 0..(w / 2) {
+                uv[j * w + i * 2] = (i.wrapping_mul(7)) as u8; // U
+                uv[j * w + i * 2 + 1] = (j.wrapping_mul(11)) as u8; // V
+            }
+        }
+        let frame = Nv12Frame {
+            width: w as u32,
+            height: h as u32,
+            y,
+            uv,
+            stride_y: w as u32,
+            stride_uv: w as u32,
+            pts_us: 0,
+        };
+        let mut out = vec![0u8; w * h * 4];
+        nv12_to_bgra(&frame, &mut out);
+        let digest = fnv1a64(&out);
+        const GOLDEN: u64 = 0xe113_1b22_fd54_6e98;
+        assert_eq!(
+            digest, GOLDEN,
+            "nv12_to_bgra gradient digest changed: got {digest:#018x} (update GOLDEN if intentional)"
+        );
+    }
+
+    #[cfg(any(
+        feature = "ffmpeg-decode-hevc-sw-main10-any",
+        feature = "ffmpeg-decode-hevc-vaapi-main10-any",
+        feature = "ffmpeg-decode-hevc-nvdec-main10-any"
+    ))]
+    #[test]
+    fn p010_to_bgra_sdr_tonemap_gradient_golden_digest() {
+        let (w, h) = (64usize, 64usize);
+        // P010LE: valid 10 bits in the HIGH part of each u16 (<< 6).
+        let mut y = vec![0u16; w * h];
+        for j in 0..h {
+            for i in 0..w {
+                let v10 = ((i.wrapping_mul(13)).wrapping_add(j.wrapping_mul(7)) & 0x3ff) as u16;
+                y[j * w + i] = v10 << 6;
+            }
+        }
+        let mut uv = vec![0u16; w * (h / 2)];
+        for j in 0..(h / 2) {
+            for i in 0..(w / 2) {
+                let u10 = ((i.wrapping_mul(17)) & 0x3ff) as u16;
+                let v10 = ((j.wrapping_mul(19)) & 0x3ff) as u16;
+                uv[j * w + i * 2] = u10 << 6;
+                uv[j * w + i * 2 + 1] = v10 << 6;
+            }
+        }
+        let frame = Nv12Frame16 {
+            width: w as u32,
+            height: h as u32,
+            y,
+            uv,
+            stride_y: w as u32,
+            stride_uv: w as u32,
+            pts_us: 0,
+            hdr10: None,
+        };
+        let mut out = vec![0u8; w * h * 4];
+        p010_to_bgra_sdr_tonemap(&frame, &mut out);
+        let digest = fnv1a64(&out);
+        const GOLDEN: u64 = 0x2706_6b09_316e_181e;
+        assert_eq!(
+            digest, GOLDEN,
+            "p010_to_bgra_sdr_tonemap gradient digest changed: got {digest:#018x} (update GOLDEN if intentional)"
+        );
+    }
 }
