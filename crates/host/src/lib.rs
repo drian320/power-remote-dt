@@ -217,6 +217,64 @@ pub struct Args {
     pub host_peers_file: std::path::PathBuf,
 }
 
+/// Parse `argv` into [`Args`], overlaying `config.toml` as the baseline so the
+/// effective precedence is **explicit CLI flag > config.toml value > clap
+/// default**. Fields supplied explicitly on the command line are detected via
+/// `ArgMatches::value_source(id) == Some(ValueSource::CommandLine)` and are
+/// never overridden by config. The config path is `--config` if given, else
+/// `prdt_gui_common::default_config_path()`.
+pub fn parse_args_with_config(argv: impl IntoIterator<Item = std::ffi::OsString>) -> Args {
+    use clap::parser::ValueSource;
+    use clap::{CommandFactory, FromArgMatches};
+
+    let argv: Vec<std::ffi::OsString> = argv.into_iter().collect();
+    let matches = Args::command().get_matches_from(&argv);
+    let mut args = Args::from_arg_matches(&matches).expect("from_arg_matches");
+
+    let on_cli = |id: &str| matches.value_source(id) == Some(ValueSource::CommandLine);
+
+    let config_path = args
+        .config
+        .clone()
+        .or_else(prdt_gui_common::default_config_path);
+    let cfg = match config_path {
+        Some(path) => match prdt_gui_common::Config::load(&path) {
+            Ok(c) => c,
+            Err(_) => return args,
+        },
+        None => return args,
+    };
+    let host = &cfg.host;
+
+    if !on_cli("bind") {
+        if let Ok(addr) = host.bind.parse::<SocketAddr>() {
+            args.bind = addr;
+        }
+    }
+    if !on_cli("monitor") {
+        args.monitor = host.monitor;
+    }
+    if !on_cli("bitrate_mbps") {
+        args.bitrate_mbps = host.bitrate_mbps;
+    }
+    if !on_cli("key_file") {
+        args.key_file = host.key_file.clone();
+    }
+    if !on_cli("encoder") {
+        args.encoder = host.encoder.clone();
+    }
+    if !on_cli("signaling_url") && !host.signaling_url.is_empty() {
+        if let Ok(url) = host.signaling_url.parse::<url::Url>() {
+            args.signaling_url = Some(url);
+        }
+    }
+    if !on_cli("host_id_file") {
+        args.host_id_file = host.host_id_file.clone();
+    }
+
+    args
+}
+
 // The GUI crate owns the canonical consent-channel types; re-export them here
 // so the rest of this crate and any integration tests can use
 // `prdt_host::ConsentDecision` etc. without a separate import path.
@@ -1555,6 +1613,69 @@ mod cli_tests {
         ])
         .expect("wayland parse");
         assert_eq!(args.capture_backend, "wayland");
+    }
+
+    fn write_config_with_bitrate(dir: &std::path::Path, bitrate_mbps: u32) -> std::path::PathBuf {
+        let mut cfg = prdt_gui_common::Config::default();
+        cfg.host.bitrate_mbps = bitrate_mbps;
+        let path = dir.join("config.toml");
+        cfg.save(&path).expect("save config");
+        path
+    }
+
+    #[test]
+    fn explicit_flag_wins_over_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config_with_bitrate(dir.path(), 50);
+        let args = super::parse_args_with_config(
+            [
+                "prdt-host",
+                "--config",
+                path.to_str().unwrap(),
+                "--bitrate-mbps",
+                "99",
+                "--headless",
+            ]
+            .into_iter()
+            .map(std::ffi::OsString::from),
+        );
+        assert_eq!(args.bitrate_mbps, 99);
+    }
+
+    #[test]
+    fn config_fills_unset_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config_with_bitrate(dir.path(), 50);
+        let args = super::parse_args_with_config(
+            [
+                "prdt-host",
+                "--config",
+                path.to_str().unwrap(),
+                "--headless",
+            ]
+            .into_iter()
+            .map(std::ffi::OsString::from),
+        );
+        assert_eq!(args.bitrate_mbps, 50);
+    }
+
+    #[test]
+    fn missing_config_uses_clap_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does-not-exist.toml");
+        let args = super::parse_args_with_config(
+            [
+                "prdt-host",
+                "--config",
+                path.to_str().unwrap(),
+                "--headless",
+            ]
+            .into_iter()
+            .map(std::ffi::OsString::from),
+        );
+        // Config::load creates a default file; default bitrate is 30 in both
+        // clap and Config, so this also confirms no panic on a fresh config.
+        assert_eq!(args.bitrate_mbps, 30);
     }
 }
 

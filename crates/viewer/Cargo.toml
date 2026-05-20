@@ -18,6 +18,7 @@ prdt-protocol = { path = "../protocol" }
 prdt-transport = { path = "../transport" }
 prdt-signaling-client = { path = "../signaling-client" }
 prdt-signaling-proto = { path = "../signaling-proto" }
+prdt-gui-common = { path = "../gui-common" }
 url = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "sync", "time", "signal", "fs", "io-util"] }
 clap = { workspace = true }
@@ -35,7 +36,6 @@ prdt-media-win = { path = "../media-win", features = ["i420-upload"] }
 prdt-media-sw = { path = "../media-sw" }
 prdt-input-win = { path = "../input-win" }
 prdt-gui-viewer = { path = "../gui-viewer" }
-prdt-gui-common = { path = "../gui-common" }
 windows = { version = "0.58", features = [
     "Win32_Foundation",
 ] }

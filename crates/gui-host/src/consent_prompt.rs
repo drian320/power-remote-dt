@@ -4,9 +4,17 @@
 
 use std::time::{Duration, Instant};
 
+use prdt_gui_common::theme::tokens;
 use prdt_protocol::PermissionSet;
 
 use crate::consent_channel::ConsentDecision;
+
+/// The Accept ("Allow") button stays disabled for this long after the modal
+/// first appears, with a visible countdown. This anti-misclick delay defeats
+/// the social-engineering pattern where an attacker times a connection
+/// request to land under the operator's cursor mid-click. The Reject path is
+/// never delayed — denying is always safe and instant.
+const ACCEPT_ARM_DELAY: Duration = Duration::from_secs(2);
 
 // ---------------------------------------------------------------------------
 // State
@@ -48,11 +56,21 @@ impl ConsentPromptState {
         }
     }
 
-    /// Returns `Some(decision)` when the user clicks or the timeout fires.
+    /// Whether the Accept button is armed yet (true once `ACCEPT_ARM_DELAY`
+    /// has elapsed since the modal appeared). Exposed for testing.
+    pub fn accept_armed(&self) -> bool {
+        self.created_at.elapsed() >= ACCEPT_ARM_DELAY
+    }
+
+    /// Returns `Some(decision)` when the user decides or the timeout fires.
     ///
-    /// Returns `None` while the prompt is still waiting. Requests a repaint
-    /// after 1 s so the countdown label refreshes without requiring the
-    /// operator to move the mouse.
+    /// Security hardening (design §7.3):
+    /// - Rendered as an `egui::Modal` so it dims the rest of the UI and grabs
+    ///   keyboard focus — the operator can't interact with anything else.
+    /// - **Esc** always denies instantly (the safe action is never delayed).
+    /// - The **Allow** button is disabled for the first `ACCEPT_ARM_DELAY`
+    ///   with a visible countdown, defeating timed-misclick attacks.
+    /// - **Deny** is red and always clickable.
     pub fn show(&mut self, ctx: &egui::Context) -> Option<ConsentDecision> {
         let elapsed = self.created_at.elapsed();
 
@@ -61,57 +79,84 @@ impl ConsentPromptState {
             return Some(ConsentDecision::Rejected);
         }
 
+        // Esc denies instantly. Denying is always safe, so it bypasses the
+        // arm delay entirely.
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            return Some(ConsentDecision::Rejected);
+        }
+
         let remaining = self.timeout - elapsed;
+        let armed = elapsed >= ACCEPT_ARM_DELAY;
+        let arm_remaining = ACCEPT_ARM_DELAY.saturating_sub(elapsed);
         let short_key = self.peer_pubkey_b64.chars().take(16).collect::<String>();
         let mut result: Option<ConsentDecision> = None;
 
-        egui::Window::new("Incoming viewer")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .show(ctx, |ui| {
-                ui.heading("Viewer requesting to connect");
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label("Pubkey:");
-                    ui.code(format!("{short_key}…"));
-                });
-                ui.add_space(8.0);
-
-                ui.label("Label (optional):");
-                ui.text_edit_singleline(&mut self.label_input);
-                ui.add_space(8.0);
-
-                ui.label("Permissions for this session:");
-                ui.checkbox(&mut self.permissions.input, "Input (keyboard/mouse)");
-                ui.checkbox(&mut self.permissions.clipboard, "Clipboard");
-                ui.checkbox(&mut self.permissions.file_transfer, "File transfer");
-                ui.checkbox(&mut self.permissions.audio, "Audio");
-                ui.add_space(8.0);
-
-                ui.checkbox(&mut self.remember, "Remember this viewer");
-                ui.add_space(8.0);
-
-                ui.label(format!("Auto-deny in {}s", remaining.as_secs()));
-                ui.add_space(8.0);
-
-                ui.horizontal(|ui| {
-                    if ui.button("Deny").clicked() {
-                        result = Some(ConsentDecision::Rejected);
-                    }
-                    if ui.button("Allow").clicked() {
-                        result = Some(ConsentDecision::Accepted {
-                            permissions: self.permissions,
-                            remember: self.remember,
-                            label: self.label_input.clone(),
-                        });
-                    }
-                });
+        egui::Modal::new(egui::Id::new("prdt-consent-modal")).show(ctx, |ui| {
+            ui.set_width(360.0);
+            ui.heading("Incoming Connection Request");
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label("Device key:");
+                ui.code(format!("{short_key}…"));
             });
+            ui.add_space(8.0);
 
-        // Ensure the countdown label refreshes once per second without
-        // requiring operator mouse movement.
-        ctx.request_repaint_after(Duration::from_secs(1));
+            ui.label("Label (optional):");
+            ui.text_edit_singleline(&mut self.label_input);
+            ui.add_space(8.0);
+
+            ui.label("Permissions for this session:");
+            ui.checkbox(&mut self.permissions.input, "Input (keyboard/mouse)");
+            ui.checkbox(&mut self.permissions.clipboard, "Clipboard");
+            ui.checkbox(&mut self.permissions.file_transfer, "File transfer");
+            ui.checkbox(&mut self.permissions.audio, "Audio");
+            ui.add_space(8.0);
+
+            ui.checkbox(&mut self.remember, "Remember this device");
+            ui.add_space(8.0);
+
+            ui.colored_label(
+                tokens::TEXT_DIM,
+                format!("Auto-deny in {}s", remaining.as_secs()),
+            );
+            ui.add_space(8.0);
+
+            ui.horizontal(|ui| {
+                // Deny: red, always enabled, also bound to Esc.
+                let deny = egui::Button::new(egui::RichText::new("Deny (Esc)").color(tokens::TEXT))
+                    .fill(tokens::DESTRUCTIVE);
+                if ui.add(deny).clicked() {
+                    result = Some(ConsentDecision::Rejected);
+                }
+
+                // Allow: disabled until armed, with a countdown label.
+                let allow_label = if armed {
+                    "Allow".to_string()
+                } else {
+                    format!("Allow in {}s", arm_remaining.as_secs_f32().ceil() as u64)
+                };
+                if ui
+                    .add_enabled(armed, egui::Button::new(allow_label))
+                    .clicked()
+                {
+                    result = Some(ConsentDecision::Accepted {
+                        permissions: self.permissions,
+                        remember: self.remember,
+                        label: self.label_input.clone(),
+                    });
+                }
+            });
+        });
+
+        // Repaint cadence: snappy (200 ms) while the arm-countdown ticks down
+        // so "Allow in 2s → 1s" updates smoothly; 1 Hz afterwards for the
+        // slower auto-deny countdown.
+        let next = if armed {
+            Duration::from_secs(1)
+        } else {
+            Duration::from_millis(200)
+        };
+        ctx.request_repaint_after(next);
 
         result
     }
@@ -146,6 +191,25 @@ mod tests {
         assert!(
             elapsed < state.timeout,
             "60-second prompt must not be expired immediately"
+        );
+    }
+
+    #[test]
+    fn fresh_prompt_accept_not_armed() {
+        // The anti-misclick guard: a freshly created prompt must NOT have its
+        // Allow button armed (it arms only after ACCEPT_ARM_DELAY elapses).
+        let state = ConsentPromptState::new(
+            "AAABBBCCC".into(),
+            PermissionSet::all(),
+            Duration::from_secs(60),
+        );
+        assert!(
+            !state.accept_armed(),
+            "Allow must be disabled immediately after the modal appears"
+        );
+        assert!(
+            ACCEPT_ARM_DELAY >= Duration::from_secs(1),
+            "arm delay must be a meaningful, human-perceptible duration"
         );
     }
 }
