@@ -33,7 +33,7 @@ members = [
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.87"
 license = "Apache-2.0 OR MIT"
 
 [workspace.dependencies]
@@ -81,9 +81,9 @@ md-5 = "0.10"
 # Persistence
 rusqlite = { version = "0.31", features = ["bundled"] }
 
-# GUI (Phase 4 G1)
-eframe = { version = "0.28", default-features = false, features = ["default_fonts", "glow", "wayland"] }
-egui = "0.28"
+# GUI (Phase 4 G1; GUI modernization P1: 0.28→0.32, glow→wgpu backend)
+eframe = { version = "0.32", default-features = false, features = ["default_fonts", "wgpu", "wayland"] }
+egui = "0.32"
 qrcode = "0.14"
 rfd = "0.17"
 toml = "0.8"

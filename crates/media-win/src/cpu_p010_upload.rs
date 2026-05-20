@@ -33,7 +33,7 @@ pub struct CpuP010Uploader {
 
 impl CpuP010Uploader {
     pub fn new(dev: &D3d11Device, width: u32, height: u32) -> Result<Self> {
-        if width % 2 != 0 || height % 2 != 0 || width == 0 || height == 0 {
+        if !width.is_multiple_of(2) || !height.is_multiple_of(2) || width == 0 || height == 0 {
             return Err(MediaError::Other(format!(
                 "CpuP010Uploader: dims must be even and nonzero, got {width}x{height}"
             )));

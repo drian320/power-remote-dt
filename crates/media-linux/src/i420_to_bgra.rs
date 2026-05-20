@@ -96,4 +96,66 @@ mod tests {
             assert!(px[2] >= 250);
         }
     }
+
+    // ---- P0 GUI-modernization baseline freeze ----------------------------
+    // Golden digest of the I420→BGRA output for a deterministic gradient that
+    // exercises the full Y/U/V range. The GUI rewrite (P3) replaces this CPU
+    // converter with a wgpu fragment shader; the shader output must reproduce
+    // this reference within tolerance. If you intentionally change the
+    // conversion math, recompute the constant from the test failure message.
+    // See .omc/plans/gui-modernization-design.md §8 (P0).
+
+    /// 64-bit FNV-1a over a byte slice. Self-contained so the baseline guard
+    /// adds no dependency.
+    fn fnv1a64(bytes: &[u8]) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for &b in bytes {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h
+    }
+
+    /// Deterministic gradient I420 frame covering a wide YUV range.
+    fn gradient_i420(w: u32, h: u32) -> I420Frame {
+        let (wu, hu) = (w as usize, h as usize);
+        let mut y = vec![0u8; wu * hu];
+        for j in 0..hu {
+            for i in 0..wu {
+                y[j * wu + i] = ((i.wrapping_mul(5)).wrapping_add(j.wrapping_mul(3))) as u8;
+            }
+        }
+        let cw = wu / 2;
+        let ch = hu / 2;
+        let mut u = vec![0u8; cw * ch];
+        let mut v = vec![0u8; cw * ch];
+        for j in 0..ch {
+            for i in 0..cw {
+                u[j * cw + i] = (i.wrapping_mul(7)) as u8;
+                v[j * cw + i] = (j.wrapping_mul(11)) as u8;
+            }
+        }
+        I420Frame {
+            width: w,
+            height: h,
+            y,
+            u,
+            v,
+            stride_y: w,
+            stride_uv: w / 2,
+        }
+    }
+
+    #[test]
+    fn i420_to_bgra_gradient_golden_digest() {
+        let frame = gradient_i420(64, 64);
+        let mut out = vec![0u8; 64 * 64 * 4];
+        i420_to_bgra(&frame, &mut out);
+        let digest = fnv1a64(&out);
+        const GOLDEN: u64 = 0xe113_1b22_fd54_6e98;
+        assert_eq!(
+            digest, GOLDEN,
+            "i420_to_bgra gradient digest changed: got {digest:#018x} (update GOLDEN if intentional)"
+        );
+    }
 }

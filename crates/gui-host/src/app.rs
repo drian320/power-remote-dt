@@ -454,7 +454,7 @@ impl HostApp {
         ui.horizontal(|ui| {
             ui.code(&self.pubkey_b64);
             if ui.button(t!("common-button-copy")).clicked() {
-                ui.output_mut(|o| o.copied_text = self.pubkey_b64.clone());
+                ui.ctx().copy_text(self.pubkey_b64.clone());
             }
         });
         if let Some(qr) = &self.qr_handle {

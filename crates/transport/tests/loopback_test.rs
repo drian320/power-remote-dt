@@ -8,7 +8,7 @@ fn make_frame(seq: u64, size: usize) -> EncodedFrame {
     EncodedFrame {
         seq,
         timestamp_host_us: seq * 1000,
-        is_keyframe: seq % 60 == 0,
+        is_keyframe: seq.is_multiple_of(60),
         nal_units: Bytes::from(vec![(seq as u8).wrapping_mul(7); size]),
         width: 1920,
         height: 1080,

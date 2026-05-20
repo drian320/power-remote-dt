@@ -216,7 +216,7 @@ fn language_dropdown(ui: &mut egui::Ui, current: &mut String) {
         current.clone()
     };
 
-    egui::ComboBox::from_id_source("settings-language-combo")
+    egui::ComboBox::from_id_salt("settings-language-combo")
         .selected_text(label)
         .show_ui(ui, |ui| {
             ui.selectable_value(current, String::new(), t!("settings-language-auto"));

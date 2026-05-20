@@ -13,9 +13,12 @@ const JP_FONT: &[u8] = include_bytes!("../assets/NotoSansJP-Reduced.ttf");
 /// while ASCII keeps egui's default look.
 pub fn install_jp_font(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
-    fonts
-        .font_data
-        .insert("noto_jp".into(), FontData::from_static(JP_FONT));
+    // egui 0.32: font_data values are Arc<FontData> so definitions can be
+    // shared cheaply across contexts.
+    fonts.font_data.insert(
+        "noto_jp".into(),
+        std::sync::Arc::new(FontData::from_static(JP_FONT)),
+    );
 
     fonts
         .families
