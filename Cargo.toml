@@ -82,15 +82,19 @@ md-5 = "0.10"
 rusqlite = { version = "0.31", features = ["bundled"] }
 
 # GUI (Phase 4 G1; GUI modernization P1: egui 0.28→0.32).
-# Renderer: glow (OpenGL), which is eframe 0.32's default and works on every
-# target without extra setup. We previously tried the wgpu renderer, but
-# eframe gates the wgpu *backends* (vulkan/gl/dx12/metal) behind
-# `egui-wgpu?/default`, which lives in eframe's `default` feature set — and we
-# build with `default-features = false`. That shipped a wgpu instance with no
-# backend enabled, so the launcher aborted at startup with "No wgpu backend
-# feature ... was enabled" on Windows and Linux. glow has no such footgun. The
-# viewer's in-session GPU path keeps its own (correctly-featured) wgpu dep.
-eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow", "wayland"] }
+# Renderer: wgpu (Vulkan/DX12), forced via NativeOptions.renderer at each
+# entry point. We keep eframe's DEFAULT features on purpose — they pull
+# `egui-wgpu?/default` (which enables the wgpu vulkan/gl/dx12/metal backends)
+# plus the `x11` winit backend. History of two dead ends:
+#   1. `default-features = false, features = ["wgpu"]` shipped a wgpu instance
+#      with NO backend → abort "No wgpu backend feature ... was enabled".
+#   2. glow renderer fails on Wayland (COSMIC): glutin "Found no configs /
+#      provided display handle is not supported".
+# wgpu/Vulkan is the reliable path on Wayland (it became eframe's own default
+# in 0.34). default features give us the backends; we force Renderer::Wgpu so
+# eframe doesn't pick the (Wayland-broken) glow path that `default` also
+# compiles in.
+eframe = { version = "0.32", features = ["wgpu"] }
 egui = "0.32"
 qrcode = "0.14"
 rfd = "0.17"
