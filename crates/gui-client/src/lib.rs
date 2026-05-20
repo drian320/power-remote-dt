@@ -11,7 +11,7 @@ mod app;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use prdt_gui_common::{install_jp_font, Config};
+use prdt_gui_common::{install_theme, Config};
 
 /// Run the unified client GUI as a blocking call. Returns when the user
 /// closes the window. Cross-platform as of GUI modernization P2 (Linux +
@@ -45,7 +45,7 @@ pub fn run_client_gui(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         "Power Remote Desktop",
         options,
         Box::new(move |cc| {
-            install_jp_font(&cc.egui_ctx);
+            install_theme(&cc.egui_ctx);
             Ok(Box::new(app::ClientApp::new(cfg, path, rt_handle)))
         }),
     )
