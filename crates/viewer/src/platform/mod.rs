@@ -53,6 +53,8 @@ pub use win::{
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "linux")]
+pub mod linux_wgpu;
+#[cfg(target_os = "linux")]
 #[allow(unused_imports)] // virtual_desktop_rect is reserved for L2 multi-monitor work
 pub use linux::{
     build_consumer, build_render, clipboard_sequence_number, present_frame, read_clipboard_text,

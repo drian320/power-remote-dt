@@ -105,10 +105,22 @@ pub enum PlatformConsumer {
     },
 }
 
-/// Per-OS render state. Wraps softbuffer's Surface + a scratch BGRA
-/// buffer used by `present_frame` to convert I420 → BGRA before
-/// blitting into the surface's `&mut [u32]` framebuffer.
-pub struct PlatformRender {
+/// Per-OS render state. P3 turns this into a two-backend enum: the
+/// historical softbuffer CPU presenter (DEFAULT) and an opt-in wgpu GPU
+/// presenter selected via `PRDT_LINUX_RENDERER=wgpu`. The public name,
+/// the `window()` accessor and the free-function API (`build_render`,
+/// `present_frame`, `resize_renderer`) are preserved so lib.rs call
+/// sites are untouched.
+pub enum PlatformRender {
+    Softbuffer(SoftbufferRender),
+    Wgpu(Box<crate::platform::linux_wgpu::WgpuRender>),
+}
+
+/// softbuffer CPU presenter. Wraps softbuffer's Surface + a scratch BGRA
+/// buffer used to convert I420/NV12/P010 → BGRA before blitting into the
+/// surface's `&mut [u32]` framebuffer. This is the pre-P3 `PlatformRender`
+/// struct, moved here verbatim.
+pub struct SoftbufferRender {
     window: Arc<Window>,
     // softbuffer 0.4 Surface is generic over (D, W) where D:
     // HasDisplayHandle and W: HasWindowHandle. Arc<Window> satisfies
@@ -126,16 +138,49 @@ impl PlatformRender {
     /// `request_redraw`, `set_title`, `inner_size`, etc., without leaking
     /// the platform-specific render-state internals.
     pub fn window(&self) -> &Window {
-        &self.window
+        match self {
+            PlatformRender::Softbuffer(r) => &r.window,
+            PlatformRender::Wgpu(r) => r.window(),
+        }
     }
 }
 
 /// Build the Linux render state. Called by lib.rs in `resumed()`.
+///
+/// Backend selection: when `PRDT_LINUX_RENDERER=wgpu` we try the GPU
+/// presenter and, on any init error, log a warning and fall back to
+/// softbuffer. With no env var (or any other value) softbuffer is the
+/// default, so the build works on machines/CI without a working wgpu
+/// surface.
 pub fn build_render(
     window: Arc<Window>,
     width: u32,
     height: u32,
 ) -> Result<PlatformRender, super::RenderError> {
+    if std::env::var("PRDT_LINUX_RENDERER").as_deref() == Ok("wgpu") {
+        match crate::platform::linux_wgpu::WgpuRender::new(Arc::clone(&window), width, height) {
+            Ok(r) => {
+                tracing::info!(target: "video.pipeline", renderer = "wgpu", "Linux GPU presenter active");
+                return Ok(PlatformRender::Wgpu(Box::new(r)));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "video.pipeline",
+                    error = %e,
+                    "PRDT_LINUX_RENDERER=wgpu requested but wgpu init failed; falling back to softbuffer"
+                );
+            }
+        }
+    }
+    build_softbuffer_render(window, width, height).map(PlatformRender::Softbuffer)
+}
+
+/// Build the softbuffer CPU render state (pre-P3 `build_render` body).
+fn build_softbuffer_render(
+    window: Arc<Window>,
+    width: u32,
+    height: u32,
+) -> Result<SoftbufferRender, super::RenderError> {
     let ctx = softbuffer::Context::new(Arc::clone(&window))
         .map_err(|e| super::RenderError::Init(format!("softbuffer::Context::new: {e}")))?;
     let mut surface = softbuffer::Surface::new(&ctx, Arc::clone(&window))
@@ -159,7 +204,7 @@ pub fn build_render(
         buf.present()
             .map_err(|e| super::RenderError::Init(format!("initial present: {e}")))?;
     }
-    Ok(PlatformRender {
+    Ok(SoftbufferRender {
         window,
         _ctx: ctx,
         surface,
@@ -505,6 +550,19 @@ fn resolve_auto_decode_hevc_main10() -> &'static str {
 pub fn present_frame(
     r: &mut PlatformRender,
     f: &PlatformFrame,
+    decoder_label: &str,
+    shared: &crate::ViewerShared,
+) -> Result<(), super::RenderError> {
+    match r {
+        PlatformRender::Softbuffer(sb) => present_frame_softbuffer(sb, f, decoder_label, shared),
+        PlatformRender::Wgpu(w) => w.present_frame(f, shared),
+    }
+}
+
+/// softbuffer present path (pre-P3 `present_frame` body, byte-for-byte).
+fn present_frame_softbuffer(
+    r: &mut SoftbufferRender,
+    f: &PlatformFrame,
     _decoder_label: &str,
     shared: &crate::ViewerShared,
 ) -> Result<(), super::RenderError> {
@@ -565,7 +623,7 @@ pub fn present_frame(
 /// dimensions change. Extracted from the pre-P2 `present_frame` body so
 /// both the I420 and NV12 arms can share the path.
 fn resize_surface_if_needed(
-    r: &mut PlatformRender,
+    r: &mut SoftbufferRender,
     stream_w: u32,
     stream_h: u32,
 ) -> Result<(), super::RenderError> {
@@ -585,7 +643,7 @@ fn resize_surface_if_needed(
 /// briefly take the cursor lock, copy out the values we need, then drop
 /// the lock before the blend so we don't hold it across the CPU op.
 fn composite_cursor(
-    r: &mut PlatformRender,
+    r: &mut SoftbufferRender,
     shared: &crate::ViewerShared,
     stream_w: u32,
     stream_h: u32,
@@ -615,7 +673,7 @@ fn composite_cursor(
 }
 
 /// Blit `r.scratch_bgra` into the softbuffer surface and present.
-fn blit_scratch_to_surface(r: &mut PlatformRender) -> Result<(), super::RenderError> {
+fn blit_scratch_to_surface(r: &mut SoftbufferRender) -> Result<(), super::RenderError> {
     let mut buf = r
         .surface
         .buffer_mut()
@@ -815,12 +873,17 @@ fn alpha_blend_bgra(
 
 /// Resize the renderer. softbuffer auto-resizes on the next
 /// `present_frame` based on stream size, so window-resize events are
-/// no-ops here (kept for API symmetry with Windows).
+/// no-ops there (kept for API symmetry with Windows). The wgpu backend
+/// reconfigures its surface to the new window size.
 pub fn resize_renderer(
-    _r: &mut PlatformRender,
-    _width: u32,
-    _height: u32,
+    r: &mut PlatformRender,
+    width: u32,
+    height: u32,
 ) -> Result<(), super::RenderError> {
+    match r {
+        PlatformRender::Softbuffer(_) => {}
+        PlatformRender::Wgpu(w) => w.resize(width, height),
+    }
     Ok(())
 }
 

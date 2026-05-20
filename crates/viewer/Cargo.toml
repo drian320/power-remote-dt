@@ -49,6 +49,11 @@ prdt-input-linux = { path = "../input-linux" }
 prdt-media-sw = { path = "../media-sw" }
 softbuffer = "0.4"
 bytemuck = "1"
+# P3 — opt-in wgpu GPU presenter. Pinned to the same major.minor that
+# eframe 0.32 / prdt-gui-common already lock so the workspace unifies to a
+# single wgpu version (Cargo.lock resolves wgpu 25.0.x).
+wgpu = "25"
+pollster = "0.4"
 serde = { workspace = true }
 serde_json = { workspace = true }
 dirs = { workspace = true }
