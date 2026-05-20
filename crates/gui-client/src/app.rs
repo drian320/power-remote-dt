@@ -371,7 +371,7 @@ impl ClientApp {
                             .interactive(false),
                     );
                     if ui.button("Copy").clicked() {
-                        ui.output_mut(|o| o.copied_text = pk.clone());
+                        ui.ctx().copy_text(pk.clone());
                     }
                 });
             }
@@ -459,7 +459,7 @@ impl ClientApp {
 
         ui.add_space(4.0);
         ui.label("Codec");
-        egui::ComboBox::from_id_source("connect-codec-combo")
+        egui::ComboBox::from_id_salt("connect-codec-combo")
             .selected_text(&self.peer_codec)
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.peer_codec, "auto".to_string(), "auto");
@@ -469,7 +469,7 @@ impl ClientApp {
 
         ui.add_space(4.0);
         ui.label("Decoder");
-        egui::ComboBox::from_id_source("connect-decoder-combo")
+        egui::ComboBox::from_id_salt("connect-decoder-combo")
             .selected_text(&self.peer_decoder)
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.peer_decoder, "auto".to_string(), "auto");

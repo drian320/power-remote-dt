@@ -36,6 +36,10 @@ pub fn generate(text: &str, scale: usize) -> Result<ColorImage, QrError> {
     }
     Ok(ColorImage {
         size: [pixel_w, pixel_w],
+        // egui 0.32: ColorImage tracks the original (pre-scale) source size
+        // for DPI-aware sampling. Our QR pixels ARE the final raster, so
+        // source_size == size.
+        source_size: egui::Vec2::new(pixel_w as f32, pixel_w as f32),
         pixels,
     })
 }
