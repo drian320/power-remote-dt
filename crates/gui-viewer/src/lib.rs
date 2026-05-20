@@ -9,7 +9,7 @@ mod settings;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use prdt_gui_common::{install_jp_font, Config};
+use prdt_gui_common::{install_theme, Config};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConnectMode {
@@ -67,7 +67,7 @@ pub fn run_viewer_launcher(config_path: Option<PathBuf>) -> anyhow::Result<Launc
         &title,
         options,
         Box::new(move |cc| {
-            install_jp_font(&cc.egui_ctx);
+            install_theme(&cc.egui_ctx);
             Ok(Box::new(app::LauncherApp::new(cfg, path, out)))
         }),
     )

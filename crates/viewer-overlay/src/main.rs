@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use prdt_gui_common::install_jp_font;
+use prdt_gui_common::install_theme;
 
 mod app;
 mod ipc;
@@ -50,7 +50,7 @@ fn main() -> anyhow::Result<()> {
         &prdt_gui_common::tr("overlay-window-title"),
         options,
         Box::new(move |cc| {
-            install_jp_font(&cc.egui_ctx);
+            install_theme(&cc.egui_ctx);
             Ok(Box::new(app::OverlayApp::new(ipc_dir)))
         }),
     )

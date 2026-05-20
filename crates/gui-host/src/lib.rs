@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use consent_channel::ConsentSender;
-use prdt_gui_common::{install_jp_font, Config, TailLayer};
+use prdt_gui_common::{install_theme, Config, TailLayer};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -103,7 +103,7 @@ pub fn run_host_gui(
         &title,
         options,
         Box::new(move |cc| {
-            install_jp_font(&cc.egui_ctx);
+            install_theme(&cc.egui_ctx);
             Ok(Box::new(app::HostApp::new(
                 cfg,
                 path,

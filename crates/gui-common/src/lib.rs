@@ -8,6 +8,7 @@ pub mod log_tail;
 pub mod paths;
 pub mod qr;
 pub mod style;
+pub mod theme;
 
 pub use auth_config::{AuthMode, HostAuthConfig, HostAuthConfigError};
 pub use config::{Config, ConfigError, GuiConfig, HostConfig, HostEntry, ViewerConfig};
@@ -23,3 +24,4 @@ pub use log_tail::{TailHandle, TailLayer};
 pub use paths::{config_root, default_config_path};
 pub use qr::generate as generate_qr;
 pub use style::install_jp_font;
+pub use theme::{apply_theme, install_theme};
