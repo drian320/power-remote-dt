@@ -81,8 +81,16 @@ md-5 = "0.10"
 # Persistence
 rusqlite = { version = "0.31", features = ["bundled"] }
 
-# GUI (Phase 4 G1; GUI modernization P1: 0.28→0.32, glow→wgpu backend)
-eframe = { version = "0.32", default-features = false, features = ["default_fonts", "wgpu", "wayland"] }
+# GUI (Phase 4 G1; GUI modernization P1: egui 0.28→0.32).
+# Renderer: glow (OpenGL), which is eframe 0.32's default and works on every
+# target without extra setup. We previously tried the wgpu renderer, but
+# eframe gates the wgpu *backends* (vulkan/gl/dx12/metal) behind
+# `egui-wgpu?/default`, which lives in eframe's `default` feature set — and we
+# build with `default-features = false`. That shipped a wgpu instance with no
+# backend enabled, so the launcher aborted at startup with "No wgpu backend
+# feature ... was enabled" on Windows and Linux. glow has no such footgun. The
+# viewer's in-session GPU path keeps its own (correctly-featured) wgpu dep.
+eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow", "wayland"] }
 egui = "0.32"
 qrcode = "0.14"
 rfd = "0.17"
