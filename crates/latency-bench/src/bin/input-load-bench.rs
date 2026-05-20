@@ -155,7 +155,7 @@ async fn run_one_config(cfg: &Cfg) -> RunStats {
                 let frame = EncodedFrame {
                     seq,
                     timestamp_host_us: now_monotonic_us(),
-                    is_keyframe: seq % 30 == 0,
+                    is_keyframe: seq.is_multiple_of(30),
                     nal_units: Bytes::from(vec![0u8; frame_bytes]),
                     width: 1920,
                     height: 1080,

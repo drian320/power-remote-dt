@@ -163,7 +163,7 @@ async fn main() -> anyhow::Result<()> {
             let frame = EncodedFrame {
                 seq,
                 timestamp_host_us: now_monotonic_us(),
-                is_keyframe: seq % 60 == 0,
+                is_keyframe: seq.is_multiple_of(60),
                 nal_units: synthetic_bytes(frame_bytes),
                 width: w,
                 height: h,
