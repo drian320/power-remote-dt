@@ -1,19 +1,24 @@
-//! Unified client app: "This Device" + "Connect" tabs in one egui window.
+//! Unified client app: a left nav rail (Home / Settings / Logs) in one egui
+//! window. Home is a split dashboard (share-this-device + connect-to-a-device);
+//! Settings is the full persisted-config surface; Logs is a placeholder.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use clap::Parser as _;
-use prdt_gui_common::auth_config::HostAuthConfig;
+use prdt_gui_common::auth_config::{AuthMode, HostAuthConfig};
+use prdt_gui_common::theme::tokens;
 use prdt_gui_common::Config;
 use tokio::runtime;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
+/// Left-nav route. Replaces the old top tab bar.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Tab {
-    ThisDevice,
-    Connect,
+enum View {
+    Home,
+    Settings,
+    Logs,
 }
 
 struct PendingPrompt {
@@ -23,11 +28,10 @@ struct PendingPrompt {
 
 pub struct ClientApp {
     cfg: Arc<Mutex<Config>>,
-    #[allow(dead_code)] // wired in PR3.5+ when the GUI persists user edits
     config_path: PathBuf,
     rt_handle: runtime::Handle,
 
-    tab: Tab,
+    view: View,
 
     // This Device
     pubkey_b64: Option<String>,
@@ -54,6 +58,22 @@ pub struct ClientApp {
     /// Host-auth config (default permissions, consent timeout). Loaded from
     /// host-auth.toml at startup; used to initialise each consent prompt.
     host_auth: HostAuthConfig,
+    /// Path to host-auth.toml (sibling of `config_path`). Persisted on Save.
+    host_auth_path: PathBuf,
+
+    /// Working copies edited by the Settings view; persisted to disk (and into
+    /// the live `cfg`/`host_auth`) only when Save is clicked.
+    settings_draft: SettingsDraft,
+    /// One-shot confirmation line shown under the Settings Save button.
+    settings_status: Option<String>,
+}
+
+/// Editable mirror of the persisted config, used by the Settings view so that
+/// in-progress edits do not touch the live `cfg` mutex (which the listener
+/// path reads) until the user explicitly saves.
+struct SettingsDraft {
+    config: Config,
+    host_auth: HostAuthConfig,
 }
 
 struct ListenerState {
@@ -74,18 +94,23 @@ impl ClientApp {
             .unwrap_or_else(|| PathBuf::from("host-auth.toml"));
         let host_auth = HostAuthConfig::load_or_default(&host_auth_path).unwrap_or_default();
 
-        let (peer_codec, peer_decoder) = {
+        let (peer_codec, peer_decoder, config_snapshot) = {
             let cfg_guard = cfg.lock().unwrap();
             (
                 cfg_guard.viewer.codec.clone(),
                 cfg_guard.viewer.decoder.clone(),
+                cfg_guard.clone(),
             )
+        };
+        let settings_draft = SettingsDraft {
+            config: config_snapshot,
+            host_auth: host_auth.clone(),
         };
         let mut app = Self {
             cfg,
             config_path,
             rt_handle,
-            tab: Tab::ThisDevice,
+            view: View::Home,
             pubkey_b64: None,
             pubkey_load_error: None,
             listener: None,
@@ -98,6 +123,9 @@ impl ClientApp {
             consent_rx: None,
             pending_consent: None,
             host_auth,
+            host_auth_path,
+            settings_draft,
+            settings_status: None,
         };
         app.refresh_pubkey();
         app
@@ -305,6 +333,32 @@ impl ClientApp {
             }
         }
     }
+
+    /// Persist the Settings working copy to disk and into the live state.
+    /// Updates `self.cfg` in place (under the mutex) without holding it across
+    /// the disk write, so the listener path is never blocked.
+    fn save_settings(&mut self) {
+        // Mirror codec/decoder edits into the Connect view fields so they stay
+        // in sync with what was just persisted.
+        self.peer_codec = self.settings_draft.config.viewer.codec.clone();
+        self.peer_decoder = self.settings_draft.config.viewer.decoder.clone();
+
+        let cfg_snapshot = self.settings_draft.config.clone();
+        {
+            let mut guard = self.cfg.lock().unwrap();
+            *guard = cfg_snapshot.clone();
+        }
+        self.host_auth = self.settings_draft.host_auth.clone();
+
+        let cfg_err = cfg_snapshot.save(&self.config_path).err();
+        let auth_err = self.host_auth.save(&self.host_auth_path).err();
+
+        self.settings_status = Some(match (cfg_err, auth_err) {
+            (None, None) => "saved".to_string(),
+            (Some(e), _) => format!("save failed (config): {e}"),
+            (_, Some(e)) => format!("save failed (host-auth): {e}"),
+        });
+    }
 }
 
 impl eframe::App for ClientApp {
@@ -324,23 +378,24 @@ impl eframe::App for ClientApp {
             self.refresh_pubkey();
         }
 
-        // Draw the consent dialog (if any) before tabs so it sits over
-        // both. Pulls one request off the channel when idle; subsequent
+        // Draw the consent dialog (if any) before the panels so it sits over
+        // every view. Pulls one request off the channel when idle; subsequent
         // requests stay buffered in the unbounded channel and surface in
         // arrival order as each dialog is dismissed.
         self.poll_consent_channel();
         self.draw_consent_dialog(ctx);
 
-        egui::TopBottomPanel::top("client_tabs").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.tab, Tab::ThisDevice, "This Device");
-                ui.selectable_value(&mut self.tab, Tab::Connect, "Connect");
+        egui::SidePanel::left("client_nav")
+            .resizable(false)
+            .exact_width(140.0)
+            .show(ctx, |ui| {
+                self.draw_nav(ui);
             });
-        });
 
-        egui::CentralPanel::default().show(ctx, |ui| match self.tab {
-            Tab::ThisDevice => self.draw_this_device(ui),
-            Tab::Connect => self.draw_connect(ui),
+        egui::CentralPanel::default().show(ctx, |ui| match self.view {
+            View::Home => self.draw_home(ui),
+            View::Settings => self.draw_settings(ui),
+            View::Logs => self.draw_logs(ui),
         });
 
         // Repaint cadence: 100ms while polling for first pubkey (snappy
@@ -356,27 +411,72 @@ impl eframe::App for ClientApp {
 }
 
 impl ClientApp {
-    fn draw_this_device(&mut self, ui: &mut egui::Ui) {
-        ui.heading("This Device");
+    fn draw_nav(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(8.0);
+        ui.heading("prdt");
+        ui.add_space(12.0);
+        self.nav_entry(ui, View::Home, "Home");
+        self.nav_entry(ui, View::Settings, "Settings");
+        self.nav_entry(ui, View::Logs, "Logs");
+    }
+
+    /// A full-width selectable nav entry. The active route is highlighted with
+    /// the accent fill so it reads as the current location.
+    fn nav_entry(&mut self, ui: &mut egui::Ui, view: View, label: &str) {
+        let selected = self.view == view;
+        let mut button = egui::Button::new(label).min_size(egui::vec2(ui.available_width(), 0.0));
+        if selected {
+            button = button.fill(tokens::ACCENT).stroke(egui::Stroke::NONE);
+        }
+        let resp = ui.add(button);
+        if selected {
+            // Accent fill is bright cyan; paint the label in dark text on top
+            // for legibility.
+            ui.painter().text(
+                resp.rect.center(),
+                egui::Align2::CENTER_CENTER,
+                label,
+                egui::FontId::proportional(14.0),
+                tokens::BG_DEEP,
+            );
+        }
+        if resp.clicked() {
+            self.view = view;
+        }
+    }
+
+    fn draw_home(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Home");
+        ui.add_space(8.0);
+        ui.columns(2, |cols| {
+            egui::Frame::group(cols[0].style()).show(&mut cols[0], |ui| {
+                self.draw_share_device(ui);
+            });
+            egui::Frame::group(cols[1].style()).show(&mut cols[1], |ui| {
+                self.draw_connect(ui);
+            });
+        });
+    }
+
+    fn draw_share_device(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Share this device");
         ui.add_space(6.0);
 
-        // Pubkey block
+        // Pubkey block: monospace, grouped in 4-char chunks for legibility.
         match (&self.pubkey_b64, &self.pubkey_load_error) {
             (Some(pk), _) => {
-                ui.horizontal(|ui| {
-                    ui.label("Pubkey:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut pk.clone())
-                            .desired_width(420.0)
-                            .interactive(false),
-                    );
-                    if ui.button("Copy").clicked() {
-                        ui.ctx().copy_text(pk.clone());
-                    }
-                });
+                ui.label("Pubkey");
+                ui.label(
+                    egui::RichText::new(group_in_chunks(pk, 4))
+                        .monospace()
+                        .color(tokens::TEXT),
+                );
+                if ui.button("Copy").clicked() {
+                    ui.ctx().copy_text(pk.clone());
+                }
             }
             (None, Some(err)) => {
-                ui.colored_label(egui::Color32::LIGHT_RED, err);
+                ui.colored_label(tokens::DESTRUCTIVE, err);
             }
             (None, None) => {
                 ui.label(
@@ -389,20 +489,26 @@ impl ClientApp {
         ui.separator();
         ui.add_space(6.0);
 
-        // Listener controls
+        // Listener controls with a colored status dot.
         let listening = self.is_listening();
         ui.horizontal(|ui| {
             if listening {
-                ui.colored_label(egui::Color32::LIGHT_GREEN, "\u{25cf} Listening");
+                ui.colored_label(tokens::OK, "\u{25cf}");
+                ui.label("Listening");
+            } else {
+                ui.colored_label(tokens::TEXT_DIM, "\u{25cb}");
+                ui.label("Idle");
+            }
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if listening {
                 if ui.button("Stop Listener").clicked() {
                     self.stop_listener();
                 }
-            } else {
-                ui.colored_label(egui::Color32::GRAY, "\u{25cb} Idle");
-                if ui.button("Start Listener").clicked() {
-                    self.start_listener();
-                    self.refresh_pubkey();
-                }
+            } else if ui.button("Start Listener").clicked() {
+                self.start_listener();
+                self.refresh_pubkey();
             }
             if ui.button("Refresh Pubkey").clicked() {
                 self.refresh_pubkey();
@@ -416,7 +522,7 @@ impl ClientApp {
                 || status.starts_with("cannot start")
                 || status.starts_with("invalid host args")
             {
-                ui.colored_label(egui::Color32::LIGHT_RED, status);
+                ui.colored_label(tokens::DESTRUCTIVE, status);
             } else {
                 ui.label(status);
             }
@@ -447,7 +553,7 @@ impl ClientApp {
     }
 
     fn draw_connect(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Connect");
+        ui.heading("Connect to a device");
         ui.add_space(6.0);
 
         ui.label("Peer host:port (direct mode)");
@@ -479,19 +585,264 @@ impl ClientApp {
             });
 
         ui.add_space(8.0);
-        if ui.button("Connect").clicked() {
+        // Prominent accent-filled primary action.
+        let connect = egui::Button::new(egui::RichText::new("Connect").color(tokens::BG_DEEP))
+            .fill(tokens::ACCENT);
+        if ui.add(connect).clicked() {
             self.spawn_connect();
         }
 
         if let Some(status) = &self.connect_status {
             ui.add_space(8.0);
             if status.starts_with("spawn failed") || status.starts_with("current_exe") {
-                ui.colored_label(egui::Color32::LIGHT_RED, status);
+                ui.colored_label(tokens::DESTRUCTIVE, status);
             } else {
                 ui.label(status);
             }
         }
     }
+
+    fn draw_settings(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Settings");
+        ui.add_space(8.0);
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            let d = &mut self.settings_draft;
+
+            // General
+            ui.group(|ui| {
+                ui.heading("General");
+                ui.add_space(4.0);
+                ui.label("Locale");
+                egui::ComboBox::from_id_salt("set-locale")
+                    .selected_text(locale_label(&d.config.gui.locale))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut d.config.gui.locale, String::new(), "auto");
+                        ui.selectable_value(&mut d.config.gui.locale, "en".to_string(), "en");
+                        ui.selectable_value(&mut d.config.gui.locale, "ja".to_string(), "ja");
+                    });
+                ui.checkbox(&mut d.config.host.auto_start, "Auto-start host on launch");
+            });
+
+            // Network
+            ui.add_space(6.0);
+            ui.group(|ui| {
+                ui.heading("Network");
+                ui.add_space(4.0);
+                labeled_text(ui, "Host bind", &mut d.config.host.bind);
+                labeled_text(ui, "Host signaling URL", &mut d.config.host.signaling_url);
+                labeled_path(ui, "Host ID file", &mut d.config.host.host_id_file);
+                labeled_text(
+                    ui,
+                    "Viewer signaling URL",
+                    &mut d.config.viewer.signaling_url,
+                );
+                labeled_path(ui, "Known hosts", &mut d.config.viewer.known_hosts);
+                labeled_path(ui, "Known host IDs", &mut d.config.viewer.known_host_ids);
+            });
+
+            // Video — Host
+            ui.add_space(6.0);
+            ui.group(|ui| {
+                ui.heading("Video \u{2014} Host");
+                ui.add_space(4.0);
+                ui.label("Encoder");
+                egui::ComboBox::from_id_salt("set-encoder")
+                    .selected_text(&d.config.host.encoder)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut d.config.host.encoder, "auto".to_string(), "auto");
+                        ui.selectable_value(
+                            &mut d.config.host.encoder,
+                            "nvenc".to_string(),
+                            "nvenc",
+                        );
+                        ui.selectable_value(&mut d.config.host.encoder, "mf".to_string(), "mf");
+                    });
+                labeled_drag_u32(ui, "Bitrate (Mbps)", &mut d.config.host.bitrate_mbps);
+                labeled_drag_u32(ui, "Monitor index", &mut d.config.host.monitor);
+            });
+
+            // Video — Viewer
+            ui.add_space(6.0);
+            ui.group(|ui| {
+                ui.heading("Video \u{2014} Viewer");
+                ui.add_space(4.0);
+                ui.label("Decoder");
+                egui::ComboBox::from_id_salt("set-decoder")
+                    .selected_text(&d.config.viewer.decoder)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut d.config.viewer.decoder,
+                            "auto".to_string(),
+                            "auto",
+                        );
+                        ui.selectable_value(
+                            &mut d.config.viewer.decoder,
+                            "nvdec".to_string(),
+                            "nvdec",
+                        );
+                        ui.selectable_value(&mut d.config.viewer.decoder, "mf".to_string(), "mf");
+                        ui.selectable_value(
+                            &mut d.config.viewer.decoder,
+                            "openh264".to_string(),
+                            "openh264",
+                        );
+                    });
+                ui.label("Codec");
+                egui::ComboBox::from_id_salt("set-codec")
+                    .selected_text(&d.config.viewer.codec)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut d.config.viewer.codec, "auto".to_string(), "auto");
+                        ui.selectable_value(&mut d.config.viewer.codec, "h264".to_string(), "h264");
+                        ui.selectable_value(&mut d.config.viewer.codec, "h265".to_string(), "h265");
+                    });
+                labeled_text(
+                    ui,
+                    "Default resolution",
+                    &mut d.config.viewer.default_resolution,
+                );
+                labeled_drag_u32(ui, "Default FPS", &mut d.config.viewer.default_fps);
+            });
+
+            // Paths
+            ui.add_space(6.0);
+            ui.group(|ui| {
+                ui.heading("Paths");
+                ui.add_space(4.0);
+                labeled_path(ui, "Host key file", &mut d.config.host.key_file);
+                labeled_path(ui, "Host outgoing dir", &mut d.config.host.outgoing_dir);
+                labeled_path(ui, "Viewer receive dir", &mut d.config.viewer.recv_dir);
+            });
+
+            // Security
+            ui.add_space(6.0);
+            ui.group(|ui| {
+                ui.heading("Security");
+                ui.add_space(4.0);
+                ui.label("Auth mode");
+                egui::ComboBox::from_id_salt("set-auth-mode")
+                    .selected_text(auth_mode_label(d.host_auth.mode))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut d.host_auth.mode, AuthMode::Tofu, "Tofu");
+                        ui.selectable_value(&mut d.host_auth.mode, AuthMode::Pin, "Pin");
+                        ui.selectable_value(
+                            &mut d.host_auth.mode,
+                            AuthMode::Ephemeral,
+                            "Ephemeral",
+                        );
+                    });
+                if d.host_auth.pin_hash.is_some() {
+                    ui.colored_label(tokens::TEXT_DIM, "A PIN is set (edit PIN out of scope).");
+                }
+                labeled_drag_u32(
+                    ui,
+                    "Consent timeout (s)",
+                    &mut d.host_auth.consent_timeout_seconds,
+                );
+                labeled_drag_u8(ui, "Max PIN attempts", &mut d.host_auth.max_pin_attempts);
+                labeled_drag_u32(ui, "PIN lockout (s)", &mut d.host_auth.pin_lockout_seconds);
+                labeled_drag_u32(
+                    ui,
+                    "Ephemeral lifetime (s)",
+                    &mut d.host_auth.ephemeral_lifetime_seconds,
+                );
+                ui.add_space(4.0);
+                ui.label("Default permissions");
+                ui.checkbox(&mut d.host_auth.default_permissions.input, "Input");
+                ui.checkbox(&mut d.host_auth.default_permissions.clipboard, "Clipboard");
+                ui.checkbox(
+                    &mut d.host_auth.default_permissions.file_transfer,
+                    "File transfer",
+                );
+                ui.checkbox(&mut d.host_auth.default_permissions.audio, "Audio");
+            });
+
+            ui.add_space(10.0);
+            if ui.button("Save").clicked() {
+                self.save_settings();
+            }
+            if let Some(status) = &self.settings_status {
+                ui.add_space(4.0);
+                if status.starts_with("save failed") {
+                    ui.colored_label(tokens::DESTRUCTIVE, status);
+                } else {
+                    ui.colored_label(tokens::OK, status);
+                }
+            }
+        });
+    }
+
+    fn draw_logs(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Logs");
+        ui.add_space(8.0);
+        ui.colored_label(
+            tokens::TEXT_DIM,
+            "Recent activity is written to stderr; in-app log tailing is not yet wired here.",
+        );
+    }
+}
+
+/// Group a string into space-separated chunks of `n` chars (e.g. base64 pubkey
+/// into 4-char blocks for readability).
+fn group_in_chunks(s: &str, n: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    chars
+        .chunks(n)
+        .map(|c| c.iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn locale_label(locale: &str) -> &str {
+    match locale {
+        "en" => "en",
+        "ja" => "ja",
+        _ => "auto",
+    }
+}
+
+fn auth_mode_label(mode: AuthMode) -> &'static str {
+    match mode {
+        AuthMode::Tofu => "Tofu",
+        AuthMode::Pin => "Pin",
+        AuthMode::Ephemeral => "Ephemeral",
+    }
+}
+
+/// A label followed by a single-line text editor on its own row.
+fn labeled_text(ui: &mut egui::Ui, label: &str, value: &mut String) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ui.add(egui::TextEdit::singleline(value).desired_width(280.0));
+    });
+}
+
+/// A label followed by a text editor bound to a `PathBuf` (edited as its
+/// lossy string form; written back verbatim).
+fn labeled_path(ui: &mut egui::Ui, label: &str, value: &mut PathBuf) {
+    let mut text = value.to_string_lossy().into_owned();
+    ui.horizontal(|ui| {
+        ui.label(label);
+        if ui
+            .add(egui::TextEdit::singleline(&mut text).desired_width(280.0))
+            .changed()
+        {
+            *value = PathBuf::from(text);
+        }
+    });
+}
+
+fn labeled_drag_u32(ui: &mut egui::Ui, label: &str, value: &mut u32) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ui.add(egui::DragValue::new(value));
+    });
+}
+
+fn labeled_drag_u8(ui: &mut egui::Ui, label: &str, value: &mut u8) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ui.add(egui::DragValue::new(value));
+    });
 }
 
 /// Free function implementing the consent-poll logic so it can be tested
@@ -580,5 +931,12 @@ mod tests {
 
         assert!(consent_rx.is_none(), "rx should be cleared on disconnect");
         assert!(pending.is_none(), "no pending prompt expected");
+    }
+
+    #[test]
+    fn group_in_chunks_splits_into_blocks() {
+        assert_eq!(group_in_chunks("A1B2C3D4", 4), "A1B2 C3D4");
+        assert_eq!(group_in_chunks("ABC", 4), "ABC");
+        assert_eq!(group_in_chunks("ABCDE", 4), "ABCD E");
     }
 }
