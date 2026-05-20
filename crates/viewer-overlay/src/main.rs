@@ -44,6 +44,8 @@ fn main() -> anyhow::Result<()> {
             .with_inner_size([360.0, 280.0])
             .with_min_inner_size([320.0, 240.0])
             .with_resizable(false),
+        // Force wgpu — glow's glutin path fails on Wayland (COSMIC).
+        renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
     eframe::run_native(

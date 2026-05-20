@@ -81,6 +81,8 @@ pub fn run_host_gui(
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([720.0, 480.0])
             .with_min_inner_size([520.0, 360.0]),
+        // Force wgpu — glow's glutin path fails on Wayland (COSMIC).
+        renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
 

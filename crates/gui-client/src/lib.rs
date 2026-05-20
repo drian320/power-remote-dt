@@ -36,6 +36,8 @@ pub fn run_client_gui(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([720.0, 520.0])
             .with_min_inner_size([520.0, 360.0]),
+        // Force wgpu — glow's glutin path fails on Wayland (COSMIC).
+        renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
 
