@@ -240,6 +240,15 @@ jobs:
           $env:PATH = "$env:FFMPEG_DLL_PATH;$env:PATH"
           cargo test -p prdt-media-win --target x86_64-pc-windows-msvc --features "media-win-hevc-main10 media-win-ffmpeg-nvdec-main10" --test hdr10_parity
 
+      # ── F-WIN-FFMPEG release-parity cell ──────────────────────────────────────
+      # The release workflow ships prdt-windows-x86_64-ffmpeg.zip built from
+      # prdt-client with the four media-win-ffmpeg-* features. CI previously only
+      # exercised these at the prdt-media-win level; this cell guards the
+      # client-level feature composition (forwarding through prdt-host +
+      # prdt-viewer + prdt-gui-client) so a release-build break is caught on PRs.
+      - name: F-WIN-FFMPEG — cargo check prdt-client with all media-win-ffmpeg features (release parity)
+        run: cargo check -p prdt-client --target x86_64-pc-windows-msvc --features media-win-ffmpeg-nvenc,media-win-ffmpeg-nvenc-main10,media-win-ffmpeg-nvdec,media-win-ffmpeg-nvdec-main10
+
   media-ffmpeg-compile:
     runs-on: ubuntu-latest
     steps:
