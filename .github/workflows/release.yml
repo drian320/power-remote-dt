@@ -123,6 +123,8 @@ jobs:
             .\prdt.exe --help
             ```
 
+            **Windows FFmpeg build (`prdt-windows-x86_64-ffmpeg.zip`)**: mirrors the Linux AppImage. The bare `prdt-windows-x86_64.exe` uses Media Foundation only (`--encoder nvenc|mf`, `--decoder nvdec|mf`); the zip bundles the exe + pinned FFmpeg DLLs and additionally accepts `--encoder ffmpeg-nvenc-hevc[-main10]` and `--decoder ffmpeg-nvdec-hevc[-main10]`. MF stays the auto-default; keep the DLLs next to `prdt.exe` after extracting. Pick the zip only if you need the FFmpeg NVENC/NVDEC HEVC paths.
+
             **Run as host** (capture + serve):
             ```bash
             ./prdt host --bind 0.0.0.0:9000 --encoder openh264 --silent-allow
@@ -353,6 +355,50 @@ jobs:
           (cd artifacts && sha256sum prdt-windows-x86_64.exe > prdt-windows-x86_64.exe.sha256)
           ls -la artifacts/
 
+      # ── FFmpeg-enabled Windows build (separate opt-in artifact) ───────────────
+      # Mirrors the Linux "bare ELF + feature-rich AppImage" split: the bare
+      # prdt-windows-x86_64.exe above stays FFmpeg-free, and this produces an
+      # additional prdt-windows-x86_64-ffmpeg.zip bundling the exe + the pinned
+      # BtbN FFmpeg DLLs. Runtime selection: --encoder ffmpeg-nvenc-hevc[-main10]
+      # / --decoder ffmpeg-nvdec-hevc[-main10] (MF stays the auto-default).
+      - name: FFmpeg — cache Windows DLLs
+        uses: actions/cache@v4
+        with:
+          path: target/windows-ffmpeg
+          key: ffmpeg-windows-${{ hashFiles('packaging/windows/ffmpeg-manifest.json') }}
+
+      - name: FFmpeg — fetch Windows DLLs
+        shell: pwsh
+        run: .\scripts\fetch-ffmpeg-windows.ps1
+
+      - name: FFmpeg — export build env vars
+        shell: pwsh
+        run: |
+          . target\windows-ffmpeg\env.ps1
+          echo "FFMPEG_DLL_PATH=$env:FFMPEG_DLL_PATH"       >> $env:GITHUB_ENV
+          echo "FFMPEG_INCLUDE_DIR=$env:FFMPEG_INCLUDE_DIR" >> $env:GITHUB_ENV
+          echo "FFMPEG_LIB_DIR=$env:FFMPEG_LIB_DIR"         >> $env:GITHUB_ENV
+
+      - name: Build prdt with FFmpeg HEVC NVENC/NVDEC (8-bit + Main10)
+        # Rebuilds prdt.exe with the media-win-ffmpeg features. The bare exe was
+        # already copied to artifacts/ above, so this overwrite only affects the
+        # FFmpeg zip staged below.
+        run: |
+          cargo build --release -p prdt-client --target x86_64-pc-windows-msvc --features media-win-ffmpeg-nvenc,media-win-ffmpeg-nvenc-main10,media-win-ffmpeg-nvdec,media-win-ffmpeg-nvdec-main10
+
+      - name: Stage FFmpeg zip artifact
+        shell: pwsh
+        run: |
+          $stage = 'artifacts/prdt-windows-x86_64-ffmpeg'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/prdt.exe "$stage/prdt.exe"
+          Copy-Item "$env:FFMPEG_DLL_PATH/*.dll" $stage
+          Compress-Archive -Path "$stage/*" -DestinationPath artifacts/prdt-windows-x86_64-ffmpeg.zip -Force
+          $hash = (Get-FileHash -Algorithm SHA256 artifacts/prdt-windows-x86_64-ffmpeg.zip).Hash.ToLower()
+          "$hash  prdt-windows-x86_64-ffmpeg.zip" | Set-Content -Encoding ASCII artifacts/prdt-windows-x86_64-ffmpeg.zip.sha256
+          Remove-Item -Recurse -Force $stage
+          Get-ChildItem artifacts
+
       - name: Upload workflow artifact (always)
         uses: actions/upload-artifact@v4
         with:
@@ -379,4 +425,6 @@ jobs:
           files: |
             artifacts/prdt-windows-x86_64.exe
             artifacts/prdt-windows-x86_64.exe.sha256
+            artifacts/prdt-windows-x86_64-ffmpeg.zip
+            artifacts/prdt-windows-x86_64-ffmpeg.zip.sha256
           fail_on_unmatched_files: true

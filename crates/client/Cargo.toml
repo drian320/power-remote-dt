@@ -69,6 +69,18 @@ media-win-hdr10 = ["prdt-viewer/media-win-hdr10"]
 # MAJOR #5).
 media-win-hevc-main10 = ["prdt-viewer/media-win-hevc-main10"]
 
+# F-WIN-FFMPEG — Windows FFmpeg HEVC encode/decode coexisting with Media
+# Foundation. Encode forwards onto prdt-host, decode onto prdt-viewer; both
+# bottom out in prdt-media-win's `media-win-ffmpeg-*` features (rusty_ffmpeg
+# Windows bindings + the ffmpeg/ module). Default OFF — selecting these at
+# build time pulls in the FFmpeg DLLs, so the lean default exe stays
+# FFmpeg-free. Runtime selection via --encoder ffmpeg-nvenc-hevc[-main10] and
+# --decoder ffmpeg-nvdec-hevc[-main10] (MF stays the auto-default).
+media-win-ffmpeg-nvenc = ["prdt-host/media-win-ffmpeg-nvenc"]
+media-win-ffmpeg-nvenc-main10 = ["prdt-host/media-win-ffmpeg-nvenc-main10"]
+media-win-ffmpeg-nvdec = ["prdt-viewer/media-win-ffmpeg-nvdec"]
+media-win-ffmpeg-nvdec-main10 = ["prdt-viewer/media-win-ffmpeg-nvdec-main10"]
+
 # P2 — HEVC decode forwarded onto prdt-host (which forwards onto
 # prdt-media-linux). The unified `prdt` binary can then be built with e.g.
 # `cargo build -p prdt-client --features ffmpeg-decode-hevc-vaapi-ffmpeg5`.
