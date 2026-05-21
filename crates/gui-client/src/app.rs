@@ -578,10 +578,9 @@ impl ClientApp {
         egui::ComboBox::from_id_salt("connect-decoder-combo")
             .selected_text(&self.peer_decoder)
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.peer_decoder, "auto".to_string(), "auto");
-                ui.selectable_value(&mut self.peer_decoder, "nvdec".to_string(), "nvdec");
-                ui.selectable_value(&mut self.peer_decoder, "mf".to_string(), "mf");
-                ui.selectable_value(&mut self.peer_decoder, "openh264".to_string(), "openh264");
+                for opt in prdt_viewer::supported_decoder_args() {
+                    ui.selectable_value(&mut self.peer_decoder, opt.to_string(), opt);
+                }
             });
 
         ui.add_space(8.0);
@@ -649,13 +648,9 @@ impl ClientApp {
                 egui::ComboBox::from_id_salt("set-encoder")
                     .selected_text(&d.config.host.encoder)
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut d.config.host.encoder, "auto".to_string(), "auto");
-                        ui.selectable_value(
-                            &mut d.config.host.encoder,
-                            "nvenc".to_string(),
-                            "nvenc",
-                        );
-                        ui.selectable_value(&mut d.config.host.encoder, "mf".to_string(), "mf");
+                        for opt in prdt_host::supported_encoder_args() {
+                            ui.selectable_value(&mut d.config.host.encoder, opt.to_string(), opt);
+                        }
                     });
                 labeled_drag_u32(ui, "Bitrate (Mbps)", &mut d.config.host.bitrate_mbps);
                 labeled_drag_u32(ui, "Monitor index", &mut d.config.host.monitor);
@@ -670,22 +665,9 @@ impl ClientApp {
                 egui::ComboBox::from_id_salt("set-decoder")
                     .selected_text(&d.config.viewer.decoder)
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut d.config.viewer.decoder,
-                            "auto".to_string(),
-                            "auto",
-                        );
-                        ui.selectable_value(
-                            &mut d.config.viewer.decoder,
-                            "nvdec".to_string(),
-                            "nvdec",
-                        );
-                        ui.selectable_value(&mut d.config.viewer.decoder, "mf".to_string(), "mf");
-                        ui.selectable_value(
-                            &mut d.config.viewer.decoder,
-                            "openh264".to_string(),
-                            "openh264",
-                        );
+                        for opt in prdt_viewer::supported_decoder_args() {
+                            ui.selectable_value(&mut d.config.viewer.decoder, opt.to_string(), opt);
+                        }
                     });
                 ui.label("Codec");
                 egui::ComboBox::from_id_salt("set-codec")

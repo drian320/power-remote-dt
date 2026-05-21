@@ -11,6 +11,53 @@ use std::sync::{Arc, Mutex};
 
 use prdt_gui_common::{install_theme, Config};
 
+/// Returns the `--decoder` argument values valid for the current build/OS so
+/// the launcher can populate its decoder dropdown without offering options
+/// that fail at dispatch (e.g. Windows-only `mf`/`nvdec` on Linux, or ffmpeg
+/// HEVC backends that were not compiled in).
+///
+/// This mirrors `prdt_viewer::supported_decoder_args`, but lives here because
+/// `prdt-viewer` depends on this crate for the Windows launcher — a direct
+/// dependency back on `prdt-viewer` would form a Cargo cycle. The ffmpeg
+/// variants are gated on this crate's `*-any` marker features (see
+/// `Cargo.toml`); the always-available native backends are unconditional.
+///
+/// Ordered `auto` first, then native backends for the target OS, then any
+/// compiled-in ffmpeg HEVC variants.
+pub fn supported_decoder_args() -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = vec!["auto"];
+
+    #[cfg(windows)]
+    {
+        out.push("nvdec");
+        out.push("mf");
+        out.push("openh264");
+        #[cfg(feature = "media-win-ffmpeg-nvdec-any")]
+        out.push("ffmpeg-nvdec-hevc");
+        #[cfg(feature = "media-win-ffmpeg-nvdec-main10-any")]
+        out.push("ffmpeg-nvdec-hevc-main10");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        out.push("openh264");
+        #[cfg(feature = "ffmpeg-decode-hevc-sw-any")]
+        out.push("ffmpeg-sw-hevc");
+        #[cfg(feature = "ffmpeg-decode-hevc-vaapi-any")]
+        out.push("ffmpeg-vaapi-hevc");
+        #[cfg(feature = "ffmpeg-decode-hevc-nvdec-any")]
+        out.push("ffmpeg-nvdec-hevc");
+        #[cfg(feature = "ffmpeg-decode-hevc-sw-main10-any")]
+        out.push("ffmpeg-sw-hevc-main10");
+        #[cfg(feature = "ffmpeg-decode-hevc-vaapi-main10-any")]
+        out.push("ffmpeg-vaapi-hevc-main10");
+        #[cfg(feature = "ffmpeg-decode-hevc-nvdec-main10-any")]
+        out.push("ffmpeg-nvdec-hevc-main10");
+    }
+
+    out
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConnectMode {
     Direct,
@@ -81,4 +128,23 @@ pub fn run_viewer_launcher(config_path: Option<PathBuf>) -> anyhow::Result<Launc
         .take()
         .unwrap_or(LaunchOutcome::Quit);
     Ok(outcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supported_decoder_args_always_contains_auto() {
+        assert!(supported_decoder_args().contains(&"auto"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn supported_decoder_args_linux_excludes_windows_only_and_includes_openh264() {
+        let args = supported_decoder_args();
+        assert!(args.contains(&"openh264"));
+        assert!(!args.contains(&"nvdec"));
+        assert!(!args.contains(&"mf"));
+    }
 }
