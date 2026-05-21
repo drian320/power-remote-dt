@@ -18,8 +18,8 @@ use prdt_media_win::MfHevcMain10Consumer;
 #[cfg(prdt_nvdec_bindings)]
 use prdt_media_win::NvdecD3d11Consumer;
 use prdt_media_win::{
-    pick_default_adapter, CpuI420Uploader, D3d11Device, D3d11Texture, MfD3d11Consumer,
-    Nv12Renderer, Nv12ShaderRenderer, SwapChain,
+    CpuI420Uploader, D3d11Device, D3d11Texture, MfD3d11Consumer, Nv12Renderer, Nv12ShaderRenderer,
+    SwapChain,
 };
 #[cfg(feature = "media-win-hdr10")]
 use prdt_media_win::{CpuP010Uploader, Nv12ShaderRendererP010};
@@ -198,11 +198,8 @@ pub fn build_render(
     window: Arc<Window>,
     width: u32,
     height: u32,
+    dev: D3d11Device,
 ) -> Result<PlatformRender, super::RenderError> {
-    let adapter = pick_default_adapter()
-        .map_err(|e| super::RenderError::Init(format!("pick_default_adapter: {e}")))?;
-    let dev = D3d11Device::create(&adapter)
-        .map_err(|e| super::RenderError::Init(format!("D3d11Device::create: {e}")))?;
     let hwnd = extract_hwnd(&window)
         .map_err(|e| super::RenderError::Init(format!("extract_hwnd: {e}")))?;
     let swap = SwapChain::new_for_hwnd(&dev, hwnd, width.max(1), height.max(1))
