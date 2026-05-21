@@ -59,13 +59,19 @@ PROTECTED: list[Union[Tuple[str, int, int], Tuple[str, str, str]]] = [
     # must stay byte-stable when copy_p010_planes (_main10 sibling) is appended
     # after it. Range is in OLD-file (master) coordinates: lines 56-83.
     ("crates/media-ffmpeg/src/decoder_common.rs", 56, 83),
-    # F8: named-region marker-anchored ranges — resolved at startup from
+    # decoder.rs frozen 8-bit core: new + process_input + process_output +
+    # process_output_texture (origin/master lines 61-449, i.e. between the
+    # `// region: 8-bit-mf-decoder` marker and the `fn renegotiate_output_type`
+    # definition). renegotiate_output_type (master 450-489) is intentionally
+    # EXCLUDED from the freeze: issue #19 Bug 4 required it to re-read
+    # MF_MT_FRAME_SIZE after SetOutputType so a 4K stream behind a 1080p decoder
+    # guess stops feeding a size-mismatched texture to
+    # CreateVideoProcessorInputView (E_INVALIDARG on every W<->W 4K frame).
+    # Switched from marker-anchored to an explicit OLD-file range to record that
+    # reviewed exception while keeping the genuinely-stable helpers protected.
+    ("crates/media-win/src/mf/decoder.rs", 61, 449),
+    # F8: named-region marker-anchored range — resolved at startup from
     # origin/master content. The marker lines themselves are NOT protected.
-    (
-        "crates/media-win/src/mf/decoder.rs",
-        "// region: 8-bit-mf-decoder",
-        "// endregion: 8-bit-mf-decoder",
-    ),
     (
         "crates/media-win/src/pipeline/consumer.rs",
         "// region: 8-bit-mf-consumer",
