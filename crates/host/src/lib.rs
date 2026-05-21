@@ -72,6 +72,13 @@ pub fn supported_encoder_args() -> Vec<&'static str> {
 
     #[cfg(windows)]
     {
+        // Native NVENC requires the NVIDIA Video Codec SDK at build time
+        // (`prdt_nvenc_bindings`, set from NV_CODEC_SDK_PATH). Release builds
+        // don't ship it, so only list `nvenc` when actually compiled in —
+        // otherwise pick_encoder bails "nvenc backend not built". HW NVENC is
+        // still reachable via the FFmpeg path (`ffmpeg-nvenc-hevc`, no SDK
+        // needed) in the prdt-windows-x86_64-ffmpeg build.
+        #[cfg(prdt_nvenc_bindings)]
         out.push("nvenc");
         out.push("mf");
         out.push("openh264");
