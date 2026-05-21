@@ -482,6 +482,37 @@ impl H265Decoder {
             self.mft
                 .SetOutputType(0, &output_type, 0)
                 .map_err(|e| MediaError::Other(format!("SetOutputType (renegotiate): {e}")))?;
+
+            // Adopt the renegotiated frame size. A real stream whose
+            // resolution differs from the constructor's guess (e.g. a 4K
+            // host when we initialised at 1080p) triggers
+            // MF_E_TRANSFORM_STREAM_CHANGE; the MFT then hands out textures
+            // sized for the *actual* stream (e.g. 3840x2176) while our cached
+            // `width`/`height` still describe the guess. `process_output_texture`
+            // stamps those stale dims onto the wrapper, so the downstream
+            // `Nv12Renderer` builds its video-processor content desc at the
+            // wrong size and `CreateVideoProcessorInputView` rejects the
+            // mismatched texture with E_INVALIDARG (issue #19 Bug 4). Re-read
+            // MF_MT_FRAME_SIZE here so the wrapper reports the true display
+            // size. The decode-alignment padding (e.g. 2160 -> 2176) is
+            // tolerated by the video processor exactly as in the steady-state
+            // 1080p path, since it keys off the content-desc dimensions.
+            if let Ok(packed) = output_type.GetUINT64(&MF_MT_FRAME_SIZE) {
+                let w = (packed >> 32) as u32;
+                let h = (packed & 0xFFFF_FFFF) as u32;
+                if w != 0 && h != 0 && (w, h) != (self.width, self.height) {
+                    tracing::info!(
+                        target: "prdt_media_win::decoder",
+                        old_width = self.width,
+                        old_height = self.height,
+                        new_width = w,
+                        new_height = h,
+                        "MF HEVC output renegotiated to new frame size"
+                    );
+                    self.width = w;
+                    self.height = h;
+                }
+            }
             Ok(())
         }
     }

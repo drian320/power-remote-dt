@@ -34,7 +34,7 @@
 
 use prdt_media_core::{Hdr10Metadata, Nv12Frame16};
 use windows::core::Interface;
-use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
+use windows::Win32::Graphics::Direct3D11::{ID3D11Texture2D, D3D11_TEXTURE2D_DESC};
 use windows::Win32::Media::MediaFoundation::{
     IMFActivate, IMFDXGIBuffer, IMFDXGIDeviceManager, IMFTransform, MFCreateDXGIDeviceManager,
     MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFTEnumEx,
@@ -609,15 +609,21 @@ impl MfHevcMain10Decoder {
 
                 // R13 mitigation: lazy-init the private pool (3 slots), then
                 // CopyResource from the MFT-owned texture into the next pool slot.
+                // Size the pool from the MFT texture's *actual* desc, not our
+                // cached display dims: CopyResource requires identical
+                // dimensions, and the MFT may hand out 16-aligned coded
+                // textures (e.g. 3840x2176 for a 3840x2160 stream).
                 let pool = match self.private_texture_pool.as_mut() {
                     Some(p) => p,
                     None => {
+                        let mut mft_desc = D3D11_TEXTURE2D_DESC::default();
+                        mft_tex.GetDesc(&mut mft_desc);
                         let mut pool = Vec::with_capacity(3);
                         for _ in 0..3 {
                             pool.push(D3d11Texture::new_default(
                                 &self._dev,
-                                self.width,
-                                self.height,
+                                mft_desc.Width,
+                                mft_desc.Height,
                                 TextureFormat::P010,
                             )?);
                         }
@@ -695,6 +701,32 @@ impl MfHevcMain10Decoder {
             self.mft
                 .SetOutputType(0, &output_type, 0)
                 .map_err(|e| MediaError::Other(format!("SetOutputType (renegotiate): {e}")))?;
+
+            // Adopt the renegotiated frame size (issue #19 Bug 4, mirror of
+            // the 8-bit path). Stale `width`/`height` here are doubly harmful
+            // on this decoder: besides the GPU `Nv12Renderer` content-desc
+            // mismatch, the P010 private-pool copy and the CPU readback
+            // (`process_output_nv12_16`) compute strides and buffer lengths
+            // from these fields, so a 4K stream behind a 1080p guess would
+            // copy/read the wrong extent.
+            if let Ok(packed) = output_type.GetUINT64(&MF_MT_FRAME_SIZE) {
+                let w = (packed >> 32) as u32;
+                let h = (packed & 0xFFFF_FFFF) as u32;
+                if w != 0 && h != 0 && (w, h) != (self.width, self.height) {
+                    tracing::info!(
+                        target: "prdt_media_win::decoder_main10",
+                        old_width = self.width,
+                        old_height = self.height,
+                        new_width = w,
+                        new_height = h,
+                        "MF HEVC Main10 output renegotiated to new frame size"
+                    );
+                    self.width = w;
+                    self.height = h;
+                    // Force the private P010 pool to be rebuilt at the new size.
+                    self.private_texture_pool = None;
+                }
+            }
 
             // C-1: re-read HDR10 metadata blobs from the new output IMFMediaType.
             // These are set by the MFT after parsing the bitstream's SEI headers.
