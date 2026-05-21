@@ -816,6 +816,15 @@ struct ViewerShared {
     /// Whether the viewer window currently has OS focus. Updated by
     /// `WindowEvent::Focused`; read by `update_os_cursor_visibility`.
     pub focused: Arc<std::sync::Mutex<bool>>,
+    /// Single D3D11 device shared between the MF decoder (which produces NV12
+    /// output textures on the worker task) and the `Nv12Renderer` /
+    /// swapchain (built on the render thread). Sharing one free-threaded
+    /// device is required because a texture from one device cannot be used as
+    /// a video-processor input on another (CreateVideoProcessorInputView
+    /// fails with E_INVALIDARG). The device is `Send + Sync` and serializes
+    /// its immediate context internally, so cross-thread sharing is safe.
+    #[cfg(windows)]
+    pub(crate) d3d11_device: prdt_media_win::D3d11Device,
 }
 
 struct ViewerApp {
@@ -891,8 +900,16 @@ impl ApplicationHandler for ViewerApp {
             height = size.height,
             "creating render state"
         );
-        let render = match build_render(Arc::clone(&window), size.width.max(1), size.height.max(1))
-        {
+        #[cfg(windows)]
+        let built = build_render(
+            Arc::clone(&window),
+            size.width.max(1),
+            size.height.max(1),
+            self.shared.d3d11_device.clone(),
+        );
+        #[cfg(target_os = "linux")]
+        let built = build_render(Arc::clone(&window), size.width.max(1), size.height.max(1));
+        let render = match built {
             Ok(r) => r,
             Err(e) => {
                 warn!(?e, "build_render failed");
@@ -1743,6 +1760,18 @@ pub fn run_with_args(
     // File-drop channel: winit main thread → tokio file-transfer task.
     let (file_drop_tx, file_drop_rx) = mpsc::unbounded_channel::<std::path::PathBuf>();
 
+    // Create the single D3D11 device shared between the decoder (worker task)
+    // and the swapchain / video-processor (render thread). See the
+    // `ViewerShared::d3d11_device` field doc for why one shared device is
+    // mandatory.
+    #[cfg(windows)]
+    let d3d11_device = {
+        let adapter = prdt_media_win::pick_default_adapter()
+            .context("pick_default_adapter (shared viewer device)")?;
+        prdt_media_win::D3d11Device::create(&adapter)
+            .context("D3d11Device::create (shared viewer device)")?
+    };
+
     let shared = Arc::new(ViewerShared {
         latest_frame: Arc::new(Mutex::new(None)),
         stream_width: Mutex::new(req_w),
@@ -1759,6 +1788,8 @@ pub fn run_with_args(
         granted_permissions: Mutex::new(None),
         cursor: Arc::new(Mutex::new(crate::cursor_state::CursorState::new())),
         focused: Arc::new(std::sync::Mutex::new(true)),
+        #[cfg(windows)]
+        d3d11_device,
     });
 
     // Build the tokio runtime on a dedicated worker thread.
@@ -2135,23 +2166,16 @@ fn spawn_worker_tasks(
         // path needs a D3D11 device; Linux's CPU path takes none.
         #[cfg(windows)]
         let consumer: Arc<tokio::sync::Mutex<PlatformConsumer>> = {
-            let adapter = match prdt_media_win::pick_default_adapter() {
-                Ok(a) => a,
-                Err(e) => {
-                    tracing::error!(error = %e, "pick_default_adapter");
-                    eprintln!("viewer: pick_default_adapter failed: {e}");
-                    std::process::exit(6);
-                }
-            };
-            let dev = match prdt_media_win::D3d11Device::create(&adapter) {
-                Ok(d) => d,
-                Err(e) => {
-                    tracing::error!(error = %e, "D3d11Device::create");
-                    eprintln!("viewer: D3d11Device::create failed: {e}");
-                    std::process::exit(6);
-                }
-            };
-            match build_consumer(&decoder, ack.negotiated_codec, ack.neg_width, ack.neg_height, &dev) {
+            // Build the decoder on the SAME device the renderer uses, so its
+            // NV12 output textures are valid video-processor inputs on the
+            // render thread (see ViewerShared::d3d11_device).
+            match build_consumer(
+                &decoder,
+                ack.negotiated_codec,
+                ack.neg_width,
+                ack.neg_height,
+                &shared.d3d11_device,
+            ) {
                 Ok(c) => Arc::new(tokio::sync::Mutex::new(c)),
                 Err(e) => {
                     tracing::error!(error = %e, "build_consumer");
