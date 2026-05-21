@@ -37,3 +37,11 @@ media-win-ffmpeg-nvdec-main10-any = []
 
 [dev-dependencies]
 tempfile = "3"
+
+[lints.rust]
+# `supported_decoder_args` gates native `nvdec` on `prdt_nvdec_bindings`. This
+# crate has no build.rs that sets it (unlike prdt-viewer, whose build.rs sets
+# it when the NVIDIA SDK + CUDA are present), so declare it known to avoid an
+# unexpected-cfg warning. It stays unset here → `nvdec` is hidden in the
+# launcher, which is intended.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(prdt_nvdec_bindings)'] }

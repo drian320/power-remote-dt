@@ -99,6 +99,13 @@ pub fn supported_decoder_args() -> Vec<&'static str> {
 
     #[cfg(windows)]
     {
+        // Native NVDEC requires the NVIDIA Video Codec SDK + CUDA at build
+        // time (`prdt_nvdec_bindings`, set by viewer's build.rs). Release
+        // builds don't ship it, so only list `nvdec` when actually compiled
+        // in — otherwise resolve_decoder fails at dispatch. HW NVDEC is still
+        // reachable via the FFmpeg path (`ffmpeg-nvdec-hevc`, no SDK needed)
+        // in the prdt-windows-x86_64-ffmpeg build.
+        #[cfg(prdt_nvdec_bindings)]
         out.push("nvdec");
         out.push("mf");
         out.push("openh264");
