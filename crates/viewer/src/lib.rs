@@ -86,6 +86,48 @@ impl IdrRequester {
     }
 }
 
+/// Returns the `--decoder` argument values that are valid for the current
+/// build and OS, so a GUI can populate decoder dropdowns without offering
+/// options that fail at dispatch (e.g. Windows-only `nvdec`/`mf` on Linux,
+/// or ffmpeg HEVC backends that were not compiled in).
+///
+/// The list is ordered `auto` first, then the always-available native
+/// backends for the target OS, then any compiled-in ffmpeg HEVC variants.
+/// It mirrors the `resolve_decoder` dispatch table in this module.
+pub fn supported_decoder_args() -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = vec!["auto"];
+
+    #[cfg(windows)]
+    {
+        out.push("nvdec");
+        out.push("mf");
+        out.push("openh264");
+        #[cfg(feature = "media-win-ffmpeg-nvdec-any")]
+        out.push("ffmpeg-nvdec-hevc");
+        #[cfg(feature = "media-win-ffmpeg-nvdec-main10-any")]
+        out.push("ffmpeg-nvdec-hevc-main10");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        out.push("openh264");
+        #[cfg(feature = "ffmpeg-decode-hevc-sw-any")]
+        out.push("ffmpeg-sw-hevc");
+        #[cfg(feature = "ffmpeg-decode-hevc-vaapi-any")]
+        out.push("ffmpeg-vaapi-hevc");
+        #[cfg(feature = "ffmpeg-decode-hevc-nvdec-any")]
+        out.push("ffmpeg-nvdec-hevc");
+        #[cfg(feature = "ffmpeg-decode-hevc-sw-main10-any")]
+        out.push("ffmpeg-sw-hevc-main10");
+        #[cfg(feature = "ffmpeg-decode-hevc-vaapi-main10-any")]
+        out.push("ffmpeg-vaapi-hevc-main10");
+        #[cfg(feature = "ffmpeg-decode-hevc-nvdec-main10-any")]
+        out.push("ffmpeg-nvdec-hevc-main10");
+    }
+
+    out
+}
+
 pub fn default_viewer_key_path() -> std::path::PathBuf {
     if let Some(base) = dirs::data_local_dir() {
         let dir = base.join("prdt");
@@ -3408,5 +3450,27 @@ mod tests {
         // Config::load creates a default file; the default fps is 60 in both
         // clap and Config, so this also confirms no panic on a fresh config.
         assert_eq!(args.fps, 60);
+    }
+
+    #[test]
+    fn supported_decoder_args_always_contains_auto() {
+        assert!(supported_decoder_args().contains(&"auto"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn supported_decoder_args_linux_excludes_windows_only_and_includes_openh264() {
+        let args = supported_decoder_args();
+        assert!(args.contains(&"openh264"));
+        // `nvdec`/`mf` resolve but fail at runtime on Linux; they must not be
+        // offered as selectable options.
+        assert!(!args.contains(&"nvdec"));
+        assert!(!args.contains(&"mf"));
+        // When the sw HEVC decode feature is compiled in, its arg must appear;
+        // when it isn't, it must not. This proves the cfg gating is wired.
+        #[cfg(feature = "ffmpeg-decode-hevc-sw-any")]
+        assert!(args.contains(&"ffmpeg-sw-hevc"));
+        #[cfg(not(feature = "ffmpeg-decode-hevc-sw-any"))]
+        assert!(!args.contains(&"ffmpeg-sw-hevc"));
     }
 }

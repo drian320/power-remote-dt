@@ -19,5 +19,21 @@ serde = { workspace = true }
 anyhow = "1"
 tokio = { workspace = true }
 
+[features]
+# Decode-backend marker features, mirrored from prdt-viewer's `*-any` markers.
+# prdt-viewer forwards its own markers onto these (see crates/viewer/Cargo.toml)
+# so that `supported_decoder_args()` in this launcher reflects exactly the
+# `--decoder` values the surrounding viewer build accepts — without a direct
+# dependency on prdt-viewer (which would form a dependency cycle, since
+# prdt-viewer already depends on this crate for the Windows launcher).
+ffmpeg-decode-hevc-sw-any = []
+ffmpeg-decode-hevc-vaapi-any = []
+ffmpeg-decode-hevc-nvdec-any = []
+ffmpeg-decode-hevc-sw-main10-any = []
+ffmpeg-decode-hevc-vaapi-main10-any = []
+ffmpeg-decode-hevc-nvdec-main10-any = []
+media-win-ffmpeg-nvdec-any = []
+media-win-ffmpeg-nvdec-main10-any = []
+
 [dev-dependencies]
 tempfile = "3"

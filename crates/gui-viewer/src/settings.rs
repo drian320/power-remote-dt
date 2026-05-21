@@ -12,18 +12,17 @@ pub fn render(ctx: &egui::Context, app: &mut LauncherApp) {
         .resizable(false)
         .show(ctx, |ui| {
             ui.label(t!("viewer-decoder-label"));
-            ui.horizontal(|ui| {
-                ui.radio_value(
-                    &mut local.viewer.decoder,
-                    "mf".into(),
-                    t!("viewer-settings-decoder-mf"),
-                );
-                ui.radio_value(
-                    &mut local.viewer.decoder,
-                    "nvdec".into(),
-                    t!("viewer-settings-decoder-nvdec"),
-                );
-            });
+            // Options come from the viewer crate so we only offer `--decoder`
+            // values that the current build/OS actually accepts (no Windows-only
+            // mf/nvdec on Linux, plus any compiled-in ffmpeg HEVC backends). The
+            // raw arg string doubles as the label; no new i18n keys required.
+            egui::ComboBox::from_id_salt("viewer-settings-decoder-combo")
+                .selected_text(&local.viewer.decoder)
+                .show_ui(ui, |ui| {
+                    for opt in crate::supported_decoder_args() {
+                        ui.selectable_value(&mut local.viewer.decoder, opt.to_string(), opt);
+                    }
+                });
 
             ui.label(t!("viewer-settings-resolution"));
             ui.text_edit_singleline(&mut local.viewer.default_resolution);

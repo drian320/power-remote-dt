@@ -58,6 +58,47 @@ pub fn default_host_key_path() -> std::path::PathBuf {
     std::path::PathBuf::from("host-key.bin")
 }
 
+/// Returns the `--encoder` argument values that are valid for the current
+/// build and OS, so a GUI can populate encoder dropdowns without offering
+/// options that fail at dispatch (e.g. Windows-only `nvenc`/`mf` on Linux,
+/// or ffmpeg HEVC backends that were not compiled in).
+///
+/// The list is ordered `auto` first, then the always-available native
+/// backends for the target OS, then any compiled-in ffmpeg HEVC variants.
+/// It mirrors the dispatch tables in `platform/win.rs` (`pick_encoder`) and
+/// `platform/linux.rs` (the cfg-gated encoder variants).
+pub fn supported_encoder_args() -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = vec!["auto"];
+
+    #[cfg(windows)]
+    {
+        out.push("nvenc");
+        out.push("mf");
+        out.push("openh264");
+        #[cfg(feature = "media-win-ffmpeg-nvenc-any")]
+        out.push("ffmpeg-nvenc-hevc");
+        #[cfg(feature = "media-win-ffmpeg-nvenc-main10-any")]
+        out.push("ffmpeg-nvenc-hevc-main10");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        out.push("openh264");
+        #[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
+        out.push("ffmpeg-vaapi-hevc");
+        #[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
+        out.push("ffmpeg-nvenc-hevc");
+        #[cfg(feature = "ffmpeg-encode-hevc-nvenc-npp-any")]
+        out.push("ffmpeg-nvenc-hevc-npp");
+        #[cfg(feature = "ffmpeg-encode-hevc-vaapi-main10-any")]
+        out.push("ffmpeg-vaapi-hevc-main10");
+        #[cfg(feature = "ffmpeg-encode-hevc-nvenc-main10-any")]
+        out.push("ffmpeg-nvenc-hevc-main10");
+    }
+
+    out
+}
+
 /// Returns the OS-conventional config directory for prdt, creating it on demand.
 /// Used to derive `host-auth.toml` and `host-peers.toml` default paths.
 pub fn default_prdt_config_dir() -> std::path::PathBuf {
@@ -1744,5 +1785,21 @@ mod tests {
         let codecs = supported_codecs_for_encoder_arg("auto", &adapter);
         assert!(codecs.contains(&Codec::H265));
         assert!(codecs.contains(&Codec::H264));
+    }
+
+    #[test]
+    fn supported_encoder_args_always_contains_auto() {
+        assert!(supported_encoder_args().contains(&"auto"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn supported_encoder_args_linux_excludes_windows_only_and_includes_openh264() {
+        let args = supported_encoder_args();
+        assert!(args.contains(&"openh264"));
+        // `nvenc`/`mf` are Windows-only native backends; offering them on
+        // Linux is the bug this list fixes.
+        assert!(!args.contains(&"nvenc"));
+        assert!(!args.contains(&"mf"));
     }
 }
