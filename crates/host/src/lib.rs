@@ -491,7 +491,7 @@ pub async fn run_host(
     args: Args,
     _status: Option<SharedStatus>,
     consent_tx: Option<ConsentSender>,
-    _cancel: CancellationToken,
+    listener_cancel: CancellationToken,
 ) -> Result<()> {
     // Load or generate the host keypair.
     let keypair = if args.key_file.exists() {
@@ -719,11 +719,23 @@ pub async fn run_host(
         transport.reset_session().await;
 
         info!("waiting for Noise handshake");
-        let peer_pubkey = match transport.handshake_as_server(&keypair).await {
-            Ok(pk) => pk,
-            Err(e) => {
-                warn!(?e, "Noise server handshake failed; resetting session");
-                continue;
+        // The idle handshake wait is where the host spends most of its life.
+        // Make it cancellable so the GUI's Stop button (and any caller holding
+        // `listener_cancel`) actually unwinds run_host and drops `transport`,
+        // releasing the UDP port. Without this the loop blocked here forever and
+        // the socket stayed bound, so a stop→start cycle hit "port in use".
+        let peer_pubkey = tokio::select! {
+            biased;
+            _ = listener_cancel.cancelled() => {
+                info!("host listener cancelled while idle; shutting down");
+                return Ok(());
+            }
+            res = transport.handshake_as_server(&keypair) => match res {
+                Ok(pk) => pk,
+                Err(e) => {
+                    warn!(?e, "Noise server handshake failed; resetting session");
+                    continue;
+                }
             }
         };
         info!(
@@ -1067,7 +1079,10 @@ pub async fn run_host(
         #[cfg(target_os = "linux")]
         let cursor_rx_opt = factory_arc.take_cursor_rx();
 
-        let cancel = CancellationToken::new();
+        // Child of the listener token: cancelling the listener (GUI Stop) now
+        // also tears down the active session, after which the outer loop returns
+        // at the handshake-wait select above.
+        let cancel = listener_cancel.child_token();
         let last_keepalive = Arc::new(AtomicU64::new(now_monotonic_us()));
         // Shared flag: control loop sets this when viewer requests an IDR;
         // video loop reads+clears it before each encode call.
