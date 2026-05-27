@@ -16,6 +16,11 @@ use clap::{Parser, Subcommand};
     disable_help_subcommand = true
 )]
 struct Cli {
+    /// Internal: after an elevated relaunch (Windows host-only UAC), auto-start
+    /// the host listener in the GUI. Hidden; set by the self-elevation path.
+    #[arg(long, hide = true)]
+    host_autostart: bool,
+
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -47,9 +52,10 @@ enum Cmd {
 fn main() -> anyhow::Result<()> {
     use clap::Parser as _;
 
-    match Cli::parse().cmd {
+    let cli = Cli::parse();
+    match cli.cmd {
         // No subcommand → unified GUI.
-        None => prdt_gui_client::run_client_gui(None),
+        None => prdt_gui_client::run_client_gui(None, cli.host_autostart),
         Some(Cmd::Host { args }) => {
             let argv = std::iter::once(OsString::from("prdt-host")).chain(args);
             let host_args = prdt_host::parse_args_with_config(argv);

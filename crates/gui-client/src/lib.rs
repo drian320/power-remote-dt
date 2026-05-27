@@ -7,6 +7,8 @@
 //! cannot coexist with the egui window in the same process today.
 
 mod app;
+#[cfg(windows)]
+mod elevate;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -17,7 +19,7 @@ use prdt_gui_common::{install_theme, Config};
 /// closes the window. Cross-platform as of GUI modernization P2 (Linux +
 /// Windows); the egui/eframe stack is identical on both, so there is no
 /// platform split here.
-pub fn run_client_gui(config_path: Option<PathBuf>) -> anyhow::Result<()> {
+pub fn run_client_gui(config_path: Option<PathBuf>, autostart_host: bool) -> anyhow::Result<()> {
     let config_path = config_path
         .or_else(prdt_gui_common::default_config_path)
         .ok_or_else(|| anyhow::anyhow!("could not resolve config path"))?;
@@ -48,7 +50,12 @@ pub fn run_client_gui(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         options,
         Box::new(move |cc| {
             install_theme(&cc.egui_ctx);
-            Ok(Box::new(app::ClientApp::new(cfg, path, rt_handle)))
+            Ok(Box::new(app::ClientApp::new(
+                cfg,
+                path,
+                rt_handle,
+                autostart_host,
+            )))
         }),
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))?;

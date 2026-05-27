@@ -25,5 +25,15 @@ prdt-crypto = { path = "../crypto" }
 prdt-protocol = { path = "../protocol" }
 clap = { workspace = true }
 
+# Host-only UAC self-elevation: IsUserAnAdmin + ShellExecuteExW("runas").
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_Shell",
+    # SHELLEXECUTEINFOW embeds an HKEY (hkeyClass), so ShellExecuteExW + the
+    # struct are gated behind the Registry feature in windows-rs 0.58.
+    "Win32_System_Registry",
+] }
+
 [dev-dependencies]
 tempfile = "3"

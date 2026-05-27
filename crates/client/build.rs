@@ -15,26 +15,12 @@ fn main() {
         let mut res = winres::WindowsResource::new();
         res.set("FileDescription", "Power Remote Desktop");
         res.set("ProductName", "Power Remote Desktop");
-        // Request administrator elevation at launch. The host injects remote
-        // input via SendInput; Windows UIPI silently drops synthetic input
-        // aimed at higher-integrity windows (Task Manager, UAC dialogs,
-        // anything "run as administrator"). Running prdt elevated raises its
-        // integrity level so those windows accept the injected input — e.g.
-        // dragging the Task Manager window now works. The GUI hosts the
-        // listener in-process, so the elevation must be on this unified exe.
-        res.set_manifest(
-            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
-    <security>
-      <requestedPrivileges>
-        <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
-      </requestedPrivileges>
-    </security>
-  </trustInfo>
-</assembly>
-"#,
-        );
+        // NOTE: prdt deliberately ships as `asInvoker` (no manifest elevation).
+        // It is a unified host/viewer/GUI exe; forcing requireAdministrator
+        // would pop UAC even for viewer-only use. Instead the GUI self-elevates
+        // *only* when the user starts the host listener (see
+        // crates/gui-client/src/elevate.rs) — elevation is needed so SendInput
+        // can drive higher-integrity windows (Task Manager, UAC dialogs).
         if icon.exists() {
             res.set_icon(icon.to_str().expect("ascii icon path"));
         } else {

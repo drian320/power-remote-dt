@@ -66,6 +66,14 @@ pub struct ClientApp {
     settings_draft: SettingsDraft,
     /// One-shot confirmation line shown under the Settings Save button.
     settings_status: Option<String>,
+
+    /// Set when launched with `--host-autostart` (after an elevated relaunch on
+    /// Windows): the first frame starts the host listener automatically.
+    pending_autostart: bool,
+    /// Set by the host-only self-elevation path: the next frame closes this
+    /// (non-elevated) window because an elevated copy is taking over hosting.
+    /// Always false on non-Windows.
+    request_exit: bool,
 }
 
 /// Editable mirror of the persisted config, used by the Settings view so that
@@ -86,7 +94,12 @@ struct ListenerState {
 }
 
 impl ClientApp {
-    pub fn new(cfg: Arc<Mutex<Config>>, config_path: PathBuf, rt_handle: runtime::Handle) -> Self {
+    pub fn new(
+        cfg: Arc<Mutex<Config>>,
+        config_path: PathBuf,
+        rt_handle: runtime::Handle,
+        autostart_host: bool,
+    ) -> Self {
         // Derive host-auth.toml path from the config directory (mirrors gui-host).
         let host_auth_path = config_path
             .parent()
@@ -126,6 +139,8 @@ impl ClientApp {
             host_auth_path,
             settings_draft,
             settings_status: None,
+            pending_autostart: autostart_host,
+            request_exit: false,
         };
         app.refresh_pubkey();
         app
@@ -187,6 +202,30 @@ impl ClientApp {
         if self.is_listening() {
             return;
         }
+
+        // Host-only UAC elevation (Windows). The host injects input via
+        // SendInput, which Windows UIPI blocks against higher-integrity windows
+        // (Task Manager, UAC dialogs). If we're not already elevated, relaunch
+        // the GUI as admin and let that copy auto-start the listener, then close
+        // this one. If the user declines the prompt, fall through and host
+        // un-elevated (works for normal windows, not elevated ones).
+        #[cfg(windows)]
+        if !crate::elevate::is_elevated() {
+            match crate::elevate::relaunch_elevated_for_host() {
+                Ok(()) => {
+                    self.host_status = Some("管理者として再起動しています…".into());
+                    self.request_exit = true;
+                    return;
+                }
+                Err(e) => {
+                    self.host_status = Some(format!(
+                        "管理者昇格に失敗しました（{e}）。通常権限で起動します（タスクマネージャー等の管理者ウィンドウは操作できません）。"
+                    ));
+                    // fall through: start a non-elevated host anyway.
+                }
+            }
+        }
+
         let cfg = self.cfg.lock().unwrap().clone();
 
         // Pre-flight: surface "port in use" before we even spawn the task.
@@ -363,6 +402,22 @@ impl ClientApp {
 
 impl eframe::App for ClientApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // After an elevated relaunch (`--host-autostart`), kick off the host
+        // listener once on the first frame. We're already elevated here, so
+        // start_listener won't re-trigger the elevation relaunch.
+        if self.pending_autostart {
+            self.pending_autostart = false;
+            self.view = View::Home;
+            self.start_listener();
+            self.refresh_pubkey();
+        }
+
+        // Host-only self-elevation requested this (non-elevated) window to close
+        // because an elevated copy is taking over hosting.
+        if self.request_exit {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+
         // Drain any finished listener result before drawing so the UI shows
         // the cause (port-in-use, bind failure, etc.) instead of silently
         // flipping back to Idle.
