@@ -46,6 +46,19 @@ fn main() -> anyhow::Result<()> {
             .with_resizable(false),
         // Force wgpu — glow's glutin path fails on Wayland (COSMIC).
         renderer: eframe::Renderer::Wgpu,
+        // Drop wgpu's GL/GLES backend: its EGL init panics on Wayland
+        // (wgpu-hal egl.rs `unwrap()` on None). egui-wgpu's default backends
+        // are PRIMARY|GL; removing GL leaves Vulkan (Linux), DX12/Vulkan
+        // (Windows), Metal (macOS). WGPU_BACKEND env still overrides.
+        wgpu_options: {
+            let mut o = eframe::egui_wgpu::WgpuConfiguration::default();
+            if let eframe::egui_wgpu::WgpuSetup::CreateNew(c) = &mut o.wgpu_setup {
+                c.instance_descriptor
+                    .backends
+                    .remove(eframe::wgpu::Backends::GL);
+            }
+            o
+        },
         ..Default::default()
     };
     eframe::run_native(
