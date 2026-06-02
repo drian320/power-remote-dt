@@ -183,7 +183,7 @@ pub(crate) fn build_priv_data_dict_vaapi_main10(
     NonNull::new(dict).ok_or_else(|| FfmpegError::HwDevice("av_dict_set produced null dict".into()))
 }
 
-/// Build the private-data dictionary for `hevc_nvenc` Main10 low-latency CBR encode.
+/// Build the private-data dictionary for `hevc_nvenc` Main10 low-latency capped-VBR encode.
 /// Duplicates `build_priv_data_dict_nvenc` — same keys, same values. The 8-bit
 /// twin MUST stay byte-identical (CI guard F4.b).
 #[cfg(feature = "ffmpeg-encode-hevc-nvenc-main10-any")]
@@ -193,7 +193,7 @@ pub(crate) fn build_priv_data_dict_nvenc_main10(
     let mut dict: *mut AVDictionary = ptr::null_mut();
     dict_set(&mut dict, "preset", "p1")?;
     dict_set(&mut dict, "tune", "ull")?;
-    dict_set(&mut dict, "rc", "cbr")?;
+    dict_set(&mut dict, "rc", "vbr")?;
     dict_set(&mut dict, "zerolatency", "1")?;
     dict_set(&mut dict, "rc-lookahead", "0")?;
     dict_set(&mut dict, "bf", "0")?;
@@ -234,7 +234,7 @@ pub(crate) fn build_priv_data_dict(gop_size: u32) -> Result<NonNull<AVDictionary
     NonNull::new(dict).ok_or_else(|| FfmpegError::HwDevice("av_dict_set produced null dict".into()))
 }
 
-/// Build the private-data dictionary for `hevc_nvenc` low-latency CBR encode.
+/// Build the private-data dictionary for `hevc_nvenc` low-latency capped-VBR encode.
 /// All NVENC AVOption keys here are stable across rusty_ffmpeg ffmpeg5/6/7.
 /// Caller passes the dict to `avcodec_open2`, which consumes and frees it.
 #[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
@@ -244,7 +244,7 @@ pub(crate) fn build_priv_data_dict_nvenc(
     let mut dict: *mut AVDictionary = ptr::null_mut();
     dict_set(&mut dict, "preset", "p1")?;
     dict_set(&mut dict, "tune", "ull")?;
-    dict_set(&mut dict, "rc", "cbr")?;
+    dict_set(&mut dict, "rc", "vbr")?;
     dict_set(&mut dict, "zerolatency", "1")?;
     dict_set(&mut dict, "rc-lookahead", "0")?;
     dict_set(&mut dict, "bf", "0")?;
@@ -297,7 +297,7 @@ mod tests {
 
         assert_eq!(get_dict_value(d, "preset").as_deref(), Some("p1"));
         assert_eq!(get_dict_value(d, "tune").as_deref(), Some("ull"));
-        assert_eq!(get_dict_value(d, "rc").as_deref(), Some("cbr"));
+        assert_eq!(get_dict_value(d, "rc").as_deref(), Some("vbr"));
         assert_eq!(get_dict_value(d, "zerolatency").as_deref(), Some("1"));
         assert_eq!(get_dict_value(d, "rc-lookahead").as_deref(), Some("0"));
         assert_eq!(get_dict_value(d, "bf").as_deref(), Some("0"));

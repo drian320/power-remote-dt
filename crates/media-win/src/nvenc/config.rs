@@ -4,7 +4,8 @@
 //! NVENC H.265 low-latency encoder configuration.
 //!
 //! Produces a pre-filled `NV_ENC_INITIALIZE_PARAMS` for the power-remote-dt
-//! use case: HEVC Main Profile, P1 preset, ultra-low-latency tuning, CBR.
+//! use case: HEVC Main Profile, P1 preset, ultra-low-latency tuning, capped
+//! VBR (target = max = configured bitrate; static content undershoots).
 //!
 //! The generated bindgen output does NOT expose the `NV_ENC_*_VER` constants
 //! as pub constants (they are C macros referenced only in doc strings).
@@ -98,7 +99,10 @@ impl InitParams {
         let mut config: Box<ffi::NV_ENC_CONFIG> = Box::default();
         config.version = nv_enc_config_ver();
         config.rcParams.version = nv_enc_rc_params_ver();
-        config.rcParams.rateControlMode = ffi::NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CBR;
+        // Capped VBR: the encoder targets averageBitRate but does NOT pad to
+        // maintain it (unlike CBR), so a static screen undershoots toward zero;
+        // maxBitRate caps the peak at the configured bitrate.
+        config.rcParams.rateControlMode = ffi::NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_VBR;
         config.rcParams.averageBitRate = cfg.bitrate_bps;
         config.rcParams.maxBitRate = cfg.bitrate_bps;
         // VBV buffer = 1 frame at target bitrate for low-latency. Helper

@@ -567,7 +567,7 @@ mod inner {
     unsafe impl Send for HevcNvencFfmpegEncoderWindowsAdapter {}
 
     /// Open and configure an NVENC codec context for HEVC (preset=p1, tune=ull,
-    /// rc=cbr, zerolatency=1, bf=0, forced-idr=1).
+    /// rc=vbr, zerolatency=1, bf=0, forced-idr=1).
     ///
     /// OWNERSHIP: `hw_frames_ctx` ref is consumed on both success and failure.
     fn open_nvenc_codec_ctx(
@@ -645,7 +645,9 @@ mod inner {
         let mut dict: *mut AVDictionary = ptr::null_mut();
         dict_set(&mut dict, "preset", "p1")?;
         dict_set(&mut dict, "tune", "ull")?;
-        dict_set(&mut dict, "rc", "cbr")?;
+        // Capped VBR: undershoots on static content (no CBR padding), peak still
+        // bounded by rc_max_rate (= bit_rate) set in configure_nvenc_codec.
+        dict_set(&mut dict, "rc", "vbr")?;
         dict_set(&mut dict, "zerolatency", "1")?;
         dict_set(&mut dict, "rc-lookahead", "0")?;
         dict_set(&mut dict, "bf", "0")?;

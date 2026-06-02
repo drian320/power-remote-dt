@@ -365,17 +365,17 @@ fn configure_rate_control(
             .cast()
             .map_err(|e| MediaError::Other(format!("cast ICodecAPI: {e}")))?;
 
-        // CBR mode = 0 (eAVEncCommonRateControlMode_CBR). Must be set first —
-        // without it the MFT defaults to quality mode and bursts IDRs ~9× over budget.
+        // PeakConstrainedVBR mode = 1 (eAVEncCommonRateControlMode_PeakConstrainedVBR).
+        // Without an explicit RC mode the MFT defaults to quality mode and bursts IDRs ~9× over budget.
         codec_api
-            .SetValue(&CODECAPI_AVEncCommonRateControlMode, &var_u32(0))
-            .map_err(|e| MediaError::Other(format!("SetValue RateControlMode CBR: {e}")))?;
+            .SetValue(&CODECAPI_AVEncCommonRateControlMode, &var_u32(1))
+            .map_err(|e| MediaError::Other(format!("SetValue RateControlMode VBR: {e}")))?;
 
         codec_api
             .SetValue(&CODECAPI_AVEncCommonMeanBitRate, &var_u32(cfg.bitrate_bps))
             .map_err(|e| MediaError::Other(format!("SetValue MeanBitRate: {e}")))?;
 
-        // Cap peak at mean + 20% — belt-and-braces on top of CBR.
+        // Cap peak at mean + 20% — the VBR ceiling (MaxBitRate) that bounds bursts.
         let max_bps = cfg.bitrate_bps.saturating_add(cfg.bitrate_bps / 5);
         codec_api
             .SetValue(&CODECAPI_AVEncCommonMaxBitRate, &var_u32(max_bps))
