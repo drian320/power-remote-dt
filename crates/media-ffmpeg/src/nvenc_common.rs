@@ -28,7 +28,7 @@ pub(crate) const AVERROR_EAGAIN: i32 = -11;
 pub(crate) const AVERROR_EOF: i32 = -0x5fb9b0bb;
 
 /// Open and configure an NVENC codec context for HEVC (preset=p1, tune=ull,
-/// rc=cbr, zerolatency=1, bf=0, forced-idr=1; private-data dict via
+/// rc=vbr, zerolatency=1, bf=0, forced-idr=1; private-data dict via
 /// `build_priv_data_dict_nvenc(gop_size)`).
 ///
 /// OWNERSHIP. Caller passes a unique `AVBufferRef` for `hw_frames_ctx`

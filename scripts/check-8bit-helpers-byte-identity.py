@@ -82,7 +82,14 @@ PROTECTED: list[Union[Tuple[str, int, int], Tuple[str, str, str]]] = [
     # NOTE: decoder_main10.rs guard removed — its master baseline never compiled
     # against windows-rs 0.58 (PR #36 admin-merged without Windows CI), so the
     # protection was invalid. Fixed by fix/mf-decoder-main10-windows-rs-0.58-api.
-    ("crates/media-win/src/mf/encoder.rs", 1, 603),
+    #
+    # configure_rate_control's RC block (master lines 360-400) is intentionally
+    # EXCLUDED: it was unfrozen to switch MF from CBR to PeakConstrainedVBR
+    # (capped VBR) so a static screen stops consuming the full target bitrate.
+    # Reviewed exception, mirroring the renegotiate_output_type carve-out for
+    # mf/decoder.rs above. The rest of encoder.rs stays byte-identical to master.
+    ("crates/media-win/src/mf/encoder.rs", 1, 359),
+    ("crates/media-win/src/mf/encoder.rs", 401, 603),
 ]
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 

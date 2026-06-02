@@ -144,12 +144,12 @@ impl NvencEncoder {
                 ),
             )?;
             // Overlay preset defaults onto our config, then re-apply our
-            // user-facing overrides (CBR bitrate, GOP length, frameIntervalP,
-            // struct version).
+            // user-facing overrides (capped-VBR bitrate, GOP length,
+            // frameIntervalP, struct version).
             *init_params.config = preset_cfg.presetCfg;
             init_params.config.version = crate::nvenc::config::nv_enc_config_ver_public();
             init_params.config.rcParams.rateControlMode =
-                ffi::NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CBR;
+                ffi::NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_VBR;
             init_params.config.rcParams.averageBitRate = cfg.bitrate_bps;
             init_params.config.rcParams.maxBitRate = cfg.bitrate_bps;
             init_params.config.rcParams.vbvBufferSize =
