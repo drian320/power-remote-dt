@@ -28,3 +28,16 @@ libm.so*
 librt.so*
 libstdc++.so*
 libgcc_s.so*
+# Graphics WSI + Vulkan loader — MUST be host-provided to match the running
+# compositor and GPU driver. Bundling the Debian-bookworm build copies shadows
+# the host's (newer) libs and breaks surface creation on Wayland: the bundled
+# libvulkan loader fails to expose VK_KHR_wayland_surface for the host RADV/AMD
+# driver, and the bundled libwayland-egl/libwayland-client mismatch the
+# compositor. Symptoms: alpha.10 GL panic (wgpu-hal egl.rs unwrap), alpha.11
+# "Failed to create surface for any enabled backend". Host provides all of
+# these on any Wayland/X11 desktop; removing the bundled copies fixes launch.
+libvulkan.so*
+libwayland-client.so*
+libwayland-cursor.so*
+libwayland-egl.so*
+libxkbcommon.so*

@@ -36,7 +36,14 @@ libc = "0.2"
 serde = { workspace = true }
 toml = { workspace = true }
 zbus = { version = "4", default-features = false, features = ["tokio"] }
-ashpd = { version = "0.12", default-features = false, features = ["tokio"] }
+# async-io (not tokio) backend: forces zbus's async-io executor for zbus 5.x so
+# it matches accesskit_unix (eframe a11y → atspi → zbus 5), which spawns a bare
+# non-tokio thread for AT-SPI. With zbus/tokio the GUI aborts at startup:
+# "no reactor running, must be called from the context of a Tokio 1.x runtime".
+# async-io self-drives from any context (incl. our tokio tasks), so ashpd portal
+# calls keep working. ("async-std" is ashpd's feature name for the zbus/async-io
+# backend; it does not pull the full async-std runtime.)
+ashpd = { version = "0.12", default-features = false, features = ["async-std"] }
 dirs = { workspace = true }
 # pipewire 0.9 — requires libpipewire-0.3 >= 0.3.55 system lib (Debian
 # bookworm ships 0.3.65, Ubuntu 24.04+ ships 1.0+). Older systems
