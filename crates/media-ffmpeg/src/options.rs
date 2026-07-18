@@ -43,6 +43,10 @@ pub(crate) unsafe fn apply_low_latency_hevc_common(ctx: *mut AVCodecContext, t: 
         // One-second VBV buffer halved for low-delay: bitrate/fps * 2 / 2 = bitrate/fps
         (*ctx).rc_buffer_size = (t.bitrate_bps / t.fps.max(1)) as i32;
         (*ctx).gop_size = t.gop_size as i32;
+        // Dimensions are mandatory: avcodec_open2 rejects a VAAPI/NVENC encoder
+        // context with "dimensions not set" (EINVAL) if width/height are 0.
+        (*ctx).width = t.width as i32;
+        (*ctx).height = t.height as i32;
         (*ctx).max_b_frames = 0;
         (*ctx).time_base = AVRational {
             num: 1,
@@ -107,6 +111,10 @@ pub(crate) unsafe fn apply_low_latency_hevc_vaapi_main10(
         (*ctx).rc_max_rate = t.bitrate_bps as i64;
         (*ctx).rc_buffer_size = (t.bitrate_bps / t.fps.max(1)) as i32;
         (*ctx).gop_size = t.gop_size as i32;
+        // Dimensions are mandatory: avcodec_open2 rejects a VAAPI/NVENC encoder
+        // context with "dimensions not set" (EINVAL) if width/height are 0.
+        (*ctx).width = t.width as i32;
+        (*ctx).height = t.height as i32;
         (*ctx).max_b_frames = 0;
         (*ctx).time_base = AVRational {
             num: 1,
@@ -145,6 +153,10 @@ pub(crate) unsafe fn apply_low_latency_hevc_nvenc_main10(
         (*ctx).rc_max_rate = t.bitrate_bps as i64;
         (*ctx).rc_buffer_size = (t.bitrate_bps / t.fps.max(1)) as i32;
         (*ctx).gop_size = t.gop_size as i32;
+        // Dimensions are mandatory: avcodec_open2 rejects a VAAPI/NVENC encoder
+        // context with "dimensions not set" (EINVAL) if width/height are 0.
+        (*ctx).width = t.width as i32;
+        (*ctx).height = t.height as i32;
         (*ctx).max_b_frames = 0;
         (*ctx).time_base = AVRational {
             num: 1,
@@ -333,6 +345,8 @@ mod tests {
         unsafe {
             assert_eq!((*ctx).max_b_frames, 0);
             assert_eq!((*ctx).gop_size, 60);
+            assert_eq!((*ctx).width, 1920);
+            assert_eq!((*ctx).height, 1080);
             assert_eq!((*ctx).bit_rate, 8_000_000);
             assert_eq!((*ctx).pix_fmt, AV_PIX_FMT_VAAPI);
             assert_eq!((*ctx).profile, AV_PROFILE_HEVC_MAIN);
@@ -373,6 +387,8 @@ mod tests {
             assert_eq!((*ctx).rc_max_rate, 8_000_000);
             assert_eq!((*ctx).rc_buffer_size, (8_000_000 / 60) as i32);
             assert_eq!((*ctx).gop_size, 60);
+            assert_eq!((*ctx).width, 1920);
+            assert_eq!((*ctx).height, 1080);
             assert_eq!((*ctx).max_b_frames, 0);
             assert_eq!((*ctx).time_base.num, 1);
             assert_eq!((*ctx).time_base.den, 60);

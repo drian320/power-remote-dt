@@ -53,7 +53,22 @@ import sys
 from typing import Optional, Tuple, Union
 
 PROTECTED: list[Union[Tuple[str, int, int], Tuple[str, str, str]]] = [
-    ("crates/media-ffmpeg/src/options.rs", 38, 87),
+    # 2026-07-19 width/height bug-fix (dimensions-not-set): apply_low_latency_hevc_common
+    # (and its byte-identical Main10 twins) never assigned AVCodecContext::width/height
+    # from EncoderTunables, so every FFmpeg encoder backend failed avcodec_open2 with
+    # "dimensions not set" (EINVAL) on real hardware. CI never caught it: runners have no
+    # GPU, so VaapiHwDevice::open fails before avcodec_open2 is reached. The fix inserts a
+    # width/height block immediately after gop_size. In OLD-file (origin/master)
+    # coordinates that pure insertion lands at line 46 (the `max_b_frames = 0` statement),
+    # so the original single (38, 87) span is split into (38, 45) and (47, 87): every other
+    # frozen line stays guarded while the one intentional insertion point is admitted.
+    # RE-FREEZE ON MERGE: once this lands on master the corrected body is 4 lines longer,
+    # so collapse these two entries back into a single (38, 91) span covering the new body.
+    ("crates/media-ffmpeg/src/options.rs", 38, 45),
+    ("crates/media-ffmpeg/src/options.rs", 47, 87),
+    # nvenc_common.rs was NOT affected by the width/height fix: it has no duplicated
+    # tunable-application body and delegates to the options.rs helpers, which now carry the
+    # dimensions. Its frozen range is unchanged.
     ("crates/media-ffmpeg/src/nvenc_common.rs", 41, 96),
     # P3 PR2: copy_nv12_planes is the 8-bit decoder plane-copy helper; its body
     # must stay byte-stable when copy_p010_planes (_main10 sibling) is appended

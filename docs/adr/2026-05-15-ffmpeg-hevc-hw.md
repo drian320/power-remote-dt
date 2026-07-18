@@ -1,6 +1,14 @@
 # ADR: FFmpeg integration for H.265 (HEVC) hardware acceleration
 
-- **Status:** Proposed (2026-05-15)
+- **Status:** Accepted (2026-07-18) — first real-hardware smoke passed on an
+  AMD Granite Ridge iGPU (VAAPI HEVC encode) + RTX 4070 Ti (NVDEC decode) and
+  the reverse cross-GPU direction (NVENC encode → VAAPI decode); host-side
+  A4/A7 assertions all green, run logs in
+  `docs/superpowers/plan-ffmpeg-hevc-vaapi-smoke.md`. The smoke flushed out 5
+  latent defects (fixed in the same PR), validating the hardware-gate policy.
+  Remaining follow-up: a Windows-viewer A5 visual pass (Linux viewer was used
+  for the decode leg).
+- _(was: Proposed, 2026-05-15)_
 - **Tag:** _(unassigned — assigned on acceptance)_
 - **Supersedes (partial):** `2026-04-27-software-codec-openh264.md` — Alternative B (FFmpeg via `ffmpeg-next` / `rsmpeg`) was rejected for **software** codec use. This ADR keeps that rejection intact for SW codecs and only carves out a narrow **HW HEVC** opening.
 - **Plan:** _(to be written — `docs/superpowers/plans/2026-05-15-ffmpeg-hevc-hw.md`)_

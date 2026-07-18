@@ -205,13 +205,21 @@ pub struct Args {
     /// for H.265 streams, and OpenH264 for H.264 streams; the actual
     /// choice is made after the Hello handshake using the host's
     /// negotiated codec.
+    // The accepted values must track what this build actually compiled in —
+    // a hard-coded list either rejects valid Linux backends (ffmpeg-vaapi-hevc
+    // was unlistable before) or advertises Windows-only ones (`mf`) on Linux.
+    // `supported_decoder_args()` already mirrors the resolve_decoder dispatch
+    // table with the right cfg gates, so it is the single source of truth.
+    // Default is `auto`: the old `nvdec` default was only valid because the
+    // hard-coded list always contained it — on builds without native NVDEC
+    // (all Linux builds, Windows without the Video Codec SDK) clap would now
+    // reject its own default at startup. `auto` resolves to the best
+    // compiled-in backend post-handshake, which is what the doc above
+    // describes anyway.
     #[arg(
         long,
-        default_value = "nvdec",
-        value_parser = [
-            "mf", "nvdec", "openh264", "auto",
-            "ffmpeg-nvdec-hevc", "ffmpeg-nvdec-hevc-main10",
-        ],
+        default_value = "auto",
+        value_parser = clap::builder::PossibleValuesParser::new(supported_decoder_args()),
     )]
     decoder: String,
 

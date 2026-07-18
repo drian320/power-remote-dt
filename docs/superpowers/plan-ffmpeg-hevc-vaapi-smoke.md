@@ -221,16 +221,16 @@ While the session runs:
 
 ## Run log
 
-**Date:** `<YYYY-MM-DD>`
-**Host SKU:** `<i5-... / Ryzen ...>`
-**Viewer:** `<machine>`
-**Result:** PASS / FAIL
-**encoder_ready count:** `<N>`
-**first_frame_emitted count:** `<N>`
-**frame_decoded total at 5min:** `<N>`
-**Sequence gap check:** OK / GAPS
-**CPU readback warnings:** `<N>`
-**Notes:**
+**Date:** `2026-07-18`
+**Host SKU:** AMD Ryzen 9 9950X (Granite Ridge iGPU, RDNA2/VCN via `/dev/dri/renderD129`), Arch Linux, mesa 26.1.4, libva 2.24.1, ffmpeg7.1 7.1.3 (`-ffmpeg7` feature build, `--no-default-features`)
+**Viewer:** same machine (Linux↔Linux loopback, RTX 4070 Ti NVDEC, driver 610.43.03) — Windows viewer not exercised; see Notes
+**Result:** PASS (host-side A4/A7 assertions; viewer leg via the Linux↔Linux P2 procedure below)
+**encoder_ready count:** 1 (`backend="ffmpeg-vaapi-hevc" profile="main" bitdepth=8 gop=60`)
+**first_frame_emitted count:** 1 (`zero_copy=true`)
+**frame_decoded total at 5min:** 12,731 textures decoded / 12,735 received over 390 s at 3840x2160 (≈33 fps — X11 SHM 4K capture-bound; the ≥17,000 bar assumes 1080p60, proportionally consistent)
+**Sequence gap check:** OK (recv_errors=0, timeouts=0, decode deficit 4 frames = in-flight at cutoff, 0.031%)
+**CPU readback warnings:** 0
+**Notes:** Host CPU 41% single-core equivalent (< 50% bar). Multi-GPU box required `PRDT_VAAPI_RENDER_NODE=/dev/dri/renderD129` (override added during this smoke). This run also flushed out and fixed 5 defects — see PR `fix/linux-viewer-decode-wiring`: viewer decode feature forwarding, VAAPI render-node selection, missing ctx width/height (all FFmpeg encoders), hard-coded 1920x1080 encoder dims vs real capture geometry (SIGSEGV), and the `--decoder` CLI value list drift. A Windows-viewer A5 pass remains open for a Windows machine.
 
 ---
 
@@ -427,12 +427,19 @@ INFO video.pipeline decoder="ffmpeg-nvdec-hevc" selected_by="auto" reason="prefe
 
 ### Linux↔Linux run log
 
-**Date:** `<YYYY-MM-DD>`
-**Host:** `<iGPU/dGPU SKU>`
-**Viewer decoder:** `<ffmpeg-vaapi-hevc / ffmpeg-sw-hevc / ffmpeg-nvdec-hevc>`
-**Result:** PASS / FAIL
-**decoder_ready log line confirmed:** Y / N
-**Notes:**
+**Date:** `2026-07-18` (run 1 — VAAPI encode → NVDEC decode)
+**Host:** AMD Ryzen 9 9950X Granite Ridge iGPU (`PRDT_VAAPI_RENDER_NODE=/dev/dri/renderD129`), `--encoder ffmpeg-vaapi-hevc`, 3840x2160@8 Mbps
+**Viewer decoder:** `ffmpeg-nvdec-hevc` (RTX 4070 Ti, driver 610.43.03), same machine over 127.0.0.1
+**Result:** PASS
+**decoder_ready log line confirmed:** Y (`backend="ffmpeg-nvdec-hevc" codec="h265"`)
+**Notes:** 390 s soak: 12,735 received / 12,731 decoded, recv_errors=0, timeouts=0. ~33 fps end-to-end (X11 SHM 4K capture-bound).
+
+**Date:** `2026-07-18` (run 2 — NVENC encode → VAAPI decode, cross-GPU)
+**Host:** RTX 4070 Ti, `--encoder ffmpeg-nvenc-hevc`, 3840x2160@8 Mbps (`hw_path="cuda" convert_path="sw"` — P1.5 CPU BGRA→NV12, per F4)
+**Viewer decoder:** `ffmpeg-vaapi-hevc` (Granite Ridge iGPU via `PRDT_VAAPI_RENDER_NODE`), same machine
+**Result:** PASS
+**decoder_ready log line confirmed:** Y (`backend="ffmpeg-vaapi-hevc" codec="h265"`)
+**Notes:** 390 s soak: 33,483 received / 16,884 decoded, recv_errors=0, timeouts=0, no host errors. Two observations for follow-up: (1) the iGPU VCN decodes 4K HEVC at ≈43 fps while NVENC delivers ≈86 fps — latest-frame-wins consumption keeps the session real-time but wastes encode/network throughput; (2) the NVENC producer paced ≈86 fps against a 60 fps session request — producer pacing looks uncapped on this path.
 
 ---
 
