@@ -30,7 +30,7 @@ jobs:
           set -euo pipefail
           URL='${{ steps.manifest.outputs.url }}'
           echo "Checking upstream: $URL"
-          HTTP=$(curl -fsI --max-time 30 -o /dev/null -w '%{http_code}' "$URL" || true)
+          HTTP=$(curl -fsIL --max-time 30 -o /dev/null -w '%{http_code}' "$URL" || true)
           echo "HTTP status: $HTTP"
           if [[ "$HTTP" != 2* ]]; then
             echo "FAIL: upstream URL returned HTTP $HTTP"
@@ -43,7 +43,7 @@ jobs:
           set -euo pipefail
           MIRROR='${{ steps.manifest.outputs.mirror }}'
           echo "Checking mirror: $MIRROR"
-          HTTP=$(curl -fsI --max-time 30 -o /dev/null -w '%{http_code}' "$MIRROR" || true)
+          HTTP=$(curl -fsIL --max-time 30 -o /dev/null -w '%{http_code}' "$MIRROR" || true)
           echo "HTTP status: $HTTP"
           if [[ "$HTTP" != 2* ]]; then
             echo "FAIL: mirror URL returned HTTP $HTTP"
