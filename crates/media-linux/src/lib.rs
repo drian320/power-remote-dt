@@ -6,6 +6,17 @@
 #![cfg(target_os = "linux")]
 #![allow(dead_code)]
 
+#[cfg(any(
+    feature = "ffmpeg-decode-hevc-vaapi-any",
+    feature = "ffmpeg-decode-hevc-vaapi-main10-any"
+))]
+use std::path::PathBuf;
+#[cfg(any(
+    feature = "ffmpeg-decode-hevc-vaapi-any",
+    feature = "ffmpeg-decode-hevc-vaapi-main10-any"
+))]
+use std::sync::Once;
+
 pub mod capture_source;
 pub mod core_adapter;
 pub mod error;
@@ -24,6 +35,30 @@ pub use error::LinuxMediaError;
 pub use frame::BgraFrame;
 #[cfg(feature = "vaapi-h264")]
 pub use vaapi_pipeline::{LinuxVaapiEncoder, VaapiVideoProducer};
+
+/// Reads `PRDT_VAAPI_RENDER_NODE` and returns the DRM render node path it
+/// names, if set. Mirrors the same override on the host encoder side
+/// (`prdt-host`'s `platform::linux::vaapi_render_node_from_env`) — multi-GPU
+/// hosts need the FFmpeg VAAPI *decoder* pointed at the right
+/// `/dev/dri/renderDN` too, or `av_hwdevice_ctx_create` can pick the wrong
+/// GPU. Logs once, at info level, when the override is present.
+#[cfg(any(
+    feature = "ffmpeg-decode-hevc-vaapi-any",
+    feature = "ffmpeg-decode-hevc-vaapi-main10-any"
+))]
+fn vaapi_render_node_from_env() -> Option<PathBuf> {
+    static LOGGED: Once = Once::new();
+    let node = std::env::var_os("PRDT_VAAPI_RENDER_NODE").map(PathBuf::from);
+    if let Some(path) = &node {
+        LOGGED.call_once(|| {
+            tracing::info!(
+                render_node = %path.display(),
+                "VAAPI render node overridden via PRDT_VAAPI_RENDER_NODE"
+            );
+        });
+    }
+    node
+}
 
 /// Production wiring entry point — host calls this to obtain a boxed
 /// `VideoProducer` for the Linux SW path. The capture source is injected
@@ -182,7 +217,7 @@ pub fn build_ffmpeg_vaapi_hevc_decoder(
         prdt_media_ffmpeg::HevcVaapiFfmpegDecoderConfig {
             width,
             height,
-            render_node: None,
+            render_node: vaapi_render_node_from_env(),
         },
     )
     .context("HevcVaapiFfmpegDecoder::new")?;
@@ -228,7 +263,7 @@ pub fn build_ffmpeg_vaapi_hevc_main10_decoder(
         prdt_media_ffmpeg::HevcVaapiMain10FfmpegDecoderConfig {
             width,
             height,
-            render_node: None,
+            render_node: vaapi_render_node_from_env(),
         },
     )
     .context("HevcVaapiMain10FfmpegDecoder::new")

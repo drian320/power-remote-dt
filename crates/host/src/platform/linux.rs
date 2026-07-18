@@ -13,7 +13,28 @@ use prdt_input_linux::{
     MAX_CLIPBOARD_BYTES as _INPUT_LINUX_MAX,
 };
 use prdt_protocol::{InputEvent, MonitorRect, VideoProducer};
+use std::path::PathBuf;
 use std::sync::Once;
+
+/// Reads `PRDT_VAAPI_RENDER_NODE` and returns the DRM render node path it
+/// names, if set. Multi-GPU hosts (e.g. an NVIDIA card alongside an AMD/Intel
+/// GPU exposing VAAPI) need this because FFmpeg's default VAAPI device pick
+/// can land on the wrong `/dev/dri/renderDN` and fail
+/// `av_hwdevice_ctx_create`. Logs once, at info level, when the override is
+/// present.
+fn vaapi_render_node_from_env() -> Option<PathBuf> {
+    static LOGGED: Once = Once::new();
+    let node = std::env::var_os("PRDT_VAAPI_RENDER_NODE").map(PathBuf::from);
+    if let Some(path) = &node {
+        LOGGED.call_once(|| {
+            tracing::info!(
+                render_node = %path.display(),
+                "VAAPI render node overridden via PRDT_VAAPI_RENDER_NODE"
+            );
+        });
+    }
+    node
+}
 
 /// Re-exported max clipboard bytes; identical value across OSes.
 pub const MAX_CLIPBOARD_BYTES: usize = _INPUT_LINUX_MAX;
@@ -143,7 +164,7 @@ pub fn build_video_producer(
             fps,
             initial_bitrate_bps: bitrate_bps,
             gop_size: fps,
-            render_node: None,
+            render_node: vaapi_render_node_from_env(),
         };
         let enc = HevcVaapiFfmpegEncoder::new(cfg).context("HevcVaapiFfmpegEncoder::new")?;
         let adapter = HevcVaapiFfmpegEncoderAdapter(enc);
@@ -205,7 +226,7 @@ pub fn build_video_producer(
             fps,
             initial_bitrate_bps: bitrate_bps,
             gop_size: fps,
-            render_node: None,
+            render_node: vaapi_render_node_from_env(),
         };
         let enc =
             HevcVaapiMain10FfmpegEncoder::new(cfg).context("HevcVaapiMain10FfmpegEncoder::new")?;
