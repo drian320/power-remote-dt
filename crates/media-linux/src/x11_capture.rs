@@ -56,8 +56,16 @@ impl X11ShmCapturer {
         // monitor setups (e.g. 7680x2160). Capturing the top-left subrect
         // gives a working session at the cost of losing the right-side
         // monitor — proper per-monitor selection is L2.
-        let width = (geometry.width as u32).min(MAX_CAPTURE_W);
-        let height = (geometry.height as u32).min(MAX_CAPTURE_H);
+        // Clamp to even dimensions: hevc_vaapi (and NV12/P010 4:2:0 chroma
+        // subsampling generally) requires even width/height, and the X11
+        // root geometry is not guaranteed to be even (real desktops always
+        // are, but nothing here enforces it). This clamp, plus the
+        // MAX_CAPTURE_W/H clamp above, is the single source of truth for
+        // capture geometry: encoder configs and producer frame buffers are
+        // both sized from `width()`/`height()`/`geometry()` below, so they
+        // can never disagree with what `grab_into` actually fills.
+        let width = (geometry.width as u32).min(MAX_CAPTURE_W) & !1;
+        let height = (geometry.height as u32).min(MAX_CAPTURE_H) & !1;
 
         // Probe MIT-SHM extension. Scope the Cookie so its borrow of
         // `conn` ends before we move `conn` into `Self`.

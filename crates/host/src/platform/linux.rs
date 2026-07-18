@@ -158,9 +158,12 @@ pub fn build_video_producer(
         use prdt_media_ffmpeg::{
             HevcVaapiFfmpegEncoder, HevcVaapiFfmpegEncoderAdapter, HevcVaapiFfmpegEncoderConfig,
         };
+        let cap = prdt_media_linux::x11_capture::X11ShmCapturer::new()
+            .context("X11ShmCapturer::new for ffmpeg path")?;
+        let (width, height) = (cap.width(), cap.height());
         let cfg = HevcVaapiFfmpegEncoderConfig {
-            width: 1920,
-            height: 1080,
+            width,
+            height,
             fps,
             initial_bitrate_bps: bitrate_bps,
             gop_size: fps,
@@ -168,9 +171,8 @@ pub fn build_video_producer(
         };
         let enc = HevcVaapiFfmpegEncoder::new(cfg).context("HevcVaapiFfmpegEncoder::new")?;
         let adapter = HevcVaapiFfmpegEncoderAdapter(enc);
-        let cap = prdt_media_linux::x11_capture::X11ShmCapturer::new()
-            .context("X11ShmCapturer::new for ffmpeg path")?;
-        let producer = FfmpegVaapiProducer::new(Box::new(cap), adapter, fps);
+        let producer = FfmpegVaapiProducer::new(Box::new(cap), adapter, fps, width, height)
+            .context("FfmpegVaapiProducer::new geometry check")?;
         return Ok(Box::new(producer));
     }
     #[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
@@ -179,9 +181,12 @@ pub fn build_video_producer(
         use prdt_media_ffmpeg::{
             HevcNvencFfmpegEncoder, HevcNvencFfmpegEncoderAdapter, HevcNvencFfmpegEncoderConfig,
         };
+        let cap = prdt_media_linux::x11_capture::X11ShmCapturer::new()
+            .context("X11ShmCapturer::new for ffmpeg path")?;
+        let (width, height) = (cap.width(), cap.height());
         let cfg = HevcNvencFfmpegEncoderConfig {
-            width: 1920,
-            height: 1080,
+            width,
+            height,
             fps,
             initial_bitrate_bps: bitrate_bps,
             gop_size: fps,
@@ -189,9 +194,8 @@ pub fn build_video_producer(
         };
         let enc = HevcNvencFfmpegEncoder::new(cfg).context("HevcNvencFfmpegEncoder::new")?;
         let adapter = HevcNvencFfmpegEncoderAdapter(enc);
-        let cap = prdt_media_linux::x11_capture::X11ShmCapturer::new()
-            .context("X11ShmCapturer::new for ffmpeg path")?;
-        let producer = FfmpegNvencProducer::new(Box::new(cap), adapter, fps);
+        let producer = FfmpegNvencProducer::new(Box::new(cap), adapter, fps, width, height)
+            .context("FfmpegNvencProducer::new geometry check")?;
         return Ok(Box::new(producer));
     }
     #[cfg(feature = "ffmpeg-encode-hevc-nvenc-npp-any")]
@@ -201,9 +205,12 @@ pub fn build_video_producer(
             HevcNvencNppFfmpegEncoder, HevcNvencNppFfmpegEncoderAdapter,
             HevcNvencNppFfmpegEncoderConfig,
         };
+        let cap = prdt_media_linux::x11_capture::X11ShmCapturer::new()
+            .context("X11ShmCapturer::new for ffmpeg-nvenc-hevc-npp path")?;
+        let (width, height) = (cap.width(), cap.height());
         let cfg = HevcNvencNppFfmpegEncoderConfig {
-            width: 1920,
-            height: 1080,
+            width,
+            height,
             fps,
             initial_bitrate_bps: bitrate_bps,
             gop_size: fps,
@@ -211,18 +218,20 @@ pub fn build_video_producer(
         };
         let enc = HevcNvencNppFfmpegEncoder::new(cfg).context("HevcNvencNppFfmpegEncoder::new")?;
         let adapter = HevcNvencNppFfmpegEncoderAdapter(enc);
-        let cap = prdt_media_linux::x11_capture::X11ShmCapturer::new()
-            .context("X11ShmCapturer::new for ffmpeg-nvenc-hevc-npp path")?;
-        let producer = FfmpegNvencNppProducer::new(Box::new(cap), adapter, fps);
+        let producer = FfmpegNvencNppProducer::new(Box::new(cap), adapter, fps, width, height)
+            .context("FfmpegNvencNppProducer::new geometry check")?;
         return Ok(Box::new(producer));
     }
     #[cfg(feature = "ffmpeg-encode-hevc-vaapi-main10-any")]
     if _backend == "ffmpeg-vaapi-hevc-main10" {
         use anyhow::Context as _;
         use prdt_media_ffmpeg::{HevcVaapiMain10FfmpegEncoder, HevcVaapiMain10FfmpegEncoderConfig};
+        let cap = prdt_media_linux::x11_capture::X11ShmCapturer::new()
+            .context("X11ShmCapturer::new for ffmpeg-vaapi-hevc-main10 path")?;
+        let (width, height) = (cap.width(), cap.height());
         let cfg = HevcVaapiMain10FfmpegEncoderConfig {
-            width: 1920,
-            height: 1080,
+            width,
+            height,
             fps,
             initial_bitrate_bps: bitrate_bps,
             gop_size: fps,
@@ -230,18 +239,20 @@ pub fn build_video_producer(
         };
         let enc =
             HevcVaapiMain10FfmpegEncoder::new(cfg).context("HevcVaapiMain10FfmpegEncoder::new")?;
-        let cap = prdt_media_linux::x11_capture::X11ShmCapturer::new()
-            .context("X11ShmCapturer::new for ffmpeg-vaapi-hevc-main10 path")?;
-        let producer = FfmpegVaapiMain10Producer::new(Box::new(cap), enc, fps);
+        let producer = FfmpegVaapiMain10Producer::new(Box::new(cap), enc, fps, width, height)
+            .context("FfmpegVaapiMain10Producer::new geometry check")?;
         return Ok(Box::new(producer));
     }
     #[cfg(feature = "ffmpeg-encode-hevc-nvenc-main10-any")]
     if _backend == "ffmpeg-nvenc-hevc-main10" {
         use anyhow::Context as _;
         use prdt_media_ffmpeg::{HevcNvencMain10FfmpegEncoder, HevcNvencMain10FfmpegEncoderConfig};
+        let cap = prdt_media_linux::x11_capture::X11ShmCapturer::new()
+            .context("X11ShmCapturer::new for ffmpeg-nvenc-hevc-main10 path")?;
+        let (width, height) = (cap.width(), cap.height());
         let cfg = HevcNvencMain10FfmpegEncoderConfig {
-            width: 1920,
-            height: 1080,
+            width,
+            height,
             fps,
             initial_bitrate_bps: bitrate_bps,
             gop_size: fps,
@@ -249,9 +260,8 @@ pub fn build_video_producer(
         };
         let enc =
             HevcNvencMain10FfmpegEncoder::new(cfg).context("HevcNvencMain10FfmpegEncoder::new")?;
-        let cap = prdt_media_linux::x11_capture::X11ShmCapturer::new()
-            .context("X11ShmCapturer::new for ffmpeg-nvenc-hevc-main10 path")?;
-        let producer = FfmpegNvencMain10Producer::new(Box::new(cap), enc, fps);
+        let producer = FfmpegNvencMain10Producer::new(Box::new(cap), enc, fps, width, height)
+            .context("FfmpegNvencMain10Producer::new geometry check")?;
         return Ok(Box::new(producer));
     }
     let producer = prdt_media_linux::build_video_producer(bitrate_bps, fps)?;
@@ -276,12 +286,28 @@ struct FfmpegVaapiProducer {
 
 #[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
 impl FfmpegVaapiProducer {
+    /// `encoder_width`/`encoder_height` are the dims the caller used to
+    /// build `encoder`'s config. This is a cheap one-time defensive check
+    /// (not the primary fix — `build_video_producer` now derives the
+    /// encoder config from `capture.geometry()` directly, so the two
+    /// should always agree by construction): if they ever disagree, the
+    /// encoder's internal buffers are sized for one geometry while this
+    /// producer would capture and feed it another, which previously
+    /// SIGSEGV'd inside `encode()`'s plane copy. Fail loudly instead.
     fn new(
         capture: Box<dyn prdt_media_linux::capture_source::CaptureSource>,
         encoder: prdt_media_ffmpeg::HevcVaapiFfmpegEncoderAdapter,
         fps: u32,
-    ) -> Self {
+        encoder_width: u32,
+        encoder_height: u32,
+    ) -> anyhow::Result<Self> {
         let (width, height) = capture.geometry();
+        anyhow::ensure!(
+            (width, height) == (encoder_width, encoder_height),
+            "capture geometry {width}x{height} does not match encoder dims \
+             {encoder_width}x{encoder_height}; refusing to construct a producer \
+             that would corrupt frames"
+        );
         let micros = if fps == 0 {
             16_667
         } else {
@@ -289,7 +315,7 @@ impl FfmpegVaapiProducer {
         };
         let mut pacer = tokio::time::interval(std::time::Duration::from_micros(micros));
         pacer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        Self {
+        Ok(Self {
             capture: Some(capture),
             encoder: Some(encoder),
             bgra_buf: vec![0u8; (width * height * 4) as usize],
@@ -299,7 +325,7 @@ impl FfmpegVaapiProducer {
             width,
             height,
             poisoned: false,
-        }
+        })
     }
 }
 
@@ -437,12 +463,22 @@ struct FfmpegNvencProducer {
 
 #[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
 impl FfmpegNvencProducer {
+    /// See [`FfmpegVaapiProducer::new`] for why `encoder_width`/
+    /// `encoder_height` are checked against `capture.geometry()`.
     fn new(
         capture: Box<dyn prdt_media_linux::capture_source::CaptureSource>,
         encoder: prdt_media_ffmpeg::HevcNvencFfmpegEncoderAdapter,
         fps: u32,
-    ) -> Self {
+        encoder_width: u32,
+        encoder_height: u32,
+    ) -> anyhow::Result<Self> {
         let (width, height) = capture.geometry();
+        anyhow::ensure!(
+            (width, height) == (encoder_width, encoder_height),
+            "capture geometry {width}x{height} does not match encoder dims \
+             {encoder_width}x{encoder_height}; refusing to construct a producer \
+             that would corrupt frames"
+        );
         let micros = if fps == 0 {
             16_667
         } else {
@@ -450,7 +486,7 @@ impl FfmpegNvencProducer {
         };
         let mut pacer = tokio::time::interval(std::time::Duration::from_micros(micros));
         pacer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        Self {
+        Ok(Self {
             capture: Some(capture),
             encoder: Some(encoder),
             bgra_buf: vec![0u8; (width * height * 4) as usize],
@@ -460,7 +496,7 @@ impl FfmpegNvencProducer {
             width,
             height,
             poisoned: false,
-        }
+        })
     }
 }
 
@@ -602,12 +638,22 @@ struct FfmpegNvencNppProducer {
 
 #[cfg(feature = "ffmpeg-encode-hevc-nvenc-npp-any")]
 impl FfmpegNvencNppProducer {
+    /// See [`FfmpegVaapiProducer::new`] for why `encoder_width`/
+    /// `encoder_height` are checked against `capture.geometry()`.
     fn new(
         capture: Box<dyn prdt_media_linux::capture_source::CaptureSource>,
         encoder: prdt_media_ffmpeg::HevcNvencNppFfmpegEncoderAdapter,
         fps: u32,
-    ) -> Self {
+        encoder_width: u32,
+        encoder_height: u32,
+    ) -> anyhow::Result<Self> {
         let (width, height) = capture.geometry();
+        anyhow::ensure!(
+            (width, height) == (encoder_width, encoder_height),
+            "capture geometry {width}x{height} does not match encoder dims \
+             {encoder_width}x{encoder_height}; refusing to construct a producer \
+             that would corrupt frames"
+        );
         let micros = if fps == 0 {
             16_667
         } else {
@@ -615,7 +661,7 @@ impl FfmpegNvencNppProducer {
         };
         let mut pacer = tokio::time::interval(std::time::Duration::from_micros(micros));
         pacer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        Self {
+        Ok(Self {
             capture: Some(capture),
             encoder: Some(encoder),
             bgra_buf: vec![0u8; (width * height * 4) as usize],
@@ -625,7 +671,7 @@ impl FfmpegNvencNppProducer {
             width,
             height,
             poisoned: false,
-        }
+        })
     }
 }
 
@@ -766,12 +812,26 @@ struct FfmpegVaapiMain10Producer {
 
 #[cfg(feature = "ffmpeg-encode-hevc-vaapi-main10-any")]
 impl FfmpegVaapiMain10Producer {
+    /// See [`FfmpegVaapiProducer::new`] for why `encoder_width`/
+    /// `encoder_height` are checked against `capture.geometry()`. This
+    /// matters even more here: the Main10 encoder's `encode()` takes
+    /// width/height per-call but its CPU/HW frame buffers are sized once,
+    /// at construction, from the config passed to `new()` — a mismatch is
+    /// exactly the sws_scale/hw_upload overflow this fix addresses.
     fn new(
         capture: Box<dyn prdt_media_linux::capture_source::CaptureSource>,
         encoder: prdt_media_ffmpeg::HevcVaapiMain10FfmpegEncoder,
         fps: u32,
-    ) -> Self {
+        encoder_width: u32,
+        encoder_height: u32,
+    ) -> anyhow::Result<Self> {
         let (width, height) = capture.geometry();
+        anyhow::ensure!(
+            (width, height) == (encoder_width, encoder_height),
+            "capture geometry {width}x{height} does not match encoder dims \
+             {encoder_width}x{encoder_height}; refusing to construct a producer \
+             that would corrupt frames"
+        );
         let micros = if fps == 0 {
             16_667
         } else {
@@ -779,7 +839,7 @@ impl FfmpegVaapiMain10Producer {
         };
         let mut pacer = tokio::time::interval(std::time::Duration::from_micros(micros));
         pacer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        Self {
+        Ok(Self {
             capture: Some(capture),
             encoder: Some(encoder),
             bgra_buf: vec![0u8; (width * height * 4) as usize],
@@ -789,7 +849,7 @@ impl FfmpegVaapiMain10Producer {
             width,
             height,
             poisoned: false,
-        }
+        })
     }
 }
 
@@ -919,12 +979,22 @@ struct FfmpegNvencMain10Producer {
 
 #[cfg(feature = "ffmpeg-encode-hevc-nvenc-main10-any")]
 impl FfmpegNvencMain10Producer {
+    /// See [`FfmpegVaapiMain10Producer::new`] for why `encoder_width`/
+    /// `encoder_height` are checked against `capture.geometry()`.
     fn new(
         capture: Box<dyn prdt_media_linux::capture_source::CaptureSource>,
         encoder: prdt_media_ffmpeg::HevcNvencMain10FfmpegEncoder,
         fps: u32,
-    ) -> Self {
+        encoder_width: u32,
+        encoder_height: u32,
+    ) -> anyhow::Result<Self> {
         let (width, height) = capture.geometry();
+        anyhow::ensure!(
+            (width, height) == (encoder_width, encoder_height),
+            "capture geometry {width}x{height} does not match encoder dims \
+             {encoder_width}x{encoder_height}; refusing to construct a producer \
+             that would corrupt frames"
+        );
         let micros = if fps == 0 {
             16_667
         } else {
@@ -932,7 +1002,7 @@ impl FfmpegNvencMain10Producer {
         };
         let mut pacer = tokio::time::interval(std::time::Duration::from_micros(micros));
         pacer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        Self {
+        Ok(Self {
             capture: Some(capture),
             encoder: Some(encoder),
             bgra_buf: vec![0u8; (width * height * 4) as usize],
@@ -942,7 +1012,7 @@ impl FfmpegNvencMain10Producer {
             width,
             height,
             poisoned: false,
-        }
+        })
     }
 }
 
