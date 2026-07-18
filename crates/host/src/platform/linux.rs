@@ -89,8 +89,46 @@ impl LinuxEncoder {
     }
 }
 
+/// Pure advertisement decision for `--encoder auto`. Factored out of
+/// [`linux_supported_codecs`] so the full acceptance matrix can be unit-tested
+/// without touching real hardware: the three inputs (`force_sw`,
+/// `capture_is_x11`, and the resolved HEVC backend) are all injectable.
+///
+/// `auto` advertises `[H265, H264]` ONLY when software encoding is not forced,
+/// the capture backend resolves to X11 (the legacy FFmpeg producer path
+/// captures via X11 only), and the shared probe-backed resolver found a
+/// buildable HEVC backend. Otherwise it advertises `[H264]` — byte-identical
+/// to the pre-auto-HEVC behavior. Main10 is never advertised here (auto is
+/// 8-bit only).
+fn advertised_auto_codecs(
+    force_sw: bool,
+    capture_is_x11: bool,
+    hevc_backend: Option<&str>,
+) -> Vec<prdt_protocol::Codec> {
+    if !force_sw && capture_is_x11 && hevc_backend.is_some() {
+        vec![prdt_protocol::Codec::H265, prdt_protocol::Codec::H264]
+    } else {
+        vec![prdt_protocol::Codec::H264]
+    }
+}
+
 /// Advertised codecs for the Linux encoder selection (used in host handshake).
-pub fn linux_supported_codecs(encoder_arg: &str) -> Vec<prdt_protocol::Codec> {
+///
+/// `force_sw` mirrors `--force-sw`; `capture_is_x11` is the resolved capture
+/// backend (see [`capture_backend_is_x11`]). Both only affect the `auto` arm —
+/// every explicit-encoder arm is byte-identical to before.
+pub fn linux_supported_codecs(
+    encoder_arg: &str,
+    force_sw: bool,
+    capture_is_x11: bool,
+) -> Vec<prdt_protocol::Codec> {
+    // Resolve `auto` via the shared probe-backed resolver, gated on capture
+    // backend + --force-sw. Handled *before* `normalize_encoder` so the raw
+    // "auto" string is not collapsed to a canonical HEVC backend name (which
+    // would otherwise fall into the bare `[H265]` arm and bypass the gate).
+    if encoder_arg == "auto" {
+        return advertised_auto_codecs(force_sw, capture_is_x11, resolve_hevc_auto_backend());
+    }
     match normalize_encoder(encoder_arg) {
         #[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
         "ffmpeg-vaapi-hevc" => vec![prdt_protocol::Codec::H265],
@@ -106,14 +144,22 @@ pub fn linux_supported_codecs(encoder_arg: &str) -> Vec<prdt_protocol::Codec> {
 /// a Main10 encoder feature is compiled in so that Main10-capable clients can
 /// negotiate successfully. NOT the HelloAck advertisement list; use
 /// `supported_codecs_for(hello_codec)` to build that (R15 filter).
-pub fn linux_supported_codecs_negotiation(encoder_arg: &str) -> Vec<prdt_protocol::Codec> {
+///
+/// Main10 is appended only for *explicit* encoder args, never for `auto`: the
+/// shared auto-HEVC resolver is 8-bit only, so `auto` must not advertise a
+/// 10-bit codec it will never build.
+pub fn linux_supported_codecs_negotiation(
+    encoder_arg: &str,
+    force_sw: bool,
+    capture_is_x11: bool,
+) -> Vec<prdt_protocol::Codec> {
     #[allow(unused_mut)] // `mut` is conditional on Main10 features being enabled
-    let mut v = linux_supported_codecs(encoder_arg);
+    let mut v = linux_supported_codecs(encoder_arg, force_sw, capture_is_x11);
     #[cfg(any(
         feature = "ffmpeg-encode-hevc-vaapi-main10-any",
         feature = "ffmpeg-encode-hevc-nvenc-main10-any"
     ))]
-    if !v.contains(&prdt_protocol::Codec::H265Main10) {
+    if encoder_arg != "auto" && !v.contains(&prdt_protocol::Codec::H265Main10) {
         v.push(prdt_protocol::Codec::H265Main10);
     }
     v
@@ -151,7 +197,23 @@ pub fn build_video_producer(
     fps: u32,
     _negotiated_codec: prdt_protocol::Codec,
 ) -> anyhow::Result<Box<dyn VideoProducer>> {
-    let _backend = normalize_encoder(args_encoder);
+    // `auto` is resolved codec-aware via the shared probe-backed resolver so
+    // the backend we build is exactly what the handshake advertised: H265 →
+    // the probe-approved HEVC backend, H264 → OpenH264. Every explicit encoder
+    // arg keeps the byte-identical `normalize_encoder` mapping.
+    let _backend = if args_encoder == "auto" {
+        resolve_auto_build_backend(_negotiated_codec)
+    } else {
+        normalize_encoder(args_encoder)
+    };
+    // Whether this build came from `--encoder auto` (i.e. a probe-approved
+    // path). Only referenced by the HEVC arms below, so gate its definition to
+    // the same features to avoid an unused-variable warning on SW-only builds.
+    #[cfg(any(
+        feature = "ffmpeg-encode-hevc-vaapi-any",
+        feature = "ffmpeg-encode-hevc-nvenc-any"
+    ))]
+    let from_auto = args_encoder == "auto";
     #[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
     if _backend == "ffmpeg-vaapi-hevc" {
         use anyhow::Context as _;
@@ -169,7 +231,18 @@ pub fn build_video_producer(
             gop_size: fps,
             render_node: vaapi_render_node_from_env(),
         };
-        let enc = HevcVaapiFfmpegEncoder::new(cfg).context("HevcVaapiFfmpegEncoder::new")?;
+        let enc = HevcVaapiFfmpegEncoder::new(cfg)
+            .map_err(|e| {
+                if from_auto {
+                    tracing::warn!(
+                        error = %e,
+                        backend = "ffmpeg-vaapi-hevc",
+                        "auto-HEVC probe passed but construction failed"
+                    );
+                }
+                e
+            })
+            .context("HevcVaapiFfmpegEncoder::new")?;
         let adapter = HevcVaapiFfmpegEncoderAdapter(enc);
         let producer = FfmpegVaapiProducer::new(Box::new(cap), adapter, fps, width, height)
             .context("FfmpegVaapiProducer::new geometry check")?;
@@ -192,7 +265,18 @@ pub fn build_video_producer(
             gop_size: fps,
             cuda_device_index: None,
         };
-        let enc = HevcNvencFfmpegEncoder::new(cfg).context("HevcNvencFfmpegEncoder::new")?;
+        let enc = HevcNvencFfmpegEncoder::new(cfg)
+            .map_err(|e| {
+                if from_auto {
+                    tracing::warn!(
+                        error = %e,
+                        backend = "ffmpeg-nvenc-hevc",
+                        "auto-HEVC probe passed but construction failed"
+                    );
+                }
+                e
+            })
+            .context("HevcNvencFfmpegEncoder::new")?;
         let adapter = HevcNvencFfmpegEncoderAdapter(enc);
         let producer = FfmpegNvencProducer::new(Box::new(cap), adapter, fps, width, height)
             .context("FfmpegNvencProducer::new geometry check")?;
@@ -1301,6 +1385,170 @@ fn normalize_encoder(arg: &str) -> &'static str {
     }
 }
 
+/// Parse `PRDT_PREFER_NVENC` into a bool. `{1, true, yes, on}`
+/// (case-insensitive, trimmed) enable the preference; every other value —
+/// including unset / empty — is `false`. Shared by [`resolve_auto_encoder`]
+/// and [`resolve_hevc_auto_backend`] so both honor the same convention.
+fn prefer_nvenc_from_env() -> bool {
+    std::env::var("PRDT_PREFER_NVENC")
+        .ok()
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            matches!(v.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
+/// Construct a tiny VAAPI HEVC encoder to prove the backend is actually
+/// usable end-to-end (HW frames context + `avcodec_open2`, which catches a
+/// missing HEVC encode entrypoint — not merely device presence), then drop it
+/// immediately to release the device. Returns `(passed, outcome_tag)`.
+fn probe_vaapi_hevc() -> (bool, &'static str) {
+    #[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
+    {
+        use prdt_media_ffmpeg::{HevcVaapiFfmpegEncoder, HevcVaapiFfmpegEncoderConfig};
+        let cfg = HevcVaapiFfmpegEncoderConfig {
+            width: 320,
+            height: 180,
+            fps: 30,
+            initial_bitrate_bps: 1_000_000,
+            gop_size: 30,
+            render_node: vaapi_render_node_from_env(),
+        };
+        match HevcVaapiFfmpegEncoder::new(cfg) {
+            Ok(enc) => {
+                drop(enc);
+                (true, "ok")
+            }
+            Err(e) => {
+                tracing::info!(error = %e, "auto-HEVC vaapi construction probe failed");
+                (false, "construction-failed")
+            }
+        }
+    }
+    #[cfg(not(feature = "ffmpeg-encode-hevc-vaapi-any"))]
+    {
+        (false, "not-compiled")
+    }
+}
+
+/// NVENC counterpart of [`probe_vaapi_hevc`]. Constructs a tiny NVENC HEVC
+/// encoder (CUDA init + `avcodec_open2`) then drops it. Returns
+/// `(passed, outcome_tag)`.
+fn probe_nvenc_hevc() -> (bool, &'static str) {
+    #[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
+    {
+        use prdt_media_ffmpeg::{HevcNvencFfmpegEncoder, HevcNvencFfmpegEncoderConfig};
+        let cfg = HevcNvencFfmpegEncoderConfig {
+            width: 320,
+            height: 180,
+            fps: 30,
+            initial_bitrate_bps: 1_000_000,
+            gop_size: 30,
+            cuda_device_index: None,
+        };
+        match HevcNvencFfmpegEncoder::new(cfg) {
+            Ok(enc) => {
+                drop(enc);
+                (true, "ok")
+            }
+            Err(e) => {
+                tracing::info!(error = %e, "auto-HEVC nvenc construction probe failed");
+                (false, "construction-failed")
+            }
+        }
+    }
+    #[cfg(not(feature = "ffmpeg-encode-hevc-nvenc-any"))]
+    {
+        (false, "not-compiled")
+    }
+}
+
+/// Shared, probe-backed auto-HEVC decision point consulted by BOTH the
+/// handshake codec advertisement ([`linux_supported_codecs`]) and the legacy
+/// auto-encoder build path ([`resolve_auto_build_backend`]), so what we
+/// advertise is exactly what we can construct.
+///
+/// Returns the canonical backend name of the first HEVC encoder whose *real*
+/// construction probe succeeds, honoring the same `PRDT_PREFER_NVENC` ordering
+/// convention as [`resolve_auto_encoder`] (default `[vaapi, nvenc]`, flipped
+/// when the env var is set). `None` when no HEVC backend is compiled in or
+/// every compiled candidate fails its probe.
+///
+/// OnceLock-cached: the probe (which builds and drops a real encoder) runs at
+/// most once per process, so the handshake pays no repeated cost and the
+/// advertisement and build path observe an identical decision.
+fn resolve_hevc_auto_backend() -> Option<&'static str> {
+    static CACHE: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| {
+        let prefer_nvenc = prefer_nvenc_from_env();
+        let order: [&str; 2] = if prefer_nvenc {
+            ["ffmpeg-nvenc-hevc", "ffmpeg-vaapi-hevc"]
+        } else {
+            ["ffmpeg-vaapi-hevc", "ffmpeg-nvenc-hevc"]
+        };
+        let mut chosen: Option<&'static str> = None;
+        let mut vaapi_outcome = "not-probed";
+        let mut nvenc_outcome = "not-probed";
+        for cand in order {
+            if chosen.is_some() {
+                break; // first success wins; skip the remaining probe(s)
+            }
+            match cand {
+                "ffmpeg-vaapi-hevc" => {
+                    let (ok, outcome) = probe_vaapi_hevc();
+                    vaapi_outcome = outcome;
+                    if ok {
+                        chosen = Some("ffmpeg-vaapi-hevc");
+                    }
+                }
+                "ffmpeg-nvenc-hevc" => {
+                    let (ok, outcome) = probe_nvenc_hevc();
+                    nvenc_outcome = outcome;
+                    if ok {
+                        chosen = Some("ffmpeg-nvenc-hevc");
+                    }
+                }
+                _ => {}
+            }
+        }
+        tracing::info!(
+            decision = chosen.unwrap_or("none"),
+            prefer_nvenc,
+            vaapi_probe = vaapi_outcome,
+            nvenc_probe = nvenc_outcome,
+            "auto-HEVC backend resolved via construction probe"
+        );
+        chosen
+    })
+}
+
+/// Resolve the concrete backend to *build* for `--encoder auto`, given the
+/// negotiated codec. Shares the cached [`resolve_hevc_auto_backend`] decision
+/// with the handshake advertisement so we build exactly what we advertised:
+///
+/// * `H265` → the probe-approved HEVC backend. If (defensively — this should
+///   not happen since the resolver is cached) it now returns `None`, warn and
+///   fall back to the cfg-cascade [`resolve_auto_encoder`].
+/// * `H264` → `openh264` (auto negotiated 8-bit SW).
+/// * anything else → the cfg-cascade [`resolve_auto_encoder`].
+fn resolve_auto_build_backend(negotiated_codec: prdt_protocol::Codec) -> &'static str {
+    match negotiated_codec {
+        prdt_protocol::Codec::H265 => match resolve_hevc_auto_backend() {
+            Some(backend) => backend,
+            None => {
+                tracing::warn!(
+                    "auto negotiated H265 but no HEVC backend probe passed at build time; \
+                     falling back to cfg-cascade resolution"
+                );
+                resolve_auto_encoder()
+            }
+        },
+        prdt_protocol::Codec::H264 => "openh264",
+        _ => resolve_auto_encoder(),
+    }
+}
+
 /// Resolve `--encoder auto` to a canonical backend name based on the cfg
 /// cascade. Policy: VAAPI is preferred when both VAAPI and NVENC compile in
 /// (Intel iGPU is the more common deployment); `PRDT_PREFER_NVENC` in
@@ -1321,13 +1569,7 @@ fn resolve_auto_encoder() -> &'static str {
         )),
         allow(unused_variables)
     )]
-    let prefer_nvenc = std::env::var("PRDT_PREFER_NVENC")
-        .ok()
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            matches!(v.as_str(), "1" | "true" | "yes" | "on")
-        })
-        .unwrap_or(false);
+    let prefer_nvenc = prefer_nvenc_from_env();
 
     #[cfg(all(
         feature = "ffmpeg-encode-hevc-vaapi-any",
@@ -1479,6 +1721,21 @@ pub fn factory(
         "P5B-1 capture backend resolved"
     );
     std::sync::Arc::new(LinuxSwFactory::new(backend))
+}
+
+/// Whether the capture backend for this session resolves to X11 MIT-SHM.
+///
+/// The legacy FFmpeg producer path captures via X11 only, so auto-HEVC is
+/// gated on this: Wayland-portal sessions keep the H264 policy path. Reuses
+/// `detect_capture_backend`, which never fires the Wayland portal consent
+/// dialog (it only checks env + a D-Bus `NameHasOwner`); the result is
+/// deterministic within a process, so it matches the per-session backend the
+/// factory later logs.
+pub fn capture_backend_is_x11(capture_backend_arg: &str) -> bool {
+    use prdt_media_linux::policy::{detect_capture_backend, CaptureBackend, CaptureBackendChoice};
+    let choice = CaptureBackendChoice::parse(capture_backend_arg);
+    let (backend, _reason) = detect_capture_backend(choice);
+    backend == CaptureBackend::X11Shm
 }
 
 #[cfg(test)]
@@ -1648,6 +1905,89 @@ mod tests {
         assert_eq!(normalize_encoder("ffmpeg-nvenc-hevc-npp"), "openh264");
         assert_eq!(normalize_encoder("nvenc-npp"), "openh264");
     }
+
+    // Auto-HEVC advertisement decision matrix ---------------------------------
+    // These exercise the pure `advertised_auto_codecs` gate over every row of
+    // the acceptance matrix (spec §Acceptance 3-5) with the probe result
+    // injected, so no real hardware is required.
+
+    #[test]
+    fn advertised_auto_codecs_hevc_when_x11_and_probe_and_not_forced() {
+        use prdt_protocol::Codec;
+        // Acceptance 1/2: probe passed, X11, SW not forced → [H265, H264].
+        assert_eq!(
+            advertised_auto_codecs(false, true, Some("ffmpeg-vaapi-hevc")),
+            vec![Codec::H265, Codec::H264]
+        );
+        assert_eq!(
+            advertised_auto_codecs(false, true, Some("ffmpeg-nvenc-hevc")),
+            vec![Codec::H265, Codec::H264]
+        );
+    }
+
+    #[test]
+    fn advertised_auto_codecs_h264_only_when_force_sw() {
+        use prdt_protocol::Codec;
+        // Acceptance 4: --force-sw → [H264] even with a probe-approved backend.
+        assert_eq!(
+            advertised_auto_codecs(true, true, Some("ffmpeg-vaapi-hevc")),
+            vec![Codec::H264]
+        );
+    }
+
+    #[test]
+    fn advertised_auto_codecs_h264_only_when_not_x11() {
+        use prdt_protocol::Codec;
+        // Acceptance 3: Wayland-resolved capture → [H264] (FFmpeg path is X11-only).
+        assert_eq!(
+            advertised_auto_codecs(false, false, Some("ffmpeg-vaapi-hevc")),
+            vec![Codec::H264]
+        );
+    }
+
+    #[test]
+    fn advertised_auto_codecs_h264_only_when_no_backend() {
+        use prdt_protocol::Codec;
+        // Acceptance 5: no HEVC backend probed (incl. no-feature build) → [H264].
+        assert_eq!(advertised_auto_codecs(false, true, None), vec![Codec::H264]);
+        // Every "off" combination collapses to [H264].
+        assert_eq!(advertised_auto_codecs(true, false, None), vec![Codec::H264]);
+    }
+
+    // Auto must never advertise Main10 in the negotiation set (spec §2, §4).
+    // Runs regardless of compiled features: with a Main10 feature it proves the
+    // `encoder_arg != "auto"` gate; without, it is trivially true.
+    #[test]
+    #[serial]
+    fn linux_negotiation_auto_never_advertises_main10() {
+        use prdt_protocol::Codec;
+        for &force_sw in &[false, true] {
+            for &x11 in &[false, true] {
+                let v = linux_supported_codecs_negotiation("auto", force_sw, x11);
+                assert!(
+                    !v.contains(&Codec::H265Main10),
+                    "auto must never advertise H265Main10 (force_sw={force_sw}, x11={x11}); got {v:?}"
+                );
+            }
+        }
+    }
+
+    // resolve_auto_build_backend: the H264 arm is deterministic and needs no
+    // hardware — auto negotiated to 8-bit always builds OpenH264.
+    #[test]
+    fn resolve_auto_build_backend_h264_is_openh264() {
+        assert_eq!(
+            resolve_auto_build_backend(prdt_protocol::Codec::H264),
+            "openh264"
+        );
+    }
+
+    // NOTE: the H265 arm of `resolve_auto_build_backend` (and the delegation of
+    // the advertisement to `resolve_hevc_auto_backend`) cannot be unit-tested
+    // here without real HEVC hardware: `resolve_hevc_auto_backend` builds and
+    // drops a real VAAPI/NVENC encoder as its probe, and the resolver is a
+    // process-wide OnceLock with no injection seam. Its correctness is covered
+    // by the hardware smoke (spec §Acceptance 1-2) instead.
 
     // R15 mitigation: pre-PR1 clients must never receive H265Main10 in HelloAck.
     #[test]
