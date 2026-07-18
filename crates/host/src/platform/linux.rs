@@ -127,7 +127,16 @@ pub fn linux_supported_codecs(
     // "auto" string is not collapsed to a canonical HEVC backend name (which
     // would otherwise fall into the bare `[H265]` arm and bypass the gate).
     if encoder_arg == "auto" {
-        return advertised_auto_codecs(force_sw, capture_is_x11, resolve_hevc_auto_backend());
+        // Only invoke the probe-backed resolver when the gate is actually
+        // open (`!force_sw && capture_is_x11`) — `Option::then` is lazy, so a
+        // force-sw or Wayland-resolved session short-circuits before
+        // `resolve_hevc_auto_backend` ever builds/drops a real encoder or
+        // logs its probe outcome. `advertised_auto_codecs` stays the pure,
+        // unit-tested gate function unchanged.
+        let hevc_backend = (!force_sw && capture_is_x11)
+            .then(resolve_hevc_auto_backend)
+            .flatten();
+        return advertised_auto_codecs(force_sw, capture_is_x11, hevc_backend);
     }
     match normalize_encoder(encoder_arg) {
         #[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
@@ -1406,20 +1415,9 @@ fn prefer_nvenc_from_env() -> bool {
 fn probe_vaapi_hevc() -> (bool, &'static str) {
     #[cfg(feature = "ffmpeg-encode-hevc-vaapi-any")]
     {
-        use prdt_media_ffmpeg::{HevcVaapiFfmpegEncoder, HevcVaapiFfmpegEncoderConfig};
-        let cfg = HevcVaapiFfmpegEncoderConfig {
-            width: 320,
-            height: 180,
-            fps: 30,
-            initial_bitrate_bps: 1_000_000,
-            gop_size: 30,
-            render_node: vaapi_render_node_from_env(),
-        };
-        match HevcVaapiFfmpegEncoder::new(cfg) {
-            Ok(enc) => {
-                drop(enc);
-                (true, "ok")
-            }
+        let render_node = vaapi_render_node_from_env();
+        match prdt_media_ffmpeg::probe_hevc_vaapi(render_node.as_deref()) {
+            Ok(()) => (true, "ok"),
             Err(e) => {
                 tracing::info!(error = %e, "auto-HEVC vaapi construction probe failed");
                 (false, "construction-failed")
@@ -1438,20 +1436,8 @@ fn probe_vaapi_hevc() -> (bool, &'static str) {
 fn probe_nvenc_hevc() -> (bool, &'static str) {
     #[cfg(feature = "ffmpeg-encode-hevc-nvenc-any")]
     {
-        use prdt_media_ffmpeg::{HevcNvencFfmpegEncoder, HevcNvencFfmpegEncoderConfig};
-        let cfg = HevcNvencFfmpegEncoderConfig {
-            width: 320,
-            height: 180,
-            fps: 30,
-            initial_bitrate_bps: 1_000_000,
-            gop_size: 30,
-            cuda_device_index: None,
-        };
-        match HevcNvencFfmpegEncoder::new(cfg) {
-            Ok(enc) => {
-                drop(enc);
-                (true, "ok")
-            }
+        match prdt_media_ffmpeg::probe_hevc_nvenc() {
+            Ok(()) => (true, "ok"),
             Err(e) => {
                 tracing::info!(error = %e, "auto-HEVC nvenc construction probe failed");
                 (false, "construction-failed")

@@ -73,6 +73,23 @@ pub struct HevcNvencFfmpegEncoder {
 
 impl HevcNvencFfmpegEncoder {
     pub fn new(cfg: HevcNvencFfmpegEncoderConfig) -> Result<Self, FfmpegError> {
+        Self::new_inner(cfg, true)
+    }
+
+    /// Shared construction path behind [`Self::new`] and the crate's
+    /// availability-probe helper ([`crate::probe::probe_hevc_nvenc`]).
+    ///
+    /// `emit_ready_event` gates the `event="encoder_ready"` tracing emission
+    /// at the end of construction: the real `new()` path always emits it
+    /// (`true`), while the probe path passes `false` so a throwaway
+    /// probe-and-drop encoder does not double-log `encoder_ready` for a
+    /// session that immediately builds the real encoder afterward. Every
+    /// other side effect (CUDA device open, codec open, frame alloc) is
+    /// identical between the two callers.
+    pub(crate) fn new_inner(
+        cfg: HevcNvencFfmpegEncoderConfig,
+        emit_ready_event: bool,
+    ) -> Result<Self, FfmpegError> {
         // 1. Open HW device + frames.
         let device = CudaHwDevice::open()?;
         let frames = CudaHwFrames::new(&device, cfg.width, cfg.height)?;
@@ -152,16 +169,19 @@ impl HevcNvencFfmpegEncoder {
         // SAFETY: hw_ptr is non-null after successful av_hwframe_get_buffer.
         let hw_frame = unsafe { NonNull::new_unchecked(hw_ptr) };
 
-        // 5. Emit encoder_ready event.
-        tracing::info!(
-            target: "video.pipeline",
-            event = "encoder_ready",
-            backend = "ffmpeg-nvenc-hevc",
-            codec = "h265",
-            profile = "main",
-            bitdepth = 8,
-            gop = cfg.gop_size,
-        );
+        // 5. Emit encoder_ready event (skipped for probe-only construction —
+        // see `emit_ready_event` doc on `new_inner`).
+        if emit_ready_event {
+            tracing::info!(
+                target: "video.pipeline",
+                event = "encoder_ready",
+                backend = "ffmpeg-nvenc-hevc",
+                codec = "h265",
+                profile = "main",
+                bitdepth = 8,
+                gop = cfg.gop_size,
+            );
+        }
 
         Ok(Self {
             device,
