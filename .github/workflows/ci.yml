@@ -10,6 +10,14 @@ on:
       - 'packaging/windows/**'
       - '.github/workflows/ci.yml'
 
+# windows-latest now ships CMake 4.x, which removed compatibility with
+# cmake_minimum_required(< 3.5). audiopus_sys 0.2.2's vendored Opus
+# CMakeLists still declares an older minimum, so every Windows build of the
+# workspace fails at its build script without this official escape hatch.
+# Harmless on runners with CMake < 4. See rust-lang/cmake-rs + CMake 4 notes.
+env:
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+
 jobs:
   check:
     runs-on: windows-latest

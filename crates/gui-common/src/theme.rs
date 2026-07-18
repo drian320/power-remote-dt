@@ -73,50 +73,50 @@ pub fn dark_style() -> Style {
     v.hyperlink_color = tokens::ACCENT;
 
     v.window_corner_radius = radius();
-    v.window_stroke = Stroke::new(1.0, tokens::BORDER);
+    v.window_stroke = Stroke::new(1.0_f32, tokens::BORDER);
     v.menu_corner_radius = radius();
 
     // Selection (text selection, selected combo entries) uses the accent.
     v.selection.bg_fill = tokens::ACCENT.gamma_multiply(0.35);
-    v.selection.stroke = Stroke::new(1.0, tokens::ACCENT);
+    v.selection.stroke = Stroke::new(1.0_f32, tokens::ACCENT);
 
     // Widget states.
     let w = &mut v.widgets;
     // Non-interactive: labels, separators, group frames.
     w.noninteractive.bg_fill = tokens::BG;
     w.noninteractive.weak_bg_fill = tokens::BG;
-    w.noninteractive.bg_stroke = Stroke::new(1.0, tokens::BORDER);
-    w.noninteractive.fg_stroke = Stroke::new(1.0, tokens::TEXT_DIM);
+    w.noninteractive.bg_stroke = Stroke::new(1.0_f32, tokens::BORDER);
+    w.noninteractive.fg_stroke = Stroke::new(1.0_f32, tokens::TEXT_DIM);
     w.noninteractive.corner_radius = radius();
 
     // Inactive: buttons / combos at rest.
     w.inactive.bg_fill = tokens::SURFACE;
     w.inactive.weak_bg_fill = tokens::SURFACE;
-    w.inactive.bg_stroke = Stroke::new(1.0, tokens::BORDER);
-    w.inactive.fg_stroke = Stroke::new(1.0, tokens::TEXT);
+    w.inactive.bg_stroke = Stroke::new(1.0_f32, tokens::BORDER);
+    w.inactive.fg_stroke = Stroke::new(1.0_f32, tokens::TEXT);
     w.inactive.corner_radius = radius();
 
     // Hovered.
     w.hovered.bg_fill = tokens::SURFACE_HOVER;
     w.hovered.weak_bg_fill = tokens::SURFACE_HOVER;
-    w.hovered.bg_stroke = Stroke::new(1.0, tokens::ACCENT_DIM);
-    w.hovered.fg_stroke = Stroke::new(1.0, tokens::TEXT);
+    w.hovered.bg_stroke = Stroke::new(1.0_f32, tokens::ACCENT_DIM);
+    w.hovered.fg_stroke = Stroke::new(1.0_f32, tokens::TEXT);
     w.hovered.corner_radius = radius();
     w.hovered.expansion = 1.0;
 
     // Active (pressed / focused).
     w.active.bg_fill = tokens::SURFACE_HOVER;
     w.active.weak_bg_fill = tokens::SURFACE_HOVER;
-    w.active.bg_stroke = Stroke::new(1.0, tokens::ACCENT);
-    w.active.fg_stroke = Stroke::new(1.5, tokens::TEXT);
+    w.active.bg_stroke = Stroke::new(1.0_f32, tokens::ACCENT);
+    w.active.fg_stroke = Stroke::new(1.5_f32, tokens::TEXT);
     w.active.corner_radius = radius();
     w.active.expansion = 1.0;
 
     // Open (combo box / menu expanded).
     w.open.bg_fill = tokens::SURFACE;
     w.open.weak_bg_fill = tokens::SURFACE;
-    w.open.bg_stroke = Stroke::new(1.0, tokens::BORDER);
-    w.open.fg_stroke = Stroke::new(1.0, tokens::TEXT);
+    w.open.bg_stroke = Stroke::new(1.0_f32, tokens::BORDER);
+    w.open.fg_stroke = Stroke::new(1.0_f32, tokens::TEXT);
     w.open.corner_radius = radius();
 
     // Comfortable spacing — performance tools read better with a little air.
