@@ -8,6 +8,12 @@ on:
 jobs:
   healthcheck:
     runs-on: ubuntu-latest
+    # issues: write is required for the failure-path issue creation below —
+    # the default GITHUB_TOKEN on this repo is read-only and the create call
+    # 403s without it (observed weekly since 2026-06-08).
+    permissions:
+      contents: read
+      issues: write
     steps:
       - uses: actions/checkout@v4
 
@@ -60,7 +66,7 @@ jobs:
                 `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
                 '',
                 'One or both of the URLs in `packaging/windows/ffmpeg-manifest.json` returned a non-2xx response.',
-                'See the rotation runbook in `docs/superpowers/windows-ffmpeg-mirror.md`.',
+                'See the rotation runbook in `packaging/windows/README.md` ("Rotating the pin").',
               ].join('\n'),
               labels: ['infra:ffmpeg-mirror'],
             });
