@@ -48,7 +48,7 @@ FFmpeg Windows DLLs used by the `media-win-ffmpeg` Cargo feature.
 The `mirror_url` field in `ffmpeg-manifest.json` points to:
 
 ```
-https://pub-a0d71751e9de470a8ba614ad2abd87c8.r2.dev/ffmpeg-n7.1.4-win64-lgpl-shared.zip
+https://pub-a0d71751e9de470a8ba614ad2abd87c8.r2.dev/ffmpeg-n7.1.5-win64-lgpl-shared.zip
 ```
 
 Backend: **Cloudflare R2** (S3-compatible object storage), bucket
@@ -86,7 +86,8 @@ service incident).
 
 ## License
 
-The fetched bundle is the BtbN `lgpl-shared` variant of FFmpeg n6.1.1.  It
+The fetched bundle is the BtbN `lgpl-shared` variant of FFmpeg (version
+pinned in `ffmpeg-manifest.json`).  It
 contains no GPL components (no libx265, no libfdk-aac).  Dynamic linking to
 LGPL FFmpeg DLLs from an Apache-2.0 binary is permitted under the LGPL
 provided the DLLs and their source-availability terms are documented at
