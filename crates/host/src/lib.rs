@@ -894,9 +894,18 @@ pub async fn run_host(
         // `supported_codecs_for` is passed as the ack-filter: it strips
         // H265Main10 from HelloAck when the inbound Hello.codec is a
         // pre-PR1 codec (R15 mitigation).
+        // `--encoder auto` advertises HEVC only when SW is not forced, the
+        // capture backend resolves to X11 (the FFmpeg producer path is
+        // X11-only), and the shared probe-backed resolver found a buildable
+        // HEVC backend. `capture_backend_is_x11` reuses `detect_capture_backend`
+        // (no portal consent dialog) and is deterministic, so it agrees with
+        // the per-session backend the factory logs below.
         #[cfg(target_os = "linux")]
-        let host_supported: Vec<Codec> =
-            crate::platform::linux::linux_supported_codecs_negotiation(&args.encoder);
+        let host_supported: Vec<Codec> = crate::platform::linux::linux_supported_codecs_negotiation(
+            &args.encoder,
+            args.force_sw,
+            crate::platform::linux::capture_backend_is_x11(&args.capture_backend),
+        );
         let hs_result = match host_handshake(
             &*transport,
             &auth_hook,

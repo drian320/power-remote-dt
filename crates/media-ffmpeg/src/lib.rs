@@ -203,6 +203,14 @@ pub(crate) mod nvenc_common;
     target_os = "linux"
 ))]
 mod options;
+#[cfg(all(
+    any(
+        feature = "ffmpeg-encode-hevc-vaapi-any",
+        feature = "ffmpeg-encode-hevc-nvenc-any"
+    ),
+    target_os = "linux"
+))]
+pub mod probe;
 
 pub use error::FfmpegError;
 
@@ -275,3 +283,7 @@ pub use hevc_vaapi_main10_decoder::{
 pub use hevc_vaapi_main10_encoder::{
     HevcVaapiMain10FfmpegEncoder, HevcVaapiMain10FfmpegEncoderConfig,
 };
+#[cfg(all(feature = "ffmpeg-encode-hevc-nvenc-any", target_os = "linux"))]
+pub use probe::probe_hevc_nvenc;
+#[cfg(all(feature = "ffmpeg-encode-hevc-vaapi-any", target_os = "linux"))]
+pub use probe::probe_hevc_vaapi;
