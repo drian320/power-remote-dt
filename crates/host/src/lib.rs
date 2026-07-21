@@ -128,6 +128,29 @@ const FILE_SEND_DIR: &str = "prdt-outgoing";
 const FILE_SEND_SENT_SUBDIR: &str = "sent";
 const OUTGOING_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Per-attempt lower bound (seconds) for how long the signaling host stays
+/// registered waiting for a viewer's `session_start` before cycling the WS
+/// connection and re-registering. Larger than the 10s `--signaling-timeout`
+/// default to cut re-register churn; the re-register LOOP (not this value) is
+/// what guarantees the host stays available indefinitely. Never overrides a
+/// larger user-supplied `--signaling-timeout`, and does not change
+/// `signaling_timeout`'s meaning for other callers (viewer / provisioning).
+const SIGNALING_REGISTER_WAIT_SECS: u64 = 60;
+/// Initial backoff between signaling re-register attempts (doubles up to
+/// [`SIGNALING_BACKOFF_MAX`]). Prevents a tight spin on fast-failing errors
+/// (connection refused, `HostAlreadyRegistered` race) while the common
+/// no-viewer-yet case is already spaced out by the per-attempt wait.
+const SIGNALING_BACKOFF_BASE: Duration = Duration::from_secs(2);
+/// Ceiling for the re-register backoff, so a persistently unreachable server
+/// is polled politely rather than hammered.
+const SIGNALING_BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// In signaling mode, how long to wait for the rendezvoused viewer's Noise
+/// handshake (NoiseE1) before assuming the hole-punch silently failed and
+/// re-registering. Generous because a viewer sends NoiseE1 immediately after
+/// rendezvous; this only self-heals a lost-NoiseE1 path. LAN mode waits forever
+/// (there is no rendezvous to fall back to).
+const SIGNALING_HANDSHAKE_WAIT: Duration = Duration::from_secs(30);
+
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "prdt-host",
@@ -564,60 +587,15 @@ pub async fn run_host(
     let local_udp = transport.local_addr()?;
     info!(local = ?local_udp, "UDP bound");
 
-    if let Some(signaling_url) = args.signaling_url.clone() {
-        // Priority: explicit --host-id > persisted host-id.txt > empty (triggers allocation)
-        let effective_host_id = match &args.host_id {
-            Some(id) => id.clone(),
-            None => std::fs::read_to_string(&args.host_id_file)
-                .ok()
-                .map(|s| s.trim().to_string())
-                .unwrap_or_default(),
-        };
-        let outcome = prdt_signaling_client::rendezvous_as_host(
-            prdt_signaling_client::RendezvousConfig {
-                url: signaling_url,
-                host_id: effective_host_id.clone(),
-                timeout: Duration::from_secs(args.signaling_timeout),
-                stun_url: args.stun_url.clone(),
-                turn_url: args.turn_url.clone(),
-                aggregation_window:
-                    prdt_signaling_client::RendezvousConfig::DEFAULT_AGGREGATION_WINDOW,
-            },
-            prdt_signaling_client::HostIdentity {
-                pubkey_b64: keypair.public.to_base64(),
-            },
-            local_udp,
-        )
-        .await
-        .context("signaling rendezvous (host)")?;
-        if outcome.allocated_host_id != effective_host_id {
-            // Atomic write so a crash mid-persist can't truncate the host-id
-            // file (AC-12).
-            if let Err(e) =
-                prdt_crypto::atomic_write(&args.host_id_file, outcome.allocated_host_id.as_bytes())
-            {
-                tracing::warn!(error = %e, path = %args.host_id_file.display(), "failed to persist host_id");
-            } else {
-                tracing::info!(host_id = %outcome.allocated_host_id, path = %args.host_id_file.display(), "persisted host_id");
-            }
-        }
-        let cand_addrs: Vec<SocketAddr> = outcome
-            .peer_candidates
-            .iter()
-            .filter_map(|c| format!("{}:{}", c.ip, c.port).parse().ok())
-            .collect();
-        info!(
-            session_id = %outcome.session_id,
-            host_id = %outcome.allocated_host_id,
-            candidate_count = cand_addrs.len(),
-            "signaling_rendezvous_completed"
-        );
-        let peer_addr = transport
-            .probe_and_commit_peer(&cand_addrs, Duration::from_secs(10))
-            .await
-            .context("probe_and_commit_peer")?;
-        info!(%peer_addr, "probe selected winner");
-    } else {
+    // NOTE: the signaling rendezvous used to happen here, exactly once — it
+    // registered the host, waited `--signaling-timeout` (default 10s) for a
+    // viewer's `session_start`, and on timeout returned Err, killing the
+    // listener. A human coordinating two machines could never hit that 10s
+    // window. The rendezvous now lives INSIDE the serve loop below (the
+    // "Signaling rendezvous phase") wrapped in a re-register loop, so the host
+    // stays registered and available until a viewer connects (or the operator
+    // stops) and re-registers again after each served session.
+    if args.signaling_url.is_none() {
         info!("no --signaling-url; using LAN fixed-address mode");
     }
 
@@ -706,7 +684,146 @@ pub async fn run_host(
     };
     let (auth_hook, known_peers_arc) = auth_hook;
 
+    // Signaling host-id persists across re-rendezvous so a viewer always
+    // reaches the host at the same 9-digit ID. Seeded from --host-id /
+    // host-id.txt; updated to the server-allocated ID after the first register.
+    // Priority: explicit --host-id > persisted host-id.txt > empty (allocate).
+    // Unused in LAN mode (no signaling_url), but always compiled.
+    let mut effective_host_id: String = match &args.host_id {
+        Some(id) => id.clone(),
+        None => std::fs::read_to_string(&args.host_id_file)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default(),
+    };
+    // Signaling mode only: whether the next serve-loop iteration must first
+    // (re-)register with the signaling server and probe a fresh viewer. Set on
+    // entry and after each served session; left false across transient Noise
+    // handshake retries so a mere handshake failure re-waits for NoiseE1
+    // instead of forcing a wasteful re-registration.
+    let mut need_rendezvous = true;
+
     loop {
+        // === Signaling rendezvous phase =====================================
+        // Keep the host registered and AVAILABLE until a viewer connects (or
+        // the operator stops). On a `session_start` timeout or a transient WS
+        // error we re-register and wait again — indefinitely, with backoff —
+        // rather than returning Err (which used to kill the listener ~10s after
+        // "Start sharing"). Only genuinely fatal errors (bad URL, auth / pubkey
+        // mismatch) abort. Every wait races `listener_cancel` (biased) so the
+        // GUI Stop button unwinds run_host promptly and releases the UDP port.
+        if let Some(signaling_url) = args.signaling_url.clone() {
+            if need_rendezvous {
+                // Stay registered this long per attempt before cycling; never
+                // below the user's explicit --signaling-timeout.
+                let per_attempt_wait =
+                    Duration::from_secs(args.signaling_timeout.max(SIGNALING_REGISTER_WAIT_SECS));
+                let mut backoff = SIGNALING_BACKOFF_BASE;
+                let outcome = loop {
+                    match prdt_signaling_client::rendezvous_as_host(
+                        prdt_signaling_client::RendezvousConfig {
+                            url: signaling_url.clone(),
+                            host_id: effective_host_id.clone(),
+                            timeout: per_attempt_wait,
+                            stun_url: args.stun_url.clone(),
+                            turn_url: args.turn_url.clone(),
+                            aggregation_window:
+                                prdt_signaling_client::RendezvousConfig::DEFAULT_AGGREGATION_WINDOW,
+                        },
+                        prdt_signaling_client::HostIdentity {
+                            pubkey_b64: keypair.public.to_base64(),
+                        },
+                        local_udp,
+                    )
+                    .await
+                    {
+                        Ok(o) => break o,
+                        Err(e) if e.is_retryable() => {
+                            info!(
+                                error = %e,
+                                backoff_secs = backoff.as_secs(),
+                                "signaling: no viewer yet; re-registering"
+                            );
+                            tokio::select! {
+                                biased;
+                                _ = listener_cancel.cancelled() => {
+                                    info!("host listener cancelled during signaling wait; shutting down");
+                                    return Ok(());
+                                }
+                                _ = tokio::time::sleep(backoff) => {}
+                            }
+                            backoff = (backoff * 2).min(SIGNALING_BACKOFF_MAX);
+                            continue;
+                        }
+                        Err(e) => {
+                            // Genuinely fatal (bad URL, auth / pubkey mismatch).
+                            return Err(e).context("signaling rendezvous (host)");
+                        }
+                    }
+                };
+
+                if outcome.allocated_host_id != effective_host_id {
+                    // Atomic write so a crash mid-persist can't truncate the
+                    // host-id file (AC-12).
+                    if let Err(e) = prdt_crypto::atomic_write(
+                        &args.host_id_file,
+                        outcome.allocated_host_id.as_bytes(),
+                    ) {
+                        tracing::warn!(error = %e, path = %args.host_id_file.display(), "failed to persist host_id");
+                    } else {
+                        tracing::info!(host_id = %outcome.allocated_host_id, path = %args.host_id_file.display(), "persisted host_id");
+                    }
+                    // Reuse the same server-allocated ID on every subsequent
+                    // re-rendezvous so a returning viewer keeps finding us.
+                    effective_host_id = outcome.allocated_host_id.clone();
+                }
+
+                let cand_addrs: Vec<SocketAddr> = outcome
+                    .peer_candidates
+                    .iter()
+                    .filter_map(|c| format!("{}:{}", c.ip, c.port).parse().ok())
+                    .collect();
+                info!(
+                    session_id = %outcome.session_id,
+                    host_id = %outcome.allocated_host_id,
+                    candidate_count = cand_addrs.len(),
+                    "signaling_rendezvous_completed"
+                );
+
+                // Probe / hole-punch is cancellable and self-healing: if no
+                // ProbeAck arrives (NAT punch failed) re-register rather than
+                // aborting the host. probe_and_commit_peer reads the raw socket
+                // and ignores encrypted packets, so it is safe to call again
+                // after a prior session without resetting crypto here.
+                let probe = tokio::select! {
+                    biased;
+                    _ = listener_cancel.cancelled() => {
+                        info!("host listener cancelled during probe; shutting down");
+                        return Ok(());
+                    }
+                    res = transport.probe_and_commit_peer(&cand_addrs, Duration::from_secs(10)) => res,
+                };
+                match probe {
+                    Ok(peer_addr) => {
+                        info!(%peer_addr, "probe selected winner");
+                        need_rendezvous = false;
+                    }
+                    Err(e) => {
+                        warn!(
+                            ?e,
+                            "probe_and_commit_peer failed; re-registering with signaling"
+                        );
+                        tokio::select! {
+                            biased;
+                            _ = listener_cancel.cancelled() => return Ok(()),
+                            _ = tokio::time::sleep(SIGNALING_BACKOFF_BASE) => {}
+                        }
+                        continue; // re-enter serve loop; need_rendezvous still true
+                    }
+                }
+            }
+        }
+
         transport.reset_session().await;
 
         info!("waiting for Noise handshake");
@@ -720,6 +837,22 @@ pub async fn run_host(
             _ = listener_cancel.cancelled() => {
                 info!("host listener cancelled while idle; shutting down");
                 return Ok(());
+            }
+            // Signaling mode only: bound the wait for the rendezvoused viewer's
+            // NoiseE1. If the hole-punch silently failed, the viewer will
+            // re-rendezvous, so re-register rather than block here forever
+            // (which would leave the host unregistered and unreachable). LAN
+            // mode has no rendezvous fallback, so it waits indefinitely.
+            _ = async {
+                if args.signaling_url.is_some() {
+                    tokio::time::sleep(SIGNALING_HANDSHAKE_WAIT).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                info!("no NoiseE1 from rendezvoused viewer; re-registering with signaling");
+                need_rendezvous = true;
+                continue;
             }
             res = transport.handshake_as_server(&keypair) => match res {
                 Ok(pk) => pk,
@@ -1540,7 +1673,18 @@ pub async fn run_host(
         let _ = tokio::join!(video, input, audio_task, clip_task, outgoing_task, watchdog);
         #[cfg(target_os = "linux")]
         let _ = cursor_task.await;
-        info!("session ended; returning to handshake wait");
+
+        // In signaling mode, re-register with the signaling server for the next
+        // viewer: a reconnecting viewer goes back through the rendezvous, so the
+        // host must be discoverable again — not merely waiting for a direct
+        // reconnect from the committed peer. In LAN mode the committed address
+        // is stable, so keep serving direct reconnects (behavior unchanged).
+        if args.signaling_url.is_some() {
+            info!("session ended; re-registering with signaling for next viewer");
+            need_rendezvous = true;
+        } else {
+            info!("session ended; returning to handshake wait");
+        }
     }
 }
 
