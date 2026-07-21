@@ -1,0 +1,58 @@
+# systemd unit for running prdt-signaling-server directly on a Linux host
+# (no Docker). For the Docker path see docker-compose.yml in this directory.
+#
+# Install:
+#   1. Build the release binary (in the project's Debian bookworm dev
+#      container, per the repo's CLAUDE.md):
+#        ./scripts/dev-container.sh bash -c \
+#          'cargo build --release -p prdt-signaling-server --target x86_64-unknown-linux-gnu'
+#   2. sudo useradd --system --home-dir /var/lib/prdt-signaling --create-home \
+#        --shell /usr/sbin/nologin prdt-signaling
+#   3. sudo install -m 755 target/x86_64-unknown-linux-gnu/release/prdt-signaling-server \
+#        /usr/local/bin/prdt-signaling-server
+#   4. sudo install -m 644 deploy/signaling/prdt-signaling-server.service \
+#        /etc/systemd/system/
+#   5. sudo systemctl daemon-reload
+#   6. sudo systemctl enable --now prdt-signaling-server
+#
+# --bind is set to 0.0.0.0:8080 here (the binary's own CLI default of
+# 127.0.0.1:8080 is loopback-only and unreachable from your VPN/LAN). If the
+# host has a Tailscale interface, prefer binding its tailscale0 IP directly
+# (e.g. --bind 100.x.y.z:8080) instead of 0.0.0.0 — see README.md.
+
+[Unit]
+Description=power-remote-dt signaling server (prdt-signaling-server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=prdt-signaling
+Group=prdt-signaling
+WorkingDirectory=/var/lib/prdt-signaling
+ExecStart=/usr/local/bin/prdt-signaling-server \
+  --bind 0.0.0.0:8080 \
+  --db /var/lib/prdt-signaling/prdt-signaling.sqlite \
+  --log info \
+  --session-timeout-ms 60000
+
+Restart=on-failure
+RestartSec=2s
+
+# --- Sandboxing (server needs only a listen socket + one SQLite file) ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/prdt-signaling
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

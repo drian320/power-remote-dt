@@ -10,4 +10,4 @@ pub use config::{HostIdentity, RendezvousConfig, RendezvousOutcome};
 pub use error::SignalingError;
 pub use net::discover_outbound_ip;
 pub use probe::probe_hosts;
-pub use rendezvous::{rendezvous_as_host, rendezvous_as_viewer};
+pub use rendezvous::{register_host, rendezvous_as_host, rendezvous_as_viewer};

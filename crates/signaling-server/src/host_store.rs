@@ -22,12 +22,23 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS hosts (
     host_id TEXT PRIMARY KEY,
     pubkey_b64 TEXT NOT NULL,
     registered_at INTEGER NOT NULL
-)";
+);
+-- Make the one-id-per-pubkey invariant structural rather than only enforced by
+-- the in-process Mutex: the idempotent-by-key allocate path relies on a pubkey
+-- owning at most one row. Idempotent migration (single-process today, so no
+-- existing duplicates to trip the index build).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_hosts_pubkey ON hosts (pubkey_b64);";
+
+/// Random-ID allocation attempts before giving up. With a 900M-value space the
+/// odds of this many collisions are negligible until the table is enormous;
+/// the ceiling only exists so a pathologically full store fails cleanly rather
+/// than looping forever.
+const ALLOCATION_ATTEMPTS: u32 = 16;
 
 impl HostStore {
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
-        conn.execute(SCHEMA, [])?;
+        conn.execute_batch(SCHEMA)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -35,7 +46,7 @@ impl HostStore {
 
     pub fn open_in_memory() -> Result<Self, StoreError> {
         let conn = Connection::open_in_memory()?;
-        conn.execute(SCHEMA, [])?;
+        conn.execute_batch(SCHEMA)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -86,7 +97,29 @@ impl HostStore {
                 }
             }
             None => {
-                for _ in 0..5 {
+                // Idempotent-by-key (AC-9): if this pubkey already owns an ID,
+                // return it instead of minting a second one. This lets a device
+                // that still holds its private key recover its existing ID even
+                // if its local identity record was lost (empty host_id on the
+                // wire triggers this allocate path).
+                // Propagate real SQLite errors here instead of `.ok()`-ing them:
+                // a swallowed error would masquerade as "no existing id" and
+                // mint a second ID for a pubkey that already owns one, defeating
+                // the idempotent-by-key invariant. Only a genuine no-rows result
+                // means "not yet allocated".
+                let existing_for_key: Option<String> = match conn.query_row(
+                    "SELECT host_id FROM hosts WHERE pubkey_b64 = ?1 LIMIT 1",
+                    params![key],
+                    |r| r.get(0),
+                ) {
+                    Ok(id) => Some(id),
+                    Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                    Err(e) => return Err(StoreError::Sqlite(e)),
+                };
+                if let Some(id) = existing_for_key {
+                    return Ok(display_format(&id));
+                }
+                for _ in 0..ALLOCATION_ATTEMPTS {
                     let id = random_9digit();
                     let res = conn.execute(
                         "INSERT INTO hosts (host_id, pubkey_b64, registered_at) VALUES (?1, ?2, ?3)",
@@ -165,6 +198,20 @@ mod tests {
         assert_eq!(id, "987-654-321");
         let id2 = s.allocate_or_verify(Some("987-654-321"), "AAA").unwrap();
         assert_eq!(id2, "987-654-321");
+    }
+
+    #[test]
+    fn allocate_is_idempotent_by_pubkey() {
+        // AC-9: re-allocating (empty host_id) with the same key must return the
+        // existing ID, not mint a second one — recovery after a lost local
+        // identity record.
+        let s = HostStore::open_in_memory().unwrap();
+        let id1 = s.allocate_or_verify(None, "PUBKEY_A").unwrap();
+        let id2 = s.allocate_or_verify(None, "PUBKEY_A").unwrap();
+        assert_eq!(id1, id2, "same key should recover the same id");
+        // A different key still gets its own distinct id.
+        let id3 = s.allocate_or_verify(None, "PUBKEY_B").unwrap();
+        assert_ne!(id1, id3);
     }
 
     #[test]

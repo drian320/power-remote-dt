@@ -47,6 +47,36 @@ impl PubKey {
     pub fn to_base64(&self) -> String {
         BASE64_STANDARD_NO_PAD.encode(self.0)
     }
+
+    /// Full key fingerprint: the SHA-256 of the 32 raw public-key bytes,
+    /// rendered as uppercase hex in colon-separated byte pairs (SSH style,
+    /// e.g. `A1:B2:C3:...`). Stable for a given key; used for out-of-band
+    /// verification (AC-14) and to key the persisted identity record.
+    pub fn fingerprint_full(&self) -> String {
+        let digest = Self::sha256(&self.0);
+        let mut out = String::with_capacity(digest.len() * 3);
+        for (i, b) in digest.iter().enumerate() {
+            if i > 0 {
+                out.push(':');
+            }
+            out.push_str(&format!("{b:02X}"));
+        }
+        out
+    }
+
+    /// Short fingerprint: the first 4 SHA-256 bytes as `AABB:CCDD`. Compact
+    /// enough to read aloud while still distinguishing keys in practice.
+    pub fn fingerprint_short(&self) -> String {
+        let d = Self::sha256(&self.0);
+        format!("{:02X}{:02X}:{:02X}{:02X}", d[0], d[1], d[2], d[3])
+    }
+
+    fn sha256(bytes: &[u8]) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        hasher.finalize().into()
+    }
     pub fn from_base64(s: &str) -> Result<Self, String> {
         let bytes = BASE64_STANDARD_NO_PAD
             .decode(s.trim())
@@ -100,5 +130,23 @@ mod tests {
     fn pubkey_malformed_base64_errors() {
         assert!(PubKey::from_base64("not-base64!@#$").is_err());
         assert!(PubKey::from_base64("c2hvcnQ=").is_err()); // too short
+    }
+
+    #[test]
+    fn fingerprint_is_stable_and_distinguishes_keys() {
+        let a = PubKey([0u8; 32]);
+        let b = PubKey([1u8; 32]);
+        // Deterministic for a given key.
+        assert_eq!(a.fingerprint_full(), a.fingerprint_full());
+        assert_eq!(a.fingerprint_short(), a.fingerprint_short());
+        // Different keys → different fingerprints.
+        assert_ne!(a.fingerprint_full(), b.fingerprint_full());
+        assert_ne!(a.fingerprint_short(), b.fingerprint_short());
+        // Full is 32 uppercase-hex byte pairs joined by ':' (95 chars).
+        let full = a.fingerprint_full();
+        assert_eq!(full.len(), 32 * 2 + 31);
+        assert!(full.split(':').all(|p| p.len() == 2));
+        // Short is `AABB:CCDD`.
+        assert_eq!(a.fingerprint_short().len(), 9);
     }
 }

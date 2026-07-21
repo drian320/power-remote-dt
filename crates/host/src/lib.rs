@@ -15,7 +15,6 @@ compile_error!(
      (Linux-only in P1.5; Windows already has native NVENC via media-win)"
 );
 
-use std::fs;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -29,7 +28,6 @@ use platform::{
     virtual_desktop_rect, write_clipboard_text, MAX_CLIPBOARD_BYTES,
 };
 use prdt_audio::{LoopbackCapture, OpusEncoder};
-use prdt_crypto::KeyPair;
 use prdt_filetransfer::{send_file, TransferReceiver, DEFAULT_MAX_TRANSFER_BYTES};
 use prdt_protocol::{wire::AudioPacket, Codec, ControlMessage, MonitorRect};
 
@@ -493,26 +491,15 @@ pub async fn run_host(
     consent_tx: Option<ConsentSender>,
     listener_cancel: CancellationToken,
 ) -> Result<()> {
-    // Load or generate the host keypair.
-    let keypair = if args.key_file.exists() {
-        let priv_bytes = fs::read(&args.key_file)
-            .context(format!("read key file {}", args.key_file.display()))?;
-        if priv_bytes.len() != 32 {
-            anyhow::bail!(
-                "key file must be exactly 32 bytes, got {}",
-                priv_bytes.len()
-            );
-        }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&priv_bytes);
-        KeyPair::from_private(arr)
-    } else {
+    // Load or generate the host keypair. On first run the key is generated and
+    // fsync'd atomically (temp + rename, owner-only perms on Unix) *before* any
+    // network work, so a crash right after first launch never loses the
+    // identity (AC-9). Creation is serialized with an advisory lock.
+    if !args.key_file.exists() {
         tracing::info!(path = %args.key_file.display(), "generating new host key");
-        let kp = KeyPair::generate();
-        fs::write(&args.key_file, kp.private.0)
-            .context(format!("write key file {}", args.key_file.display()))?;
-        kp
-    };
+    }
+    let keypair = prdt_crypto::load_or_create_keypair(&args.key_file)
+        .context(format!("load host key file {}", args.key_file.display()))?;
     println!("Host public key: {}", keypair.public.to_base64());
     println!(
         "(Pass --host-pubkey {} to the viewer)",
@@ -604,7 +591,11 @@ pub async fn run_host(
         .await
         .context("signaling rendezvous (host)")?;
         if outcome.allocated_host_id != effective_host_id {
-            if let Err(e) = std::fs::write(&args.host_id_file, &outcome.allocated_host_id) {
+            // Atomic write so a crash mid-persist can't truncate the host-id
+            // file (AC-12).
+            if let Err(e) =
+                prdt_crypto::atomic_write(&args.host_id_file, outcome.allocated_host_id.as_bytes())
+            {
                 tracing::warn!(error = %e, path = %args.host_id_file.display(), "failed to persist host_id");
             } else {
                 tracing::info!(host_id = %outcome.allocated_host_id, path = %args.host_id_file.display(), "persisted host_id");

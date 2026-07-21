@@ -283,7 +283,7 @@ pub struct Args {
 
     /// Override the GUI config file location (default: %APPDATA%/prdt/config.toml).
     #[arg(long)]
-    config: Option<std::path::PathBuf>,
+    pub config: Option<std::path::PathBuf>,
 
     /// Path to the viewer's long-term identity key. Generated on first use if
     /// missing. The host uses the matching pubkey to identify this viewer.
@@ -1319,14 +1319,59 @@ fn map_cursor_to_virtual_desktop(
 }
 
 /// True when the CLI supplied an explicit connection target. When this
-/// holds, the Windows GUI launcher is skipped entirely: the user told us
-/// where to connect, so every CLI arg (including `--decoder`) applies
-/// verbatim. Without this gate the launcher's persisted `ViewerConfig`
-/// would clobber explicit CLI flags via `apply_connect_args` (issue #19
-/// Bug 2).
-#[cfg(any(windows, test))]
+/// holds, the launcher (previously Windows-only gui-viewer, now the
+/// cross-platform unified home) is skipped entirely: the user told us where
+/// to connect, so every CLI arg (including `--decoder`) applies verbatim.
+/// Without this gate the launcher's persisted `ViewerConfig` would clobber
+/// explicit CLI flags via `apply_connect_args` (issue #19 Bug 2).
+///
+/// Used unconditionally now (not just `#[cfg(windows)]`/tests): AC-4's
+/// launcher-unification routing (`resolve_connect_routing`) needs this on
+/// every platform, since `prdt-client`'s dispatcher makes the same
+/// launcher-vs-connect decision on both Windows and Linux.
 fn has_explicit_connection_target(args: &Args) -> bool {
     args.host.is_some() || args.host_pubkey.is_some() || args.signaling_url.is_some()
+}
+
+/// What the `prdt` dispatcher (or a direct caller of [`run_with_args`])
+/// should do for a parsed `connect`/`viewer` invocation (AC-4: exactly one
+/// user-facing launcher). `prdt-client`'s `main.rs` calls this on the parsed
+/// [`Args`] *before* deciding whether to hand off to the unified home
+/// (`prdt-gui-client`) or proceed straight to connecting — see
+/// `crates/client/src/main.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectRouting {
+    /// No explicit target and not `--headless`: the caller should open the
+    /// unified home instead of connecting immediately, so the user can pick
+    /// or enter a target there.
+    Launcher,
+    /// `--headless` and/or an explicit target (`--host`, `--host-pubkey`, or
+    /// `--signaling-url`) was given: proceed straight to [`run_with_args`].
+    Connect,
+}
+
+/// Decide the routing for a parsed `connect`/`viewer` invocation. See
+/// [`ConnectRouting`].
+pub fn resolve_connect_routing(args: &Args) -> ConnectRouting {
+    if !args.headless && !has_explicit_connection_target(args) {
+        ConnectRouting::Launcher
+    } else {
+        ConnectRouting::Connect
+    }
+}
+
+/// Runs the deprecated standalone gui-viewer launcher (AC-13 compat facade).
+/// Isolated in its own function so the `#[deprecated]` warning on
+/// `run_viewer_launcher` is contained to this one call site — the primary
+/// `prdt connect` path no longer reaches here (see `resolve_connect_routing`
+/// and `crates/client/src/main.rs`); this remains only as a fallback for
+/// direct library callers of `run_with_args` that skip the new dispatch.
+#[cfg(windows)]
+#[allow(deprecated)]
+fn run_deprecated_launcher(
+    config_path: Option<std::path::PathBuf>,
+) -> anyhow::Result<prdt_gui_viewer::LaunchOutcome> {
+    prdt_gui_viewer::run_viewer_launcher(config_path)
 }
 
 #[cfg(windows)]
@@ -1665,23 +1710,43 @@ pub fn run_with_args(
         )
         .init();
 
+    // S2: when the PIN was not passed explicitly on the command line, fall back
+    // to the PRDT_PIN environment variable. The GUI's signaling-connect path
+    // supplies the PIN this way (env is owner-only via /proc/<pid>/environ)
+    // instead of in argv (world-readable via /proc/<pid>/cmdline). An explicit
+    // --pin always wins for CLI back-compat. Never log the PIN.
+    if args.pin.is_none() {
+        if let Ok(env_pin) = std::env::var("PRDT_PIN") {
+            if !env_pin.is_empty() {
+                args.pin = Some(env_pin);
+            }
+        }
+    }
+
     // Phase 4 G5: install crash reporter (writes JSON dump + tracing error).
     #[cfg(windows)]
     prdt_gui_common::install_panic_hook(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
 
+    // AC-4/AC-13: `prdt-client`'s `main.rs` now makes this same routing
+    // decision (via `resolve_connect_routing`) *before* calling
+    // `run_with_args`, so the primary `prdt connect` path hands off to the
+    // unified home (`prdt-gui-client`) and never reaches the deprecated
+    // gui-viewer launcher below. This block only remains reachable for a
+    // direct library caller of `run_with_args` that skips that dispatch —
+    // kept working as the AC-13 compat facade, not deleted.
     #[cfg(windows)]
-    if !args.headless && !has_explicit_connection_target(&args) {
-        match prdt_gui_viewer::run_viewer_launcher(args.config.clone())
-            .map_err(|e| anyhow::anyhow!(e))?
-        {
+    if resolve_connect_routing(&args) == ConnectRouting::Launcher {
+        match run_deprecated_launcher(args.config.clone()).map_err(|e| anyhow::anyhow!(e))? {
             prdt_gui_viewer::LaunchOutcome::Quit => return Ok(()),
             prdt_gui_viewer::LaunchOutcome::Connect(c) => apply_connect_args(&mut args, *c),
         }
     }
-    // On Linux there is no GUI launcher path yet (deferred to L2). The
-    // CLI is the only entry; --headless is implicitly always-true.
+    // On Linux, `run_with_args` itself has no launcher fallback (the unified
+    // home is opened one level up, by `prdt-client`'s dispatch, on both
+    // OSes). --headless is effectively always-true from this function's
+    // point of view when reached directly on Linux.
     #[cfg(target_os = "linux")]
-    let _ = &args.config; // silence unused-field warning until L2 wires the launcher
+    let _ = &args.config; // silence unused-field warning until a Linux fallback (if ever) wires it up
     let (req_w, req_h) = parse_resolution(&args.resolution)?;
     // Normalize --host-id: accept 9-digit numeric IDs with or without dashes
     // so both `--host-id 123456789` and `--host-id 123-456-789` resolve to the
@@ -3426,6 +3491,118 @@ mod tests {
         // applies. Only host/host-pubkey/signaling-url skip the launcher.
         let args = Args::try_parse_from(["prdt-viewer", "--decoder", "openh264"]).unwrap();
         assert!(!has_explicit_connection_target(&args));
+    }
+
+    // --- AC-4/AC-13 golden CLI tests: `prdt connect` routing decision -------
+    //
+    // These pin the routing `prdt-client`'s dispatcher relies on
+    // (`resolve_connect_routing`) across every documented flag combination,
+    // so the launcher-unification change can't silently regress `prdt
+    // connect`'s existing CLI-compat surface (AC-6).
+
+    #[test]
+    fn routing_default_bare_is_launcher() {
+        // `prdt connect` with nothing else: AC-4 says this must open the
+        // single unified home, not connect blindly.
+        let args = Args::try_parse_from(["prdt-viewer"]).unwrap();
+        assert_eq!(resolve_connect_routing(&args), ConnectRouting::Launcher);
+    }
+
+    #[test]
+    fn routing_headless_is_connect() {
+        // --headless is the CI/scripting escape hatch: never show a launcher.
+        let args = Args::try_parse_from(["prdt-viewer", "--headless"]).unwrap();
+        assert_eq!(resolve_connect_routing(&args), ConnectRouting::Connect);
+    }
+
+    #[test]
+    fn routing_config_only_is_launcher() {
+        // --config alone doesn't supply a connection target, so it still
+        // routes to the launcher (which will itself honor --config).
+        let args = Args::try_parse_from(["prdt-viewer", "--config", "custom.toml"]).unwrap();
+        assert_eq!(resolve_connect_routing(&args), ConnectRouting::Launcher);
+        assert_eq!(
+            args.config.as_deref(),
+            Some(std::path::Path::new("custom.toml"))
+        );
+    }
+
+    #[test]
+    fn routing_direct_host_and_pubkey_is_connect() {
+        let args = Args::try_parse_from([
+            "prdt-viewer",
+            "--host",
+            "127.0.0.1:9000",
+            "--host-pubkey",
+            "abc",
+        ])
+        .unwrap();
+        assert_eq!(resolve_connect_routing(&args), ConnectRouting::Connect);
+        assert_eq!(args.host.unwrap().to_string(), "127.0.0.1:9000");
+        assert_eq!(args.host_pubkey.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn routing_signaling_host_id_and_pin_is_connect() {
+        let args = Args::try_parse_from([
+            "prdt-viewer",
+            "--signaling-url",
+            "ws://example.invalid/ws",
+            "--host-id",
+            "123456789",
+            "--pin",
+            "1234",
+        ])
+        .unwrap();
+        assert_eq!(resolve_connect_routing(&args), ConnectRouting::Connect);
+        assert_eq!(args.host_id.as_deref(), Some("123456789"));
+        assert_eq!(args.pin.as_deref(), Some("1234"));
+    }
+
+    #[test]
+    fn routing_known_hosts_and_known_host_ids_alone_is_launcher() {
+        // Pointing at a known-hosts store is not itself a connection target
+        // (no --host/--host-pubkey/--signaling-url): still the launcher.
+        let args = Args::try_parse_from([
+            "prdt-viewer",
+            "--known-hosts",
+            "kh.txt",
+            "--known-host-ids",
+            "khi.txt",
+        ])
+        .unwrap();
+        assert_eq!(resolve_connect_routing(&args), ConnectRouting::Launcher);
+        assert_eq!(
+            args.known_hosts.as_deref(),
+            Some(std::path::Path::new("kh.txt"))
+        );
+        assert_eq!(args.known_host_ids, std::path::Path::new("khi.txt"));
+    }
+
+    #[test]
+    fn routing_codec_and_decoder_alone_is_launcher() {
+        let args =
+            Args::try_parse_from(["prdt-viewer", "--codec", "h265", "--decoder", "openh264"])
+                .unwrap();
+        assert_eq!(resolve_connect_routing(&args), ConnectRouting::Launcher);
+        assert_eq!(args.codec, "h265");
+        assert_eq!(args.decoder, "openh264");
+    }
+
+    #[test]
+    fn routing_headless_overrides_even_with_no_target() {
+        // Combining --headless with otherwise-launcher-only flags: headless
+        // always wins (used by benches/scripts that also pass --codec etc).
+        let args = Args::try_parse_from([
+            "prdt-viewer",
+            "--headless",
+            "--codec",
+            "h264",
+            "--decoder",
+            "openh264",
+        ])
+        .unwrap();
+        assert_eq!(resolve_connect_routing(&args), ConnectRouting::Connect);
     }
 
     fn write_config_with_fps(dir: &std::path::Path, fps: u32) -> std::path::PathBuf {

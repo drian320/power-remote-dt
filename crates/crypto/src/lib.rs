@@ -9,11 +9,15 @@
 //! Pre-PR5b releases were not tagged for compatibility, so no migration is
 //! provided.
 
+pub mod atomic;
+pub mod keyfile;
 pub mod keypair;
 pub mod known_hosts;
 pub mod known_peers;
 pub mod session;
 
+pub use atomic::{atomic_write, FileLock};
+pub use keyfile::load_or_create_keypair;
 pub use keypair::{KeyPair, PrivKey, PubKey};
 pub use known_hosts::{KnownHosts, KnownHostsError, TofuVerdict};
 pub use known_peers::{KnownPeer, KnownPeers, KnownPeersError, KnownPeersFile};

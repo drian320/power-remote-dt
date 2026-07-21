@@ -84,8 +84,8 @@ impl KnownHosts {
         self.entries.insert(host_key, pubkey);
     }
 
-    /// Serialize to the same plaintext format `parse` accepts.
-    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), KnownHostsError> {
+    /// Render to the plaintext format `parse` accepts.
+    fn serialize(&self) -> String {
         let mut content = String::new();
         let mut keys: Vec<&String> = self.entries.keys().collect();
         keys.sort();
@@ -96,17 +96,35 @@ impl KnownHosts {
             content.push_str(&pk.to_base64());
             content.push('\n');
         }
-        std::fs::write(path, content)?;
+        content
+    }
+
+    /// Serialize to disk atomically (temp-file + `fsync` + `rename`), so a
+    /// crash mid-write never truncates the file (AC-12).
+    ///
+    /// NOTE: `save` alone does not guard against a concurrent read-modify-write
+    /// by another process; callers mutating shared state should go through
+    /// [`KnownHosts::verify_or_record`], which holds an advisory lock across
+    /// the whole cycle.
+    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), KnownHostsError> {
+        crate::atomic::atomic_write(path.as_ref(), self.serialize().as_bytes())?;
         Ok(())
     }
 
     /// TOFU: create-if-missing, verify-if-present. Records on first sight.
+    ///
+    /// The entire read-modify-write runs under an exclusive advisory lock so
+    /// two processes recording *different* hosts concurrently cannot lose each
+    /// other's entries (the pre-AC-12 unlocked path did: both read the old
+    /// file, both wrote back only their own addition). The final write is
+    /// atomic via [`KnownHosts::save`].
     pub fn verify_or_record<P: AsRef<Path>>(
         path: P,
         host_key: &str,
         pubkey: &PubKey,
     ) -> Result<TofuVerdict, KnownHostsError> {
         let path = path.as_ref();
+        let _lock = crate::atomic::FileLock::acquire(path)?;
         let mut kh = if path.exists() {
             Self::load(path)?
         } else {
@@ -200,6 +218,41 @@ mod tests {
         assert!(matches!(verdict, TofuVerdict::FirstSeen));
         let reloaded = KnownHosts::load(&path).unwrap();
         assert!(reloaded.get("alice-desktop").is_some());
+    }
+
+    #[test]
+    fn concurrent_verify_or_record_keeps_all_entries() {
+        // Regression for AC-12: N threads each record a *distinct* host into
+        // the same file at once. The advisory lock + atomic write must ensure
+        // every entry survives (the old unlocked read-modify-write dropped
+        // all but one).
+        let dir = tempfile::tempdir().unwrap();
+        let path = std::sync::Arc::new(dir.path().join("hosts"));
+        let n = 24;
+        let mut handles = vec![];
+        for i in 0..n {
+            let path = path.clone();
+            handles.push(std::thread::spawn(move || {
+                let mut pk = [0u8; 32];
+                pk[0] = i as u8;
+                pk[1] = (i >> 8) as u8;
+                let verdict =
+                    KnownHosts::verify_or_record(&*path, &format!("host-{i:03}"), &PubKey(pk))
+                        .unwrap();
+                assert!(matches!(verdict, TofuVerdict::FirstSeen));
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        let reloaded = KnownHosts::load(&*path).unwrap();
+        assert_eq!(reloaded.len(), n, "concurrent writers lost entries");
+        for i in 0..n {
+            assert!(
+                reloaded.get(&format!("host-{i:03}")).is_some(),
+                "missing host-{i:03}"
+            );
+        }
     }
 
     #[test]

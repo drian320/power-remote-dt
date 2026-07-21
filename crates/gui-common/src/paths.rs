@@ -12,6 +12,20 @@ pub fn default_config_path() -> Option<PathBuf> {
     config_root().map(|d| d.join("config.toml"))
 }
 
+/// Default path for the identity record (`identity.toml`) — the persisted
+/// `{host_id, key_fingerprint, server_authority, provisioning_state}` produced
+/// by offline-first provisioning (AC-9).
+pub fn default_identity_path() -> Option<PathBuf> {
+    config_root().map(|d| d.join("identity.toml"))
+}
+
+/// Default path for the host auth config (`host-auth.toml`), which holds the
+/// PIN hash + plaintext and auth mode. Mirrors `prdt-host`'s own default so the
+/// GUI and the host listener read/write the same file.
+pub fn default_host_auth_path() -> Option<PathBuf> {
+    config_root().map(|d| d.join("host-auth.toml"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

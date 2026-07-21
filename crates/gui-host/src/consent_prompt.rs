@@ -4,6 +4,7 @@
 
 use std::time::{Duration, Instant};
 
+use prdt_gui_common::t;
 use prdt_gui_common::theme::tokens;
 use prdt_protocol::PermissionSet;
 
@@ -93,59 +94,77 @@ impl ConsentPromptState {
 
         egui::Modal::new(egui::Id::new("prdt-consent-modal")).show(ctx, |ui| {
             ui.set_width(360.0);
-            ui.heading("Incoming Connection Request");
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label("Device key:");
-                ui.code(format!("{short_key}…"));
-            });
-            ui.add_space(8.0);
-
-            ui.label("Label (optional):");
-            ui.text_edit_singleline(&mut self.label_input);
-            ui.add_space(8.0);
-
-            ui.label("Permissions for this session:");
-            ui.checkbox(&mut self.permissions.input, "Input (keyboard/mouse)");
-            ui.checkbox(&mut self.permissions.clipboard, "Clipboard");
-            ui.checkbox(&mut self.permissions.file_transfer, "File transfer");
-            ui.checkbox(&mut self.permissions.audio, "Audio");
-            ui.add_space(8.0);
-
-            ui.checkbox(&mut self.remember, "Remember this device");
-            ui.add_space(8.0);
-
-            ui.colored_label(
-                tokens::TEXT_DIM,
-                format!("Auto-deny in {}s", remaining.as_secs()),
-            );
-            ui.add_space(8.0);
-
-            ui.horizontal(|ui| {
-                // Deny: red, always enabled, also bound to Esc.
-                let deny = egui::Button::new(egui::RichText::new("Deny (Esc)").color(tokens::TEXT))
-                    .fill(tokens::DESTRUCTIVE);
-                if ui.add(deny).clicked() {
-                    result = Some(ConsentDecision::Rejected);
-                }
-
-                // Allow: disabled until armed, with a countdown label.
-                let allow_label = if armed {
-                    "Allow".to_string()
-                } else {
-                    format!("Allow in {}s", arm_remaining.as_secs_f32().ceil() as u64)
-                };
-                if ui
-                    .add_enabled(armed, egui::Button::new(allow_label))
-                    .clicked()
-                {
-                    result = Some(ConsentDecision::Accepted {
-                        permissions: self.permissions,
-                        remember: self.remember,
-                        label: self.label_input.clone(),
+            egui::Frame::group(ui.style())
+                .fill(tokens::SURFACE)
+                .inner_margin(egui::Margin::same(16))
+                .show(ui, |ui| {
+                    ui.heading(t!("consent-heading"));
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.colored_label(tokens::TEXT_DIM, t!("consent-device-key-label"));
+                        ui.code(format!("{short_key}…"));
                     });
-                }
-            });
+                    ui.add_space(8.0);
+
+                    ui.colored_label(tokens::TEXT_DIM, t!("consent-label-optional"));
+                    ui.text_edit_singleline(&mut self.label_input);
+                    ui.add_space(8.0);
+
+                    ui.colored_label(tokens::TEXT_DIM, t!("consent-permissions-heading"));
+                    ui.checkbox(&mut self.permissions.input, t!("consent-permission-input"));
+                    ui.checkbox(
+                        &mut self.permissions.clipboard,
+                        t!("consent-permission-clipboard"),
+                    );
+                    ui.checkbox(
+                        &mut self.permissions.file_transfer,
+                        t!("consent-permission-file-transfer"),
+                    );
+                    ui.checkbox(&mut self.permissions.audio, t!("consent-permission-audio"));
+                    ui.add_space(8.0);
+
+                    ui.checkbox(&mut self.remember, t!("consent-remember"));
+                    ui.add_space(8.0);
+
+                    ui.colored_label(
+                        tokens::TEXT_DIM,
+                        t!("consent-auto-deny", seconds => remaining.as_secs().to_string()),
+                    );
+                    ui.add_space(8.0);
+
+                    ui.horizontal(|ui| {
+                        // Deny: destructive-red, always enabled, also bound to Esc.
+                        let deny = egui::Button::new(
+                            egui::RichText::new(t!("consent-deny")).color(tokens::TEXT),
+                        )
+                        .fill(tokens::DESTRUCTIVE);
+                        if ui.add(deny).clicked() {
+                            result = Some(ConsentDecision::Rejected);
+                        }
+
+                        // Allow: the primary action, accent-cyan once armed,
+                        // with a countdown label while disabled.
+                        let allow_label = if armed {
+                            t!("consent-allow")
+                        } else {
+                            t!(
+                                "consent-allow-armed-in",
+                                seconds => (arm_remaining.as_secs_f32().ceil() as u64).to_string()
+                            )
+                        };
+                        let allow = egui::Button::new(
+                            egui::RichText::new(allow_label).color(tokens::BG_DEEP),
+                        )
+                        .fill(tokens::ACCENT);
+                        if ui.add_enabled(armed, allow).clicked() {
+                            result = Some(ConsentDecision::Accepted {
+                                permissions: self.permissions,
+                                remember: self.remember,
+                                label: self.label_input.clone(),
+                            });
+                        }
+                    });
+                });
         });
 
         // Repaint cadence: snappy (200 ms) while the arm-countdown ticks down

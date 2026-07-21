@@ -1,14 +1,25 @@
 //! Unified client app: a left nav rail (Home / Settings / Logs) in one egui
-//! window. Home is a split dashboard (share-this-device + connect-to-a-device);
-//! Settings is the full persisted-config surface; Logs is a placeholder.
+//! window. Home is the RustDesk-style single screen — "This device"
+//! (server-allocated 9-digit ID + fixed PIN + key fingerprint/QR + share
+//! start/stop) sits beside "Connect to a device" (enter a peer ID + PIN and
+//! connect, with a collapsible Advanced section for legacy direct mode and a
+//! recent-connections list). Settings is the full persisted-config surface;
+//! Logs is a placeholder.
+//!
+//! The "This device" panel is wired to the offline-first provisioning API
+//! (`prdt_gui_common::identity::DeviceIdentity`): the identity + fixed PIN are
+//! available without any network, and the server-allocated ID is filled in
+//! asynchronously via a background `reprovision` task (never on the UI thread).
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
 use clap::Parser as _;
 use prdt_gui_common::auth_config::{AuthMode, HostAuthConfig};
+use prdt_gui_common::t;
 use prdt_gui_common::theme::tokens;
-use prdt_gui_common::Config;
+use prdt_gui_common::{generate_qr, Config, DeviceIdentity, HostEntry, IdentityPaths};
 use tokio::runtime;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -19,6 +30,78 @@ enum View {
     Home,
     Settings,
     Logs,
+}
+
+/// Which recent-connection entry to record after a successful launch.
+enum RecentUpsert {
+    Signaling(String),
+    Direct { addr: String, pubkey: String },
+}
+
+/// How long a freshly-spawned viewer child stays in the "connecting" phase
+/// before the UI upgrades it to "session running". We keep the viewer as a
+/// child process (ADR B1 / AC-5改) and have no IPC to it, so there is no real
+/// "connected" signal — a child that outlives this window has almost certainly
+/// established a session (connection failures — bad PIN, unreachable host,
+/// signaling timeout — exit well before this), whereas a child still alive
+/// later is a live session or a user-open window. This is a liveness heuristic,
+/// deliberately not a claim of protocol-level connectedness.
+const CONNECT_GRACE: Duration = Duration::from_secs(3);
+
+/// The single active outbound viewer session (AC-10: at most one at a time).
+///
+/// Owns the spawned `prdt connect --headless` child so the GUI can (a) show a
+/// live status instead of a fire-and-forget spawn, (b) reap it on app exit so
+/// no orphan/zombie is left behind, and (c) enforce the one-session limit. The
+/// viewer keeps its own winit event loop + D3D11 device in this child process
+/// (that boundary is intentionally preserved per the ADR); this struct is only
+/// the parent-side handle to it.
+struct ViewerSession {
+    child: std::process::Child,
+    /// Cached child PID for the status line (valid even after `child` is reaped).
+    pid: u32,
+    /// Peer ID (signaling) or host:port (direct), shown in the status line.
+    target: String,
+    /// When the child was spawned; drives the connecting → running heuristic.
+    started_at: Instant,
+}
+
+impl ViewerSession {
+    /// Best-effort connection phase for display only. `true` during the initial
+    /// [`CONNECT_GRACE`] window; see that constant for why this is a heuristic
+    /// and not a protocol-level "connected" signal.
+    fn is_connecting(&self) -> bool {
+        self.started_at.elapsed() < CONNECT_GRACE
+    }
+}
+
+/// #11a guard: resolve a viewer `--decoder` selection to a value that is valid
+/// for *this* build, falling back to `auto`. Empty or unsupported selections
+/// (e.g. the `ViewerConfig` default `decoder = "nvdec"` on a Linux build, which
+/// bypasses clap's `PossibleValuesParser` when injected via `config.toml` and
+/// crashes the child at decoder dispatch) collapse to `auto`, which the viewer
+/// resolves post-handshake. `supported_decoder_args()` always lists `auto`
+/// first, so the fallback is itself always valid.
+fn resolve_decoder_arg(sel: &str) -> String {
+    let sel = sel.trim();
+    if !sel.is_empty()
+        && prdt_viewer::supported_decoder_args()
+            .iter()
+            .any(|d| *d == sel)
+    {
+        sel.to_string()
+    } else {
+        "auto".to_string()
+    }
+}
+
+/// #11a guard for `--codec`: only the values the viewer CLI accepts pass
+/// through; anything else (empty, stale, or unknown) collapses to `auto`.
+fn resolve_codec_arg(sel: &str) -> String {
+    match sel.trim() {
+        v @ ("auto" | "h264" | "h265") => v.to_string(),
+        _ => "auto".to_string(),
+    }
 }
 
 struct PendingPrompt {
@@ -33,21 +116,47 @@ pub struct ClientApp {
 
     view: View,
 
-    // This Device
-    pubkey_b64: Option<String>,
-    pubkey_load_error: Option<String>,
+    // This Device — offline-first provisioning identity (AC-2/AC-3/AC-9/AC-14).
+    /// Loaded (and bootstrapped) at startup with no network I/O. `None` only if
+    /// the on-disk key/record could not be read.
+    identity: Option<DeviceIdentity>,
+    /// Set when `DeviceIdentity::load_or_create` failed at startup.
+    identity_error: Option<String>,
+    /// Whether the fixed PIN is currently shown in the clear.
+    pin_revealed: bool,
+    /// Whether the fingerprint QR (out-of-band verification) is expanded.
+    show_fingerprint_qr: bool,
+    /// Cached fingerprint QR texture; regenerated lazily on first show and
+    /// dropped when the identity is reloaded.
+    fingerprint_qr: Option<egui::TextureHandle>,
+    /// In-flight background `reprovision` task: receives the mutated identity on
+    /// success, or an error message. `Some` while a provisioning attempt runs.
+    reprovision_rx: Option<oneshot::Receiver<Result<DeviceIdentity, String>>>,
+    /// Last provisioning status line (result of a Retry / regenerate).
+    provision_status: Option<String>,
+
     listener: Option<ListenerState>,
-    /// Last status line shown under the listener controls (start/stop result,
+    /// Last status line shown under the sharing controls (start/stop result,
     /// or the error returned by the host task when it exits).
     host_status: Option<String>,
 
-    // Connect
+    // Connect — easy path (signaling): peer ID + PIN.
+    peer_id: String,
+    peer_pin: String,
+    // Connect — advanced / legacy direct mode (kept so nothing is lost).
     peer_host: String,
     peer_pubkey: String,
     peer_codec: String,
     peer_decoder: String,
-    /// Last status line shown under the Connect button.
+    /// Last status line shown under the Connect button (terminal / error text;
+    /// the live phase of an active session is derived from `viewer_session`).
     connect_status: Option<String>,
+    /// Whether `connect_status` should render as an error (destructive color).
+    connect_error: bool,
+    /// The single active outbound viewer session (AC-10). `Some` while a
+    /// spawned viewer child is tracked; polled each frame and reaped on exit
+    /// or app close (AC-5改). `None` means no outbound session is running.
+    viewer_session: Option<ViewerSession>,
 
     /// Receiver for incoming consent requests from the host listener task.
     /// Polled in `update()` each frame; first request becomes `pending_consent`.
@@ -100,39 +209,69 @@ impl ClientApp {
         rt_handle: runtime::Handle,
         autostart_host: bool,
     ) -> Self {
-        // Derive host-auth.toml path from the config directory (mirrors gui-host).
-        let host_auth_path = config_path
+        // The config directory holds identity.toml + host-auth.toml (mirrors
+        // gui-host). host-key.bin lives in the data dir and is passed explicitly.
+        let config_root = config_path
             .parent()
-            .map(|p| p.join("host-auth.toml"))
-            .unwrap_or_else(|| PathBuf::from("host-auth.toml"));
-        let host_auth = HostAuthConfig::load_or_default(&host_auth_path).unwrap_or_default();
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let host_auth_path = config_root.join("host-auth.toml");
 
-        let (peer_codec, peer_decoder, config_snapshot) = {
+        let (peer_codec, peer_decoder, signaling_url, key_file, config_snapshot) = {
             let cfg_guard = cfg.lock().unwrap();
             (
                 cfg_guard.viewer.codec.clone(),
                 cfg_guard.viewer.decoder.clone(),
+                cfg_guard.host.signaling_url.clone(),
+                cfg_guard.host.key_file.clone(),
                 cfg_guard.clone(),
             )
         };
+
+        // Offline-first identity bootstrap (AC-9): generates + fsyncs the key,
+        // ensures a fixed PIN, reconciles the record — no network on this
+        // (UI) thread. The server-allocated ID is filled in later via Retry.
+        let id_paths = IdentityPaths::from_config_root(&config_root, key_file);
+        let (identity, identity_error) =
+            match DeviceIdentity::load_or_create(id_paths, &signaling_url) {
+                Ok(id) => (Some(id), None),
+                Err(e) => (
+                    None,
+                    Some(t!("home-identity-error", error => e.to_string())),
+                ),
+            };
+
+        // host-auth.toml may have just been bootstrapped by the identity above;
+        // load it now so the consent flow sees the same file.
+        let host_auth = HostAuthConfig::load_or_default(&host_auth_path).unwrap_or_default();
         let settings_draft = SettingsDraft {
             config: config_snapshot,
             host_auth: host_auth.clone(),
         };
-        let mut app = Self {
+
+        Self {
             cfg,
             config_path,
             rt_handle,
             view: View::Home,
-            pubkey_b64: None,
-            pubkey_load_error: None,
+            identity,
+            identity_error,
+            pin_revealed: false,
+            show_fingerprint_qr: false,
+            fingerprint_qr: None,
+            reprovision_rx: None,
+            provision_status: None,
             listener: None,
             host_status: None,
+            peer_id: String::new(),
+            peer_pin: String::new(),
             peer_host: "127.0.0.1:9000".to_string(),
             peer_pubkey: String::new(),
             peer_codec,
             peer_decoder,
             connect_status: None,
+            connect_error: false,
+            viewer_session: None,
             consent_rx: None,
             pending_consent: None,
             host_auth,
@@ -141,40 +280,6 @@ impl ClientApp {
             settings_status: None,
             pending_autostart: autostart_host,
             request_exit: false,
-        };
-        app.refresh_pubkey();
-        app
-    }
-
-    /// Read the host key file (OS-conventional default path) and derive the pubkey for display.
-    /// On miss the pubkey is None until the host listener generates one.
-    fn refresh_pubkey(&mut self) {
-        let resolved = prdt_host::default_host_key_path();
-        let path = resolved.as_path();
-        if !path.exists() {
-            self.pubkey_b64 = None;
-            self.pubkey_load_error = None;
-            return;
-        }
-        match std::fs::read(path) {
-            Ok(bytes) if bytes.len() == 32 => {
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&bytes);
-                let kp = prdt_crypto::KeyPair::from_private(arr);
-                self.pubkey_b64 = Some(kp.public.to_base64());
-                self.pubkey_load_error = None;
-            }
-            Ok(other) => {
-                self.pubkey_b64 = None;
-                self.pubkey_load_error = Some(format!(
-                    "host-key.bin is {} bytes, expected 32",
-                    other.len()
-                ));
-            }
-            Err(e) => {
-                self.pubkey_b64 = None;
-                self.pubkey_load_error = Some(format!("read host-key.bin: {e}"));
-            }
         }
     }
 
@@ -211,17 +316,29 @@ impl ClientApp {
         // un-elevated (works for normal windows, not elevated ones).
         #[cfg(windows)]
         if !crate::elevate::is_elevated() {
-            match crate::elevate::relaunch_elevated_for_host() {
-                Ok(()) => {
-                    self.host_status = Some("管理者として再起動しています…".into());
-                    self.request_exit = true;
-                    return;
-                }
-                Err(e) => {
-                    self.host_status = Some(format!(
-                        "管理者昇格に失敗しました（{e}）。通常権限で起動します（タスクマネージャー等の管理者ウィンドウは操作できません）。"
-                    ));
-                    // fall through: start a non-elevated host anyway.
+            // AC-11: the elevated relaunch closes this GUI, whose Drop reaps the
+            // tracked outbound viewer child. If a viewer session is live, that
+            // relaunch would tear it down — exactly the teardown AC-11(b)
+            // forbids. Preserve the session: host un-elevated instead (works for
+            // normal target windows; input into elevated windows is unavailable
+            // until the viewer is disconnected and sharing restarted). The full
+            // fix is the narrow elevated input-injection helper (follow-up).
+            if self.viewer_session.is_some() {
+                self.host_status = Some(t!("home-host-elevation-skipped-viewer"));
+                // fall through: start a non-elevated host, viewer left running.
+            } else {
+                match crate::elevate::relaunch_elevated_for_host() {
+                    Ok(()) => {
+                        self.host_status = Some("管理者として再起動しています…".into());
+                        self.request_exit = true;
+                        return;
+                    }
+                    Err(e) => {
+                        self.host_status = Some(format!(
+                            "管理者昇格に失敗しました（{e}）。通常権限で起動します（タスクマネージャー等の管理者ウィンドウは操作できません）。"
+                        ));
+                        // fall through: start a non-elevated host anyway.
+                    }
                 }
             }
         }
@@ -248,6 +365,40 @@ impl ClientApp {
         argv.push("--encoder".into());
         argv.push(cfg.host.encoder.clone().into());
         argv.push("--headless".into()); // GUI manages the lifecycle; don't relaunch gui-host
+
+        // M1: point the host at the SAME config + auth/peers files the GUI
+        // writes (siblings of config_path) so a non-default `--config` install
+        // honours the configured PIN / permissions instead of silently reading
+        // the OS-default %APPDATA%/prdt/... copies.
+        argv.push("--config".into());
+        argv.push(self.config_path.as_os_str().to_owned());
+        argv.push("--host-auth-file".into());
+        argv.push(self.host_auth_path.as_os_str().to_owned());
+        let host_peers_path = self
+            .config_path
+            .parent()
+            .map(|p| p.join("host-peers.toml"))
+            .unwrap_or_else(|| PathBuf::from("host-peers.toml"));
+        argv.push("--host-peers-file".into());
+        argv.push(host_peers_path.into_os_string());
+
+        // B1: when a signaling server is configured, run the host in rendezvous
+        // mode so the 9-digit ID shown in "This device" is actually reachable
+        // by a signaling viewer. Without --signaling-url the host runs LAN
+        // fixed-address mode and never calls rendezvous_as_host, so the green
+        // "共有中" state would be a lie. We register under the SAME id the UI
+        // displays (DeviceIdentity::host_id()); the signaling store is
+        // idempotent by pubkey (same key_file), so passing the id explicitly
+        // makes the host live-registered under exactly that id.
+        let signaling_url = cfg.host.signaling_url.trim();
+        if !signaling_url.is_empty() {
+            argv.push("--signaling-url".into());
+            argv.push(signaling_url.into());
+            if let Some(host_id) = self.identity.as_ref().and_then(|id| id.host_id()) {
+                argv.push("--host-id".into());
+                argv.push(host_id.into());
+            }
+        }
 
         let args = match prdt_host::Args::try_parse_from(&argv) {
             Ok(a) => a,
@@ -326,50 +477,351 @@ impl ClientApp {
         self.listener = None;
     }
 
-    fn spawn_connect(&mut self) {
+    /// Kick off a background provisioning attempt (AC-3). Clones the identity
+    /// into a Tokio task and runs `reprovision` there — never on the UI thread,
+    /// since it performs blocking network I/O across `.await`. The mutated
+    /// identity (with the freshly allocated ID) comes back over a oneshot.
+    fn start_reprovision(&mut self) {
+        if self.reprovision_rx.is_some() {
+            return; // already in flight
+        }
+        let Some(mut ident) = self.identity.clone() else {
+            return;
+        };
+        let (tx, rx) = oneshot::channel();
+        self.reprovision_rx = Some(rx);
+        self.provision_status = None;
+        self.rt_handle.spawn(async move {
+            let res = match ident.reprovision(Duration::from_secs(10)).await {
+                Ok(()) => Ok(ident),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = tx.send(res);
+        });
+    }
+
+    /// Poll the in-flight reprovision task without blocking. On success the
+    /// live identity is replaced with the mutated one (which now carries the
+    /// server-allocated ID and has persisted `identity.toml`).
+    fn drain_reprovision(&mut self) {
+        let Some(rx) = self.reprovision_rx.as_mut() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(ident)) => {
+                self.identity = Some(ident);
+                self.reprovision_rx = None;
+                self.provision_status = Some(t!("home-provisioned"));
+            }
+            Ok(Err(e)) => {
+                self.reprovision_rx = None;
+                self.provision_status = Some(t!("home-provision-failed", error => e));
+            }
+            Err(oneshot::error::TryRecvError::Empty) => {}
+            Err(oneshot::error::TryRecvError::Closed) => {
+                self.reprovision_rx = None;
+            }
+        }
+    }
+
+    /// Regenerate the fixed PIN (AC-2). Writes host-auth.toml via the identity,
+    /// then reloads the app's auth copy so the consent flow and the Settings
+    /// draft stay consistent (they share the same file).
+    fn regenerate_pin(&mut self) {
+        let Some(ident) = self.identity.as_mut() else {
+            return;
+        };
+        match ident.regenerate_pin() {
+            Ok(_new) => {
+                self.host_auth =
+                    HostAuthConfig::load_or_default(&self.host_auth_path).unwrap_or_default();
+                // Keep the Settings draft's PIN in sync without clobbering any
+                // other unsaved edits it may hold.
+                self.settings_draft.host_auth.pin_hash = self.host_auth.pin_hash.clone();
+                self.settings_draft.host_auth.pin_plaintext = self.host_auth.pin_plaintext.clone();
+                self.settings_draft.host_auth.mode = self.host_auth.mode;
+                self.pin_revealed = true;
+                self.provision_status = None;
+            }
+            Err(e) => {
+                self.provision_status = Some(t!("home-provision-failed", error => e.to_string()));
+            }
+        }
+    }
+
+    /// Lazily build the fingerprint QR texture (AC-14) and cache it.
+    fn ensure_fingerprint_qr(&mut self, ctx: &egui::Context) {
+        if self.fingerprint_qr.is_some() {
+            return;
+        }
+        let Some(ident) = self.identity.as_ref() else {
+            return;
+        };
+        let fp = ident.fingerprint_full();
+        if fp.is_empty() {
+            return;
+        }
+        if let Ok(image) = generate_qr(fp, 4) {
+            self.fingerprint_qr =
+                Some(ctx.load_texture("device_fp_qr", image, egui::TextureOptions::default()));
+        }
+    }
+
+    /// Launch a viewer session over the signaling path (the primary flow): the
+    /// child process rendezvouses on the configured server by 9-digit ID and
+    /// authenticates with the PIN. The process boundary is deliberately kept
+    /// (ADR B1 / AC-5改) — this only wires ID+PIN into the existing spawn.
+    fn connect_signaling(&mut self) {
+        // AC-10: at most one outbound viewer session. Guard here so no code
+        // path (button, recent entry, direct mode) can spawn a second child.
+        if self.viewer_session.is_some() {
+            self.set_connect_status(t!("home-connect-already-active"), false);
+            return;
+        }
+        let id = self.peer_id.trim().to_string();
+        if id.is_empty() {
+            self.set_connect_status(t!("home-connect-need-id"), true);
+            return;
+        }
+        let signaling_url = {
+            let g = self.cfg.lock().unwrap();
+            let v = g.viewer.signaling_url.trim().to_string();
+            if v.is_empty() {
+                g.host.signaling_url.trim().to_string()
+            } else {
+                v
+            }
+        };
+        if signaling_url.is_empty() {
+            self.set_connect_status(t!("home-connect-need-signaling"), true);
+            return;
+        }
         let exe = match std::env::current_exe() {
             Ok(p) => p,
             Err(e) => {
-                self.connect_status = Some(format!("current_exe: {e}"));
+                self.set_connect_status(format!("current_exe: {e}"), true);
                 return;
             }
         };
+        let pin = self.peer_pin.trim().to_string();
         let mut cmd = std::process::Command::new(&exe);
         cmd.arg("connect").arg("--headless");
-        if !self.peer_host.trim().is_empty() {
-            cmd.arg("--host").arg(self.peer_host.trim());
+        cmd.arg("--config").arg(&self.config_path);
+        cmd.arg("--signaling-url").arg(&signaling_url);
+        cmd.arg("--host-id").arg(&id);
+        if !pin.is_empty() {
+            // S2: pass the PIN via the PRDT_PIN env var, never argv — the child's
+            // /proc/<pid>/cmdline is world-readable (any local user could `ps`
+            // the PIN out of it), whereas /proc/<pid>/environ is owner-only. The
+            // viewer reads PRDT_PIN when --pin is absent; an explicit --pin still
+            // wins for CLI back-compat.
+            cmd.env("PRDT_PIN", &pin);
         }
-        if !self.peer_pubkey.trim().is_empty() {
-            cmd.arg("--host-pubkey").arg(self.peer_pubkey.trim());
+        self.push_codec_decoder_args(&mut cmd);
+        self.launch_viewer(cmd, id.clone(), RecentUpsert::Signaling(id));
+    }
+
+    /// Launch a viewer session in legacy direct mode (host:port + optional
+    /// pubkey). Kept behind the Advanced section so benches/scripts' workflow
+    /// stays reachable from the GUI (AC-6 CLI-compat spirit).
+    fn connect_direct(&mut self) {
+        // AC-10: one outbound session (see connect_signaling).
+        if self.viewer_session.is_some() {
+            self.set_connect_status(t!("home-connect-already-active"), false);
+            return;
         }
-        if !self.peer_codec.trim().is_empty() {
-            cmd.arg("--codec").arg(self.peer_codec.trim());
+        let host = self.peer_host.trim().to_string();
+        if host.is_empty() {
+            self.set_connect_status(t!("home-connect-need-host"), true);
+            return;
         }
-        if !self.peer_decoder.trim().is_empty() {
-            cmd.arg("--decoder").arg(self.peer_decoder.trim());
-        }
-        // Persist codec/decoder selections back to ViewerConfig.
-        {
-            let mut cfg_guard = self.cfg.lock().unwrap();
-            cfg_guard.viewer.codec = self.peer_codec.clone();
-            cfg_guard.viewer.decoder = self.peer_decoder.clone();
-            let path = self.config_path.clone();
-            let cfg_snapshot = cfg_guard.clone();
-            drop(cfg_guard);
-            if let Err(e) = cfg_snapshot.save(&path) {
-                tracing::warn!(
-                    ?e,
-                    "config save failed (codec/decoder selection not persisted)"
-                );
+        let exe = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(e) => {
+                self.set_connect_status(format!("current_exe: {e}"), true);
+                return;
             }
+        };
+        let pubkey = self.peer_pubkey.trim().to_string();
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg("connect").arg("--headless");
+        cmd.arg("--config").arg(&self.config_path);
+        cmd.arg("--host").arg(&host);
+        if !pubkey.is_empty() {
+            cmd.arg("--host-pubkey").arg(&pubkey);
         }
+        self.push_codec_decoder_args(&mut cmd);
+        self.launch_viewer(
+            cmd,
+            host.clone(),
+            RecentUpsert::Direct { addr: host, pubkey },
+        );
+    }
+
+    /// #11a guard: always append explicit, build-valid `--decoder` and
+    /// `--codec` to a viewer spawn. Passing them unconditionally (rather than
+    /// only when the GUI field is non-empty) stops a stale `config.toml` from
+    /// silently overriding an unset value in the child — the child's
+    /// `parse_args_with_config` uses `CLI flag > config.toml > clap default`,
+    /// so an explicit flag here wins. `resolve_*_arg` collapse empty/unknown
+    /// values to `auto` so the child never receives a value it cannot dispatch.
+    fn push_codec_decoder_args(&self, cmd: &mut std::process::Command) {
+        cmd.arg("--decoder")
+            .arg(resolve_decoder_arg(&self.peer_decoder));
+        cmd.arg("--codec").arg(resolve_codec_arg(&self.peer_codec));
+    }
+
+    /// Spawn the built viewer command and, on success, adopt it as the single
+    /// tracked outbound session (AC-5改 / AC-10). Callers must have already
+    /// checked `viewer_session.is_none()`.
+    fn launch_viewer(
+        &mut self,
+        mut cmd: std::process::Command,
+        target: String,
+        recent: RecentUpsert,
+    ) {
         match cmd.spawn() {
             Ok(child) => {
-                self.connect_status = Some(format!("launched viewer (pid {})", child.id()));
+                let pid = child.id();
+                self.viewer_session = Some(ViewerSession {
+                    child,
+                    pid,
+                    target,
+                    started_at: Instant::now(),
+                });
+                // The live phase now renders from `viewer_session`; drop any
+                // stale terminal line from a previous session.
+                self.connect_status = None;
+                self.connect_error = false;
+                self.finalize_connect(recent);
             }
             Err(e) => {
-                self.connect_status = Some(format!("spawn failed: {e}"));
+                self.set_connect_status(format!("spawn failed: {e}"), true);
             }
+        }
+    }
+
+    /// Poll the tracked viewer child without blocking (AC-5改). On exit, reap it
+    /// (`try_wait` clears the zombie), record a terminal JA status, and clear
+    /// the session so the Connect button re-enables. The host listener is never
+    /// touched here: a viewer death must not stop hosting.
+    fn drain_viewer_session(&mut self) {
+        let Some(session) = self.viewer_session.as_mut() else {
+            return;
+        };
+        // Resolve the child's state, then drop the `session` borrow before
+        // touching other `self` fields below.
+        let status = match session.child.try_wait() {
+            Ok(Some(status)) => status,
+            Ok(None) => return, // still running
+            Err(e) => {
+                // m2: try_wait itself failed. Best-effort reap (kill + wait)
+                // before we drop the handle so we don't leak the child (a
+                // zombie on Unix); then stop tracking so the UI can't get stuck
+                // with a permanently-disabled Connect button.
+                let _ = session.child.kill();
+                let _ = session.child.wait();
+                self.set_connect_status(format!("viewer wait failed: {e}"), true);
+                self.viewer_session = None;
+                return;
+            }
+        };
+        if status.success() {
+            self.set_connect_status(t!("home-connect-disconnected"), false);
+        } else {
+            let detail = match status.code() {
+                Some(code) => t!("home-connect-exit-code", code => code.to_string()),
+                None => t!("home-connect-exit-signal"),
+            };
+            self.set_connect_status(t!("home-connect-failed", detail => detail), true);
+        }
+        self.viewer_session = None;
+    }
+
+    /// AC-10 "切断": terminate and reap the tracked viewer child so a new
+    /// session can start. Best-effort kill (the child may have just exited).
+    fn disconnect_viewer(&mut self) {
+        if let Some(mut session) = self.viewer_session.take() {
+            let _ = session.child.kill();
+            let _ = session.child.wait();
+            self.set_connect_status(t!("home-connect-disconnected"), false);
+        }
+    }
+
+    /// Set the Connect status line and its severity in one place.
+    fn set_connect_status(&mut self, msg: String, is_error: bool) {
+        self.connect_status = Some(msg);
+        self.connect_error = is_error;
+    }
+
+    /// Persist codec/decoder selection and upsert the recent-connections entry
+    /// in one config write.
+    fn finalize_connect(&mut self, recent: RecentUpsert) {
+        let now = SystemTime::now();
+        let mut g = self.cfg.lock().unwrap();
+        g.viewer.codec = self.peer_codec.clone();
+        g.viewer.decoder = self.peer_decoder.clone();
+        match recent {
+            RecentUpsert::Signaling(id) => {
+                if let Some(e) = g
+                    .viewer
+                    .hosts
+                    .iter_mut()
+                    .find(|e| e.mode == "signaling" && e.host_id == id)
+                {
+                    e.last_connected = now;
+                } else {
+                    g.viewer.hosts.push(HostEntry {
+                        label: id.clone(),
+                        mode: "signaling".into(),
+                        addr: String::new(),
+                        host_id: id,
+                        pubkey: String::new(),
+                        last_connected: now,
+                        last_known_online: None,
+                    });
+                }
+            }
+            RecentUpsert::Direct { addr, pubkey } => {
+                if let Some(e) = g
+                    .viewer
+                    .hosts
+                    .iter_mut()
+                    .find(|e| e.mode == "direct" && e.addr == addr)
+                {
+                    e.last_connected = now;
+                    if !pubkey.is_empty() {
+                        e.pubkey = pubkey;
+                    }
+                } else {
+                    g.viewer.hosts.push(HostEntry {
+                        label: addr.clone(),
+                        mode: "direct".into(),
+                        addr,
+                        host_id: String::new(),
+                        pubkey,
+                        last_connected: now,
+                        last_known_online: None,
+                    });
+                }
+            }
+        }
+        let snapshot = g.clone();
+        drop(g);
+        if let Err(e) = snapshot.save(&self.config_path) {
+            tracing::warn!(?e, "recents/config save failed");
+        }
+    }
+
+    fn delete_recent(&mut self, target: &HostEntry) {
+        let mut g = self.cfg.lock().unwrap();
+        g.viewer.hosts.retain(|e| {
+            !(e.mode == target.mode && e.host_id == target.host_id && e.addr == target.addr)
+        });
+        let snapshot = g.clone();
+        drop(g);
+        if let Err(e) = snapshot.save(&self.config_path) {
+            tracing::warn!(?e, "recents delete save failed");
         }
     }
 
@@ -397,6 +849,28 @@ impl ClientApp {
             (Some(e), _) => format!("save failed (config): {e}"),
             (_, Some(e)) => format!("save failed (host-auth): {e}"),
         });
+
+        // A changed signaling URL / key file must take effect for provisioning
+        // without an app restart (AC-3). Reload the identity offline (no
+        // network) so a subsequent Retry provisions against the new server.
+        let config_root = self
+            .host_auth_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let key_file = cfg_snapshot.host.key_file.clone();
+        let signaling_url = cfg_snapshot.host.signaling_url.clone();
+        let id_paths = IdentityPaths::from_config_root(&config_root, key_file);
+        match DeviceIdentity::load_or_create(id_paths, &signaling_url) {
+            Ok(id) => {
+                self.identity = Some(id);
+                self.identity_error = None;
+                self.fingerprint_qr = None;
+            }
+            Err(e) => {
+                self.identity_error = Some(t!("home-identity-error", error => e.to_string()));
+            }
+        }
     }
 }
 
@@ -409,7 +883,6 @@ impl eframe::App for ClientApp {
             self.pending_autostart = false;
             self.view = View::Home;
             self.start_listener();
-            self.refresh_pubkey();
         }
 
         // Host-only self-elevation requested this (non-elevated) window to close
@@ -422,16 +895,11 @@ impl eframe::App for ClientApp {
         // the cause (port-in-use, bind failure, etc.) instead of silently
         // flipping back to Idle.
         self.drain_listener_result();
-
-        // Listener spawns asynchronously; the host task creates host-key.bin
-        // a few hundred ms after Start Listener is clicked. Poll for it each
-        // frame while waiting so the user doesn't have to click "Refresh
-        // Pubkey" manually. Tighter repaint cadence kicks in below.
-        let waiting_for_pubkey =
-            self.is_listening() && self.pubkey_b64.is_none() && self.pubkey_load_error.is_none();
-        if waiting_for_pubkey {
-            self.refresh_pubkey();
-        }
+        // Reap / update the tracked outbound viewer child (AC-5改) so its exit
+        // surfaces as a status change instead of a silent orphan.
+        self.drain_viewer_session();
+        // Pick up a completed background provisioning attempt.
+        self.drain_reprovision();
 
         // Draw the consent dialog (if any) before the panels so it sits over
         // every view. Pulls one request off the channel when idle; subsequent
@@ -453,15 +921,32 @@ impl eframe::App for ClientApp {
             View::Logs => self.draw_logs(ui),
         });
 
-        // Repaint cadence: 100ms while polling for first pubkey (snappy
-        // feedback during the ~hundreds-of-ms key-generation window),
-        // 1Hz otherwise to keep listener-state transitions visible.
-        let next = if waiting_for_pubkey {
-            std::time::Duration::from_millis(100)
+        // Repaint cadence: snappy while a provisioning attempt is in flight,
+        // 1Hz while listening to keep state transitions visible, otherwise idle.
+        let next = if self.reprovision_rx.is_some() {
+            Duration::from_millis(200)
+        } else if self.viewer_session.is_some() || self.is_listening() {
+            // Keep polling the viewer child / listener so exit and the
+            // connecting → running transition surface promptly.
+            Duration::from_secs(1)
         } else {
-            std::time::Duration::from_secs(1)
+            Duration::from_secs(2)
         };
         ctx.request_repaint_after(next);
+    }
+}
+
+impl Drop for ClientApp {
+    fn drop(&mut self) {
+        // AC-5改: never leak an orphaned/zombie viewer child when the window
+        // closes. `run_native` drops the app after the event loop ends, so this
+        // is the reliable reap point. (A viewer session is deliberately *not*
+        // preserved across a normal app close — that is the user quitting the
+        // whole app, not the AC-11 host-elevation teardown we guard against.)
+        if let Some(mut session) = self.viewer_session.take() {
+            let _ = session.child.kill();
+            let _ = session.child.wait();
+        }
     }
 }
 
@@ -470,9 +955,9 @@ impl ClientApp {
         ui.add_space(8.0);
         ui.heading("prdt");
         ui.add_space(12.0);
-        self.nav_entry(ui, View::Home, "Home");
-        self.nav_entry(ui, View::Settings, "Settings");
-        self.nav_entry(ui, View::Logs, "Logs");
+        self.nav_entry(ui, View::Home, &t!("nav-home"));
+        self.nav_entry(ui, View::Settings, &t!("nav-settings"));
+        self.nav_entry(ui, View::Logs, &t!("nav-logs"));
     }
 
     /// A full-width selectable nav entry. The active route is highlighted with
@@ -501,86 +986,241 @@ impl ClientApp {
     }
 
     fn draw_home(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Home");
-        ui.add_space(8.0);
-        ui.columns(2, |cols| {
-            egui::Frame::group(cols[0].style()).show(&mut cols[0], |ui| {
-                self.draw_share_device(ui);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_space(4.0);
+                ui.columns(2, |cols| {
+                    egui::Frame::group(cols[0].style())
+                        .fill(tokens::SURFACE)
+                        .inner_margin(egui::Margin::same(16))
+                        .show(&mut cols[0], |ui| {
+                            self.draw_this_device(ui);
+                        });
+                    egui::Frame::group(cols[1].style())
+                        .fill(tokens::SURFACE)
+                        .inner_margin(egui::Margin::same(16))
+                        .show(&mut cols[1], |ui| {
+                            self.draw_connect(ui);
+                        });
+                });
             });
-            egui::Frame::group(cols[1].style()).show(&mut cols[1], |ui| {
-                self.draw_connect(ui);
-            });
-        });
     }
 
-    fn draw_share_device(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Share this device");
-        ui.add_space(6.0);
+    /// "This device" — server-allocated ID, fixed PIN, key fingerprint/QR, and
+    /// the share start/stop control. Renders from an owned snapshot so the
+    /// deferred `&mut self` actions (retry / regenerate / share) don't collide
+    /// with the identity borrow.
+    fn draw_this_device(&mut self, ui: &mut egui::Ui) {
+        ui.heading(t!("home-this-device-title"));
+        ui.add_space(12.0);
 
-        // Pubkey block: monospace, grouped in 4-char chunks for legibility.
-        match (&self.pubkey_b64, &self.pubkey_load_error) {
-            (Some(pk), _) => {
-                ui.label("Pubkey");
-                ui.label(
-                    egui::RichText::new(group_in_chunks(pk, 4))
-                        .monospace()
-                        .color(tokens::TEXT),
-                );
-                if ui.button("Copy").clicked() {
-                    ui.ctx().copy_text(pk.clone());
+        if let Some(err) = self.identity_error.clone() {
+            ui.colored_label(tokens::DESTRUCTIVE, err);
+            ui.add_space(8.0);
+            ui.colored_label(tokens::TEXT_DIM, t!("home-identity-error-hint"));
+            return;
+        }
+        let (host_id, pin, fp_short) = match self.identity.as_ref() {
+            Some(id) => (
+                id.host_id().map(str::to_string),
+                id.pin_plaintext().map(str::to_string),
+                id.fingerprint_short().to_string(),
+            ),
+            None => return,
+        };
+        let signaling_configured = {
+            let g = self.cfg.lock().unwrap();
+            !g.host.signaling_url.trim().is_empty()
+        };
+        let busy = self.reprovision_rx.is_some();
+
+        let mut do_copy_id: Option<String> = None;
+        let mut do_retry = false;
+        let mut do_toggle_pin = false;
+        let mut do_regenerate = false;
+        let mut do_start = false;
+        let mut do_stop = false;
+
+        // --- Device ID (AC-2 / AC-3) ---
+        ui.label(dim_caption(t!("home-device-id-label")));
+        match &host_id {
+            Some(id) => {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(id.as_str())
+                            .monospace()
+                            .size(26.0)
+                            .strong()
+                            .color(tokens::TEXT),
+                    );
+                    if ui.button(t!("common-button-copy")).clicked() {
+                        do_copy_id = Some(id.clone());
+                    }
+                });
+            }
+            None => {
+                let msg = if signaling_configured {
+                    t!("home-unprovisioned")
+                } else {
+                    t!("home-unprovisioned-no-url")
+                };
+                ui.colored_label(tokens::WARN, msg);
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(!busy && signaling_configured, |ui| {
+                        if ui.button(t!("home-button-retry")).clicked() {
+                            do_retry = true;
+                        }
+                    });
+                    if busy {
+                        ui.spinner();
+                        ui.label(t!("home-provisioning"));
+                    }
+                });
+            }
+        }
+        if let Some(s) = &self.provision_status {
+            ui.add_space(4.0);
+            ui.colored_label(tokens::TEXT_DIM, s);
+        }
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(12.0);
+
+        // --- Fixed PIN (AC-2) ---
+        ui.label(dim_caption(t!("home-pin-label")));
+        match &pin {
+            Some(pin) => {
+                ui.horizontal(|ui| {
+                    let shown = if self.pin_revealed {
+                        pin.clone()
+                    } else {
+                        "\u{2022}".repeat(pin.chars().count())
+                    };
+                    ui.label(
+                        egui::RichText::new(shown)
+                            .monospace()
+                            .size(22.0)
+                            .strong()
+                            .color(tokens::TEXT),
+                    );
+                    let toggle = if self.pin_revealed {
+                        t!("home-pin-hide")
+                    } else {
+                        t!("home-pin-show")
+                    };
+                    if ui.button(toggle).clicked() {
+                        do_toggle_pin = true;
+                    }
+                    if ui.button(t!("home-button-regenerate")).clicked() {
+                        do_regenerate = true;
+                    }
+                });
+            }
+            None => {
+                ui.colored_label(tokens::TEXT_DIM, t!("home-pin-none"));
+                if ui.button(t!("home-button-generate-pin")).clicked() {
+                    do_regenerate = true;
                 }
-            }
-            (None, Some(err)) => {
-                ui.colored_label(tokens::DESTRUCTIVE, err);
-            }
-            (None, None) => {
-                ui.label(
-                    "Pubkey: (not generated yet \u{2014} start the listener to create host-key.bin)",
-                );
             }
         }
 
-        ui.add_space(8.0);
+        ui.add_space(12.0);
         ui.separator();
-        ui.add_space(6.0);
+        ui.add_space(12.0);
 
-        // Listener controls with a colored status dot.
+        // --- Key fingerprint + QR (AC-14, out-of-band verification) ---
+        ui.label(dim_caption(t!("home-fingerprint-label")));
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(fp_short.as_str())
+                    .monospace()
+                    .color(tokens::TEXT),
+            );
+            let qr_label = if self.show_fingerprint_qr {
+                t!("home-button-hide-qr")
+            } else {
+                t!("home-button-show-qr")
+            };
+            if ui.button(qr_label).clicked() {
+                self.show_fingerprint_qr = !self.show_fingerprint_qr;
+            }
+        });
+        ui.colored_label(tokens::TEXT_DIM, t!("home-fingerprint-hint"));
+        if self.show_fingerprint_qr {
+            self.ensure_fingerprint_qr(ui.ctx());
+            if let Some(qr) = &self.fingerprint_qr {
+                ui.add_space(6.0);
+                ui.image(egui::load::SizedTexture::new(qr.id(), qr.size_vec2()));
+            }
+        }
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(12.0);
+
+        // --- Sharing (host listener) ---
+        ui.label(dim_caption(t!("home-sharing-label")));
         let listening = self.is_listening();
         ui.horizontal(|ui| {
             if listening {
                 ui.colored_label(tokens::OK, "\u{25cf}");
-                ui.label("Listening");
+                ui.label(t!("home-sharing-on"));
             } else {
                 ui.colored_label(tokens::TEXT_DIM, "\u{25cb}");
-                ui.label("Idle");
+                ui.label(t!("home-sharing-off"));
             }
         });
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            if listening {
-                if ui.button("Stop Listener").clicked() {
-                    self.stop_listener();
-                }
-            } else if ui.button("Start Listener").clicked() {
-                self.start_listener();
-                self.refresh_pubkey();
+        ui.add_space(6.0);
+        if listening {
+            let stop = egui::Button::new(
+                egui::RichText::new(t!("home-button-stop-sharing")).color(tokens::TEXT),
+            )
+            .fill(tokens::DESTRUCTIVE);
+            if ui.add(stop).clicked() {
+                do_stop = true;
             }
-            if ui.button("Refresh Pubkey").clicked() {
-                self.refresh_pubkey();
+        } else {
+            let start = egui::Button::new(
+                egui::RichText::new(t!("home-button-start-sharing")).color(tokens::BG_DEEP),
+            )
+            .fill(tokens::ACCENT);
+            if ui.add(start).clicked() {
+                do_start = true;
             }
-        });
-
+        }
         if let Some(status) = &self.host_status {
             ui.add_space(8.0);
-            // Errors get red highlighting for quick triage.
             if status.starts_with("listener error")
                 || status.starts_with("cannot start")
                 || status.starts_with("invalid host args")
             {
                 ui.colored_label(tokens::DESTRUCTIVE, status);
             } else {
-                ui.label(status);
+                ui.colored_label(tokens::TEXT_DIM, status);
             }
+        }
+
+        // Apply deferred actions (outside the render borrows above).
+        if let Some(id) = do_copy_id {
+            ui.ctx().copy_text(id);
+        }
+        if do_toggle_pin {
+            self.pin_revealed = !self.pin_revealed;
+        }
+        if do_retry {
+            self.start_reprovision();
+        }
+        if do_regenerate {
+            self.regenerate_pin();
+        }
+        if do_start {
+            self.start_listener();
+        }
+        if do_stop {
+            self.stop_listener();
         }
     }
 
@@ -607,52 +1247,197 @@ impl ClientApp {
         }
     }
 
+    /// "Connect to a device" — the easy path (peer ID + PIN), a collapsible
+    /// Advanced section for legacy direct mode, and a recent-connections list.
     fn draw_connect(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Connect to a device");
-        ui.add_space(6.0);
+        ui.heading(t!("home-connect-title"));
+        ui.add_space(12.0);
 
-        ui.label("Peer host:port (direct mode)");
-        ui.add(egui::TextEdit::singleline(&mut self.peer_host).desired_width(280.0));
-
-        ui.add_space(4.0);
-        ui.label("Peer pubkey (base64)");
-        ui.add(egui::TextEdit::singleline(&mut self.peer_pubkey).desired_width(420.0));
-
-        ui.add_space(4.0);
-        ui.label("Codec");
-        egui::ComboBox::from_id_salt("connect-codec-combo")
-            .selected_text(&self.peer_codec)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.peer_codec, "auto".to_string(), "auto");
-                ui.selectable_value(&mut self.peer_codec, "h264".to_string(), "h264");
-                ui.selectable_value(&mut self.peer_codec, "h265".to_string(), "h265");
-            });
-
-        ui.add_space(4.0);
-        ui.label("Decoder");
-        egui::ComboBox::from_id_salt("connect-decoder-combo")
-            .selected_text(&self.peer_decoder)
-            .show_ui(ui, |ui| {
-                for opt in prdt_viewer::supported_decoder_args() {
-                    ui.selectable_value(&mut self.peer_decoder, opt.to_string(), opt);
-                }
-            });
-
+        // --- Easy path: peer ID + PIN (AC-1) ---
+        ui.label(dim_caption(t!("home-peer-id-label")));
+        ui.add(
+            egui::TextEdit::singleline(&mut self.peer_id)
+                .hint_text("123-456-789")
+                .desired_width(f32::INFINITY),
+        );
         ui.add_space(8.0);
-        // Prominent accent-filled primary action.
-        let connect = egui::Button::new(egui::RichText::new("Connect").color(tokens::BG_DEEP))
-            .fill(tokens::ACCENT);
-        if ui.add(connect).clicked() {
-            self.spawn_connect();
+        ui.label(dim_caption(t!("home-peer-pin-label")));
+        ui.add(
+            egui::TextEdit::singleline(&mut self.peer_pin)
+                .hint_text(t!("home-peer-pin-hint"))
+                .password(true)
+                .desired_width(f32::INFINITY),
+        );
+
+        ui.add_space(12.0);
+        // AC-10: at most one outbound session. When one is live the primary
+        // action becomes "切断" (disconnect) and a second connect is impossible.
+        let session_active = self.viewer_session.is_some();
+        let mut do_connect_signaling = false;
+        let mut do_disconnect = false;
+        if session_active {
+            let disc = egui::Button::new(
+                egui::RichText::new(t!("home-button-disconnect"))
+                    .size(16.0)
+                    .color(tokens::TEXT),
+            )
+            .fill(tokens::DESTRUCTIVE)
+            .min_size(egui::vec2(ui.available_width(), 40.0));
+            if ui.add(disc).clicked() {
+                do_disconnect = true;
+            }
+        } else {
+            let connect_btn = egui::Button::new(
+                egui::RichText::new(t!("home-button-connect"))
+                    .size(16.0)
+                    .color(tokens::BG_DEEP),
+            )
+            .fill(tokens::ACCENT)
+            .min_size(egui::vec2(ui.available_width(), 40.0));
+            if ui.add(connect_btn).clicked() {
+                do_connect_signaling = true;
+            }
+        }
+        ui.add_space(4.0);
+        ui.colored_label(tokens::TEXT_DIM, t!("home-connect-single-session-note"));
+
+        // Status line: a live session shows its (heuristic) phase; otherwise the
+        // last terminal / error message from the previous session or a guard.
+        if let Some(session) = &self.viewer_session {
+            ui.add_space(8.0);
+            if session.is_connecting() {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.colored_label(
+                        tokens::TEXT_DIM,
+                        t!("home-connect-connecting",
+                            target => session.target.clone(),
+                            pid => session.pid.to_string()),
+                    );
+                });
+            } else {
+                ui.colored_label(
+                    tokens::OK,
+                    t!("home-connect-active",
+                        target => session.target.clone(),
+                        pid => session.pid.to_string()),
+                );
+            }
+        } else if let Some(status) = &self.connect_status {
+            ui.add_space(8.0);
+            let color = if self.connect_error {
+                tokens::DESTRUCTIVE
+            } else {
+                tokens::TEXT_DIM
+            };
+            ui.colored_label(color, status);
         }
 
-        if let Some(status) = &self.connect_status {
-            ui.add_space(8.0);
-            if status.starts_with("spawn failed") || status.starts_with("current_exe") {
-                ui.colored_label(tokens::DESTRUCTIVE, status);
-            } else {
-                ui.label(status);
+        ui.add_space(12.0);
+
+        // --- Advanced: legacy direct mode (kept so nothing is lost) ---
+        let mut do_connect_direct = false;
+        egui::CollapsingHeader::new(t!("home-advanced"))
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.label(dim_caption(t!("home-advanced-host")));
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.peer_host).desired_width(f32::INFINITY),
+                );
+                ui.add_space(4.0);
+                ui.label(dim_caption(t!("home-advanced-pubkey")));
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.peer_pubkey).desired_width(f32::INFINITY),
+                );
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(t!("home-codec-label"));
+                    egui::ComboBox::from_id_salt("connect-codec-combo")
+                        .selected_text(&self.peer_codec)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.peer_codec, "auto".to_string(), "auto");
+                            ui.selectable_value(&mut self.peer_codec, "h264".to_string(), "h264");
+                            ui.selectable_value(&mut self.peer_codec, "h265".to_string(), "h265");
+                        });
+                });
+                ui.horizontal(|ui| {
+                    ui.label(t!("home-decoder-label"));
+                    egui::ComboBox::from_id_salt("connect-decoder-combo")
+                        .selected_text(&self.peer_decoder)
+                        .show_ui(ui, |ui| {
+                            for opt in prdt_viewer::supported_decoder_args() {
+                                ui.selectable_value(&mut self.peer_decoder, opt.to_string(), opt);
+                            }
+                        });
+                });
+                ui.add_space(6.0);
+                ui.add_enabled_ui(!session_active, |ui| {
+                    if ui.button(t!("home-button-connect-direct")).clicked() {
+                        do_connect_direct = true;
+                    }
+                });
+            });
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(8.0);
+
+        // --- Recent connections ---
+        ui.label(dim_caption(t!("home-recent-title")));
+        let recents: Vec<HostEntry> = {
+            let g = self.cfg.lock().unwrap();
+            let mut v = g.viewer.hosts.clone();
+            v.sort_by_key(|e| std::cmp::Reverse(e.last_connected));
+            v.truncate(6);
+            v
+        };
+        let mut connect_recent: Option<HostEntry> = None;
+        let mut delete_recent: Option<HostEntry> = None;
+        if recents.is_empty() {
+            ui.colored_label(tokens::TEXT_DIM, t!("home-recent-empty"));
+        } else {
+            for e in &recents {
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(!session_active, |ui| {
+                        if ui.button(t!("home-button-connect-short")).clicked() {
+                            connect_recent = Some(e.clone());
+                        }
+                    });
+                    let detail = if e.mode == "signaling" {
+                        e.host_id.clone()
+                    } else {
+                        e.addr.clone()
+                    };
+                    ui.label(egui::RichText::new(detail).monospace().color(tokens::TEXT));
+                    if ui.small_button(t!("home-recent-remove")).clicked() {
+                        delete_recent = Some(e.clone());
+                    }
+                });
             }
+        }
+
+        // Apply deferred actions (outside the render borrows above).
+        if do_disconnect {
+            self.disconnect_viewer();
+        }
+        if do_connect_signaling {
+            self.connect_signaling();
+        }
+        if do_connect_direct {
+            self.connect_direct();
+        }
+        if let Some(e) = connect_recent {
+            if e.mode == "signaling" {
+                self.peer_id = e.host_id.clone();
+                self.connect_signaling();
+            } else {
+                self.peer_host = e.addr.clone();
+                self.peer_pubkey = e.pubkey.clone();
+                self.connect_direct();
+            }
+        }
+        if let Some(e) = delete_recent {
+            self.delete_recent(&e);
         }
     }
 
@@ -768,7 +1553,10 @@ impl ClientApp {
                         );
                     });
                 if d.host_auth.pin_hash.is_some() {
-                    ui.colored_label(tokens::TEXT_DIM, "A PIN is set (edit PIN out of scope).");
+                    ui.colored_label(
+                        tokens::TEXT_DIM,
+                        "A PIN is set (manage it from the Home screen).",
+                    );
                 }
                 labeled_drag_u32(
                     ui,
@@ -818,15 +1606,9 @@ impl ClientApp {
     }
 }
 
-/// Group a string into space-separated chunks of `n` chars (e.g. base64 pubkey
-/// into 4-char blocks for readability).
-fn group_in_chunks(s: &str, n: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    chars
-        .chunks(n)
-        .map(|c| c.iter().collect::<String>())
-        .collect::<Vec<_>>()
-        .join(" ")
+/// A dimmed, small caption used to label each field group.
+fn dim_caption(text: String) -> egui::RichText {
+    egui::RichText::new(text).color(tokens::TEXT_DIM).small()
 }
 
 fn locale_label(locale: &str) -> &str {
@@ -971,9 +1753,36 @@ mod tests {
     }
 
     #[test]
-    fn group_in_chunks_splits_into_blocks() {
-        assert_eq!(group_in_chunks("A1B2C3D4", 4), "A1B2 C3D4");
-        assert_eq!(group_in_chunks("ABC", 4), "ABC");
-        assert_eq!(group_in_chunks("ABCDE", 4), "ABCD E");
+    fn resolve_decoder_arg_falls_back_to_auto() {
+        // Empty / whitespace / unknown selections must never reach the child
+        // verbatim — they collapse to `auto` (#11a).
+        assert_eq!(resolve_decoder_arg(""), "auto");
+        assert_eq!(resolve_decoder_arg("   "), "auto");
+        assert_eq!(resolve_decoder_arg("definitely-not-a-decoder"), "auto");
+        // `auto` is always a supported value on every build.
+        assert_eq!(resolve_decoder_arg("auto"), "auto");
+        // The stale-config default (`decoder = "nvdec"`) is only forwarded when
+        // this build actually compiled that backend in; otherwise it collapses
+        // to `auto` rather than crashing the child at decoder dispatch.
+        let supported = prdt_viewer::supported_decoder_args();
+        if supported.iter().any(|d| *d == "nvdec") {
+            assert_eq!(resolve_decoder_arg("nvdec"), "nvdec");
+        } else {
+            assert_eq!(resolve_decoder_arg("nvdec"), "auto");
+        }
+        // Every advertised option round-trips unchanged.
+        for opt in supported {
+            assert_eq!(resolve_decoder_arg(opt), opt);
+        }
+    }
+
+    #[test]
+    fn resolve_codec_arg_only_accepts_known_values() {
+        assert_eq!(resolve_codec_arg("auto"), "auto");
+        assert_eq!(resolve_codec_arg("h264"), "h264");
+        assert_eq!(resolve_codec_arg("h265"), "h265");
+        assert_eq!(resolve_codec_arg(" h265 "), "h265");
+        assert_eq!(resolve_codec_arg(""), "auto");
+        assert_eq!(resolve_codec_arg("h266"), "auto");
     }
 }

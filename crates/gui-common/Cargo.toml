@@ -19,10 +19,14 @@ sys-locale = { workspace = true }
 unic-langid = { workspace = true }
 chrono = { workspace = true }
 serde_json = { workspace = true }
+url = { workspace = true }
 prdt-protocol = { path = "../protocol" }
+prdt-crypto = { path = "../crypto" }
+prdt-signaling-client = { path = "../signaling-client" }
 bcrypt = "0.15"
 rand = "0.8"
 
 [dev-dependencies]
 tempfile = "3"
 rand = "0.8"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

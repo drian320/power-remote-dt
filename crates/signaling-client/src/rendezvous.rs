@@ -62,6 +62,56 @@ async fn recv_msg(
     }
 }
 
+/// Register (or re-confirm) a host identity with the signaling server without
+/// waiting for a viewer to connect.
+///
+/// Used by offline-first provisioning (AC-9): the device generates its key
+/// locally, then asynchronously calls this to obtain / confirm its
+/// server-allocated 9-digit ID. Sends `Register { host_id, pubkey_b64 }` and
+/// returns the server's `Registered { host_id }`.
+///
+/// Idempotency: pass the persisted `host_id` (dashed or empty). The server
+/// returns the same ID for a matching key. Passing an empty `host_id` asks the
+/// server to allocate — with the server's reverse-lookup-by-pubkey, a device
+/// that still holds its key recovers its existing ID even if its local record
+/// was lost. A `HostIdPubkeyMismatch` error means the ID is registered to a
+/// different key.
+#[instrument(skip(pubkey_b64), fields(host_id = %host_id))]
+pub async fn register_host(
+    url: &url::Url,
+    host_id: &str,
+    pubkey_b64: &str,
+    timeout: Duration,
+) -> Result<String, SignalingError> {
+    let mut ws = ws_connect(url).await?;
+
+    send_msg(
+        &mut ws,
+        &ClientMessage::Register {
+            host_id: host_id.to_string(),
+            pubkey_b64: pubkey_b64.to_string(),
+        },
+    )
+    .await?;
+
+    let allocated = match recv_msg(&mut ws, "registered", timeout).await? {
+        ServerMessage::Registered { host_id } => host_id,
+        ServerMessage::Error { code, message } => {
+            return Err(SignalingError::Server { code, message })
+        }
+        other => {
+            return Err(SignalingError::Protocol(format!(
+                "expected Registered, got {other:?}"
+            )))
+        }
+    };
+
+    // Close cleanly; provisioning only needs the durable ID, not a live
+    // session. The real listener re-registers later to become discoverable.
+    let _ = ws.close(None).await;
+    Ok(allocated)
+}
+
 #[instrument(skip(cfg, identity), fields(host_id = %cfg.host_id))]
 pub async fn rendezvous_as_host(
     cfg: RendezvousConfig,

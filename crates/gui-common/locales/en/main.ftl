@@ -102,3 +102,82 @@ crashlog-button-open-folder = Open crashes folder
 crashlog-button-acknowledge = Acknowledge all
 crashlog-no-pending = No pending crash reports.
 crashlog-row-format = { $timestamp }  { $binary }  "{ $message }"
+
+# Unified home (RustDesk-style single screen)
+nav-home = Home
+nav-settings = Settings
+nav-logs = Logs
+
+home-identity-error = Failed to initialise device identity: { $error }
+home-identity-error-hint = Check the host key file and config directory permissions, then restart.
+
+# This device
+home-this-device-title = This device
+home-device-id-label = Device ID
+home-unprovisioned = Unprovisioned — cannot reach the signaling server
+home-unprovisioned-no-url = No signaling server URL set. Enter one in Settings, then retry.
+home-button-retry = Retry
+home-provisioning = Provisioning…
+home-provisioned = Provisioning complete.
+home-provision-failed = Provisioning failed: { $error }
+home-pin-label = PIN
+home-pin-show = Show
+home-pin-hide = Hide
+home-pin-none = No PIN set (auth mode is not PIN).
+home-button-regenerate = Regenerate
+home-button-generate-pin = Generate PIN
+home-fingerprint-label = Key fingerprint
+home-fingerprint-hint = Verify this out-of-band with the other device to prevent impersonation.
+home-button-show-qr = Show QR
+home-button-hide-qr = Hide QR
+home-sharing-label = Share this device
+home-sharing-on = Sharing
+home-sharing-off = Idle
+home-button-start-sharing = Start sharing
+home-button-stop-sharing = Stop sharing
+
+# Connect to a device
+home-connect-title = Connect to a device
+home-peer-id-label = Peer ID (9-digit)
+home-peer-pin-label = PIN
+home-peer-pin-hint = PIN shown on the other device
+home-button-connect = Connect
+home-button-disconnect = Disconnect
+home-connect-need-id = Enter the peer's ID.
+home-connect-need-signaling = No signaling server URL set. Enter one in Settings.
+home-connect-need-host = Enter a host address (host:port).
+home-connect-launched = Launched viewer (pid { $pid }).
+home-connect-connecting = Connecting to { $target }… (pid { $pid })
+home-connect-active = Session running — { $target } (pid { $pid })
+home-connect-disconnected = Disconnected (exited cleanly).
+home-connect-failed = The viewer exited abnormally ({ $detail }). Check the peer ID/PIN, signaling settings, and decoder settings.
+home-connect-exit-code = exit code { $code }
+home-connect-exit-signal = terminated by signal
+home-connect-already-active = A session is already running (one outbound session at a time). Disconnect before connecting again.
+home-connect-single-session-note = Only one outbound session can be connected at a time.
+home-host-elevation-skipped-viewer = Skipped admin elevation to keep the active session; sharing started with normal privileges (input into admin windows such as Task Manager is unavailable — disconnect, then start sharing again to elevate).
+home-advanced = Advanced
+home-advanced-host = Host host:port (direct mode)
+home-advanced-pubkey = Host public key (base64)
+home-codec-label = Codec
+home-decoder-label = Decoder
+home-button-connect-direct = Connect (direct)
+home-recent-title = Recent connections
+home-recent-empty = (no recent connections)
+home-button-connect-short = Connect
+home-recent-remove = Remove
+
+# Consent prompt (host-side, unknown-peer approval modal)
+consent-heading = Incoming Connection Request
+consent-device-key-label = Device key:
+consent-label-optional = Label (optional):
+consent-permissions-heading = Permissions for this session:
+consent-permission-input = Input (keyboard/mouse)
+consent-permission-clipboard = Clipboard
+consent-permission-file-transfer = File transfer
+consent-permission-audio = Audio
+consent-remember = Remember this device
+consent-auto-deny = Auto-deny in { $seconds }s
+consent-deny = Deny (Esc)
+consent-allow = Allow
+consent-allow-armed-in = Allow in { $seconds }s

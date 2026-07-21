@@ -80,6 +80,10 @@ md-5 = "0.10"
 
 # Persistence
 rusqlite = { version = "0.31", features = ["bundled"] }
+# Crash-safe local persistence: cross-platform advisory file locks + hashing
+# for key fingerprints (identity provisioning, known_hosts atomic writes).
+fs2 = "0.4"
+sha2 = "0.10"
 
 # GUI (Phase 4 G1; GUI modernization P1: egui 0.28→0.32).
 # Renderer: wgpu (Vulkan/DX12), forced via NativeOptions.renderer at each

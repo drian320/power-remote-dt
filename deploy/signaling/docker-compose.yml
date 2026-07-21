@@ -1,0 +1,57 @@
+# Run with:  docker compose -f deploy/signaling/docker-compose.yml up -d --build
+#
+# NOTE: the build context is the repository root, not this directory —
+# see deploy/signaling/Dockerfile for why.
+services:
+  signaling:
+    build:
+      context: ../..
+      dockerfile: deploy/signaling/Dockerfile
+    image: prdt-signaling-server:latest
+    container_name: prdt-signaling-server
+    restart: unless-stopped
+    command:
+      - --bind=0.0.0.0:8080
+      - --db=/data/prdt-signaling.sqlite
+      - --log=${PRDT_LOG_LEVEL:-info}
+      - --session-timeout-ms=${PRDT_SESSION_TIMEOUT_MS:-60000}
+    ports:
+      # Bind to the host's VPN/LAN interface only where possible, e.g.
+      # "100.x.y.z:8080:8080" for a Tailscale IP, instead of publishing on
+      # all interfaces. See README.md for the Tailscale-recommended setup.
+      - "${PRDT_SIGNALING_BIND_IP:-0.0.0.0}:${PRDT_SIGNALING_PORT:-8080}:8080"
+    volumes:
+      # Named volume so the SQLite host_id/pubkey store (and its -wal/-shm
+      # journal files) survive container recreation and image rebuilds.
+      - signaling-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional: run cloudflared as a sidecar in the same compose project so it
+  # can reach the signaling server over the internal "signaling" hostname
+  # instead of localhost. Uncomment and fill in your tunnel token, or run
+  # cloudflared separately (e.g. as its own systemd service) — see README.md
+  # for both options and what to put in cloudflared's ingress config.
+  #
+  # cloudflared:
+  #   image: cloudflare/cloudflared:latest
+  #   container_name: prdt-cloudflared
+  #   restart: unless-stopped
+  #   command: tunnel --no-autoupdate run
+  #   environment:
+  #     TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+  #   depends_on:
+  #     signaling:
+  #       condition: service_healthy
+
+volumes:
+  signaling-data:

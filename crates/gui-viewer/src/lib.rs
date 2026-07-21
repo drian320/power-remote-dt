@@ -94,6 +94,20 @@ pub enum LaunchOutcome {
 /// Run the viewer launcher as a blocking call. Returns when the user
 /// presses Connect (with `LaunchOutcome::Connect`) or closes the
 /// window (with `LaunchOutcome::Quit`).
+///
+/// # Deprecated (AC-13 compat facade)
+/// This standalone launcher window has been superseded by the unified home
+/// screen (`prdt_gui_client::run_client_gui`, opened by `prdt` with no
+/// subcommand and now also by `prdt connect` with no explicit target — see
+/// `prdt_viewer::resolve_connect_routing`). It is kept compiling and
+/// functional for one release as a compat facade per the RustDesk-UX ADR
+/// (`.omc/adr/2026-07-19-rustdesk-ux-architecture.md`), not deleted, so any
+/// direct caller of this library function keeps working. New code should not
+/// call this directly.
+#[deprecated(
+    since = "0.0.1",
+    note = "superseded by the unified home (prdt_gui_client::run_client_gui); kept one release as an AC-13 compat facade"
+)]
 pub fn run_viewer_launcher(config_path: Option<PathBuf>) -> anyhow::Result<LaunchOutcome> {
     let config_path = config_path
         .or_else(prdt_gui_common::default_config_path)

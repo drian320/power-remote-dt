@@ -4,6 +4,7 @@ pub mod auth_config;
 pub mod config;
 pub mod crashlog;
 pub mod i18n;
+pub mod identity;
 pub mod log_tail;
 pub mod paths;
 pub mod qr;
@@ -19,6 +20,9 @@ pub use crashlog::{
 pub use i18n::{
     current_locale, detect_locale, init as init_locale, set_locale, tr, tr_args, FluentValue,
     Locale,
+};
+pub use identity::{
+    DeviceIdentity, IdentityError, IdentityPaths, IdentityRecord, ProvisioningState,
 };
 pub use log_tail::{TailHandle, TailLayer};
 pub use paths::{config_root, default_config_path};

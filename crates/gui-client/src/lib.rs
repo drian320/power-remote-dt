@@ -1,10 +1,12 @@
 //! Unified `prdt` client GUI.
 //!
-//! Two tabs in one window: "This Device" (host listener controls) and
-//! "Connect" (peer ID + Connect button that spawns `prdt connect ...` as
-//! a child process). Outbound viewer sessions run as separate processes
-//! because the viewer owns a `winit` event loop and a D3D11 swapchain that
-//! cannot coexist with the egui window in the same process today.
+//! One RustDesk-style home screen: "This device" (server-allocated 9-digit ID
+//! + fixed PIN + key fingerprint/QR + share start/stop) beside "Connect to a
+//! device" (peer ID + PIN, plus a collapsible Advanced section for legacy
+//! direct mode and a recent-connections list). Outbound viewer sessions run as
+//! separate processes because the viewer owns a `winit` event loop and a D3D11
+//! swapchain that cannot coexist with the egui window in the same process today
+//! (ADR B1 / AC-5改: the process boundary is kept but hidden behind the UX).
 
 mod app;
 #[cfg(windows)]
@@ -36,8 +38,8 @@ pub fn run_client_gui(config_path: Option<PathBuf>, autostart_host: bool) -> any
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([720.0, 520.0])
-            .with_min_inner_size([520.0, 360.0]),
+            .with_inner_size([900.0, 620.0])
+            .with_min_inner_size([560.0, 420.0]),
         // Force wgpu — glow's glutin path fails on Wayland (COSMIC).
         renderer: eframe::Renderer::Wgpu,
         // Drop wgpu's GL/GLES backend: its EGL init panics on Wayland

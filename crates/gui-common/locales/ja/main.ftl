@@ -102,3 +102,82 @@ crashlog-button-open-folder = クラッシュフォルダを開く
 crashlog-button-acknowledge = すべて確認済みにする
 crashlog-no-pending = 未送信のクラッシュレポートはありません。
 crashlog-row-format = { $timestamp }  { $binary }  「{ $message }」
+
+# 統合ホーム (RustDesk式1画面)
+nav-home = ホーム
+nav-settings = 設定
+nav-logs = ログ
+
+home-identity-error = 識別情報の初期化に失敗しました: { $error }
+home-identity-error-hint = ホスト鍵ファイルと設定ディレクトリの権限を確認し、再起動してください。
+
+# このデバイス
+home-this-device-title = このデバイス
+home-device-id-label = デバイスID
+home-unprovisioned = 未プロビジョニング — シグナリングサーバーに接続できません
+home-unprovisioned-no-url = シグナリングサーバーのURLが未設定です。設定画面で入力してから再試行してください。
+home-button-retry = 再試行
+home-provisioning = プロビジョニング中…
+home-provisioned = プロビジョニングが完了しました。
+home-provision-failed = プロビジョニングに失敗しました: { $error }
+home-pin-label = PIN
+home-pin-show = 表示
+home-pin-hide = 非表示
+home-pin-none = PINは未設定です（認証モードがPINではありません）。
+home-button-regenerate = 再生成
+home-button-generate-pin = PINを生成
+home-fingerprint-label = 鍵フィンガープリント
+home-fingerprint-hint = なりすまし防止のため、相手のデバイスと別経路で照合してください。
+home-button-show-qr = QRを表示
+home-button-hide-qr = QRを隠す
+home-sharing-label = このデバイスを共有
+home-sharing-on = 共有中
+home-sharing-off = 停止中
+home-button-start-sharing = 共有を開始
+home-button-stop-sharing = 共有を停止
+
+# デバイスに接続
+home-connect-title = デバイスに接続
+home-peer-id-label = 相手のID（9桁）
+home-peer-pin-label = PIN
+home-peer-pin-hint = 相手のデバイスに表示されているPIN
+home-button-connect = 接続
+home-button-disconnect = 切断
+home-connect-need-id = 相手のIDを入力してください。
+home-connect-need-signaling = シグナリングサーバーのURLが未設定です。設定画面で入力してください。
+home-connect-need-host = ホストアドレス（host:port）を入力してください。
+home-connect-launched = ビューアを起動しました（pid { $pid }）。
+home-connect-connecting = 接続中… { $target }（pid { $pid }）
+home-connect-active = セッション実行中 { $target }（pid { $pid }）
+home-connect-disconnected = 切断しました（正常終了）。
+home-connect-failed = ビューアが異常終了しました（{ $detail }）。相手のID/PIN・シグナリング設定・デコーダ設定を確認してください。
+home-connect-exit-code = 終了コード { $code }
+home-connect-exit-signal = シグナルにより終了
+home-connect-already-active = 既にセッションが1件実行中です（同時接続は1件まで）。「切断」してから接続してください。
+home-connect-single-session-note = 同時に接続できるセッションは1件までです。
+home-host-elevation-skipped-viewer = 接続中のセッションを維持するため、管理者昇格をスキップして通常権限で共有を開始しました（タスクマネージャー等の管理者ウィンドウには入力できません。切断後に共有を開始し直すと昇格します）。
+home-advanced = 詳細設定
+home-advanced-host = ホスト host:port（直結モード）
+home-advanced-pubkey = ホスト公開鍵（base64）
+home-codec-label = コーデック
+home-decoder-label = デコーダー
+home-button-connect-direct = 接続（直結）
+home-recent-title = 最近の接続
+home-recent-empty = （履歴はありません）
+home-button-connect-short = 接続
+home-recent-remove = 削除
+
+# 同意プロンプト（ホスト側・未知ピアの接続承認モーダル）
+consent-heading = 接続リクエスト
+consent-device-key-label = デバイスキー:
+consent-label-optional = ラベル（任意）:
+consent-permissions-heading = このセッションの許可権限:
+consent-permission-input = 入力（キーボード/マウス）
+consent-permission-clipboard = クリップボード
+consent-permission-file-transfer = ファイル転送
+consent-permission-audio = 音声
+consent-remember = このデバイスを記憶する
+consent-auto-deny = { $seconds }秒後に自動拒否
+consent-deny = 拒否（Esc）
+consent-allow = 許可
+consent-allow-armed-in = { $seconds }秒後に許可可能

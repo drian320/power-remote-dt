@@ -48,6 +48,19 @@ enum Cmd {
 /// path opens the unified launcher GUI (RustDesk-style: one window, "This
 /// Device" + "Connect" tabs) on **both** OSes — the egui/eframe stack is
 /// cross-platform, so the Linux "deferred to L2" bail is gone.
+///
+/// AC-4/AC-13 (launcher unification): `prdt connect`/`prdt viewer` with no
+/// explicit target and not `--headless` also now opens that same unified
+/// home, instead of the old standalone gui-viewer launcher window — there is
+/// only one user-facing launcher. This routing decision is made *here*,
+/// before calling into `prdt_viewer::run_with_args`, rather than inside the
+/// `prdt-viewer` crate itself: `prdt-gui-client` already depends on
+/// `prdt-viewer` (for `supported_decoder_args`), so having `prdt-viewer` call
+/// back into `prdt-gui-client` would form a Cargo dependency cycle. Doing it
+/// in this leaf binary avoids that entirely. The old launcher
+/// (`prdt_gui_viewer::run_viewer_launcher`) is kept — deprecated, not
+/// deleted — as an AC-13 compat facade for any direct library caller of
+/// `run_with_args` that skips this dispatch.
 #[cfg(any(windows, target_os = "linux"))]
 fn main() -> anyhow::Result<()> {
     use clap::Parser as _;
@@ -64,7 +77,12 @@ fn main() -> anyhow::Result<()> {
         Some(Cmd::Connect { args }) | Some(Cmd::Viewer { args }) => {
             let argv = std::iter::once(OsString::from("prdt-viewer")).chain(args);
             let viewer_args = prdt_viewer::parse_args_with_config(argv);
-            prdt_viewer::run_with_args(viewer_args)
+            match prdt_viewer::resolve_connect_routing(&viewer_args) {
+                prdt_viewer::ConnectRouting::Launcher => {
+                    prdt_gui_client::run_client_gui(viewer_args.config.clone(), false)
+                }
+                prdt_viewer::ConnectRouting::Connect => prdt_viewer::run_with_args(viewer_args),
+            }
         }
     }
 }
