@@ -228,24 +228,23 @@ for lib in \
     /usr/lib/x86_64-linux-gnu/libpipewire-0.3.so.0 \
     /usr/lib/x86_64-linux-gnu/libopenh264.so.7 \
     /usr/lib/x86_64-linux-gnu/libayatana-appindicator3.so.1 \
-    /usr/lib/x86_64-linux-gnu/libasound.so.2 \
-    /usr/lib/x86_64-linux-gnu/libdrm.so.2
+    /usr/lib/x86_64-linux-gnu/libasound.so.2
 do
     test -f "$lib" || { echo "Missing required lib: $lib"; exit 1; }
     LIB_FLAGS+=(--library "$lib")
 done
-# libasound.so.2 and libdrm.so.2 must be force-added: both are dropped by
-# linuxdeploy's *built-in* default exclude list, but the AppImage needs them
-# resolvable at load time:
-#   - libasound.so.2 is a direct DT_NEEDED of prdt (cpal / audiopus link ALSA).
-#   - libdrm.so.2 is a transitive DT_NEEDED of the bundled libva-drm.so.2.
-# linuxdeploy excludes them because ALSA dlopen-loads versioned plugins and
-# libdrm is kernel/Mesa-coupled; but an explicit `--library` flag overrides
-# the excludelist, and these client libraries are ABI-stable enough to bundle.
-# The host-coupled bits (ALSA PCM plugins, DRI/GBM backend drivers) are only
-# exercised when a real device/GPU is opened — never on the `--help` smoke
-# test — and the release notes promise the AppImage needs nothing beyond
-# libfuse2, so bundling the client libs is the right call.
+# libasound.so.2 must be force-added: it is dropped by linuxdeploy's *built-in*
+# default exclude list, but the AppImage needs it resolvable at load time —
+# libasound.so.2 is a direct DT_NEEDED of prdt (cpal / audiopus link ALSA).
+# It is a client library (the host-coupled ALSA PCM plugins are dlopen-loaded
+# from the host), so bundling it is safe.
+#
+# libdrm.so.2 is deliberately NOT force-added anymore. It is kernel/Mesa
+# coupled: bundling the Debian-bookworm copy shadowed the host's newer libdrm
+# and — together with the Mesa GL/GBM/LLVM stack — broke Wayland/GL surface
+# creation on desktops with a newer Mesa. It is now in excludelist.txt so the
+# host provides it; the bundled libva-drm.so.2 resolves its DT_NEEDED libdrm
+# from the host at runtime (present on any real desktop / VA-API host).
 
 # ---------------------------------------------------------------------------
 # 9. Run linuxdeploy

@@ -41,3 +41,25 @@ libwayland-client.so*
 libwayland-cursor.so*
 libwayland-egl.so*
 libxkbcommon.so*
+# Mesa / OpenGL / GBM / LLVM — GPU-driver-coupled, MUST be host-provided.
+# Same failure class as the Vulkan/Wayland libs above (and the reason a
+# Wayland/GL desktop still hit "Failed to create surface" even after those
+# were excluded): the Debian-bookworm Mesa stack (libGL/libEGL/libgbm and the
+# libLLVM it links for llvmpipe/radeonsi) shadows the host's *newer* Mesa and
+# breaks GL/EGL surface creation + software/GPU rasteriser init on an ABI
+# mismatch. libdrm is likewise kernel/Mesa coupled (it is no longer
+# force-bundled — see build-appimage.sh). The host always provides all of
+# these on a real X11/Wayland desktop.
+libLLVM*.so*
+libLLVM-*.so*
+libGL.so*
+libGLX.so*
+libGLX_mesa.so*
+libEGL.so*
+libEGL_mesa.so*
+libGLdispatch.so*
+libglapi.so*
+libgbm.so*
+libgallium*.so*
+libdrm.so*
+libdrm_*.so*
