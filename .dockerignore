@@ -1,0 +1,8 @@
+# Keep the wslc/docker build context small: the signaling-server Dockerfile
+# (deploy/signaling/Dockerfile) only copies Cargo.toml + crates/ to compile
+# prdt-signaling-server. Everything else (target/, .git, smoke/, .omc/, docs)
+# is excluded so the context stays tiny and the build is fast.
+*
+!Cargo.toml
+!Cargo.lock
+!crates
