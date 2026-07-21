@@ -148,3 +148,14 @@ ffmpeg-decode-hevc-nvdec-main10-ffmpeg7 = ["ffmpeg-decode-hevc-nvdec-ffmpeg7", "
 # Marker enabled by all four NVDEC Main10 ABI variants; use in cfg() so any ABI
 # activates NVDEC Main10 code paths.
 ffmpeg-decode-hevc-nvdec-main10-any = []
+
+# The byte-stability fixture generator is a whole-file `#![cfg(all(feature =
+# "ffmpeg-encode-hevc-nvenc-any", target_os = "linux"))]`, so under default
+# features its body (incl. `fn main`) compiles to nothing and `cargo
+# build/test --workspace` fails with E0601 ("main not found"). Gating the
+# example on the same feature makes cargo skip it unless the feature is on —
+# the canonical fix for a feature-gated example. Build-selection metadata
+# only; no runtime/byte-stability impact.
+[[example]]
+name = "gen_byte_stable_fixture"
+required-features = ["ffmpeg-encode-hevc-nvenc-any"]
