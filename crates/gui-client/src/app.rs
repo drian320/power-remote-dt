@@ -952,57 +952,74 @@ impl Drop for ClientApp {
 
 impl ClientApp {
     fn draw_nav(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(8.0);
-        ui.heading("prdt");
-        ui.add_space(12.0);
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("\u{25cf}")
+                    .color(tokens::ACCENT)
+                    .size(9.0),
+            );
+            ui.heading("prdt");
+        });
+        ui.add_space(14.0);
         self.nav_entry(ui, View::Home, &t!("nav-home"));
         self.nav_entry(ui, View::Settings, &t!("nav-settings"));
         self.nav_entry(ui, View::Logs, &t!("nav-logs"));
     }
 
-    /// A full-width selectable nav entry. The active route is highlighted with
-    /// the accent fill so it reads as the current location.
+    /// A full-width selectable nav entry (Linear-style side rail): the active
+    /// route gets a faint accent-tinted fill, an accent label, and a 3px accent
+    /// bar down its left edge; inactive routes are quiet ghost rows.
     fn nav_entry(&mut self, ui: &mut egui::Ui, view: View, label: &str) {
         let selected = self.view == view;
-        let mut button = egui::Button::new(label).min_size(egui::vec2(ui.available_width(), 0.0));
-        if selected {
-            button = button.fill(tokens::ACCENT).stroke(egui::Stroke::NONE);
-        }
+        let fill = if selected {
+            tokens::ACCENT_WEAK
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        let text_color = if selected {
+            tokens::ACCENT
+        } else {
+            tokens::TEXT_DIM
+        };
+        let button = egui::Button::new(egui::RichText::new(label).color(text_color))
+            .fill(fill)
+            .stroke(egui::Stroke::NONE)
+            .min_size(egui::vec2(ui.available_width(), 34.0));
         let resp = ui.add(button);
         if selected {
-            // Accent fill is bright cyan; paint the label in dark text on top
-            // for legibility.
-            ui.painter().text(
-                resp.rect.center(),
-                egui::Align2::CENTER_CENTER,
-                label,
-                egui::FontId::proportional(14.0),
-                tokens::BG_DEEP,
+            let r = resp.rect;
+            ui.painter().rect_filled(
+                egui::Rect::from_min_size(r.left_top(), egui::vec2(3.0, r.height())),
+                egui::CornerRadius::ZERO,
+                tokens::ACCENT,
             );
         }
         if resp.clicked() {
             self.view = view;
         }
+        ui.add_space(2.0);
     }
 
     fn draw_home(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.add_space(4.0);
+                ui.add_space(10.0);
+                let card = |ui: &mut egui::Ui| {
+                    egui::Frame::group(ui.style())
+                        .fill(tokens::SURFACE)
+                        .stroke(egui::Stroke::new(1.0, tokens::BORDER))
+                        .corner_radius(egui::CornerRadius::same(tokens::RADIUS_CARD))
+                        .inner_margin(egui::Margin::same(20))
+                };
                 ui.columns(2, |cols| {
-                    egui::Frame::group(cols[0].style())
-                        .fill(tokens::SURFACE)
-                        .inner_margin(egui::Margin::same(16))
-                        .show(&mut cols[0], |ui| {
-                            self.draw_this_device(ui);
-                        });
-                    egui::Frame::group(cols[1].style())
-                        .fill(tokens::SURFACE)
-                        .inner_margin(egui::Margin::same(16))
-                        .show(&mut cols[1], |ui| {
-                            self.draw_connect(ui);
-                        });
+                    card(&mut cols[0]).show(&mut cols[0], |ui| {
+                        self.draw_this_device(ui);
+                    });
+                    card(&mut cols[1]).show(&mut cols[1], |ui| {
+                        self.draw_connect(ui);
+                    });
                 });
             });
     }
@@ -1048,13 +1065,15 @@ impl ClientApp {
             Some(id) => {
                 ui.horizontal(|ui| {
                     ui.label(
-                        egui::RichText::new(id.as_str())
+                        egui::RichText::new(group_id(id))
                             .monospace()
-                            .size(26.0)
+                            .size(32.0)
                             .strong()
                             .color(tokens::TEXT),
                     );
+                    ui.add_space(4.0);
                     if ui.button(t!("common-button-copy")).clicked() {
+                        // Copy the raw (un-grouped) id so it pastes back cleanly.
                         do_copy_id = Some(id.clone());
                     }
                 });
@@ -1606,9 +1625,21 @@ impl ClientApp {
     }
 }
 
-/// A dimmed, small caption used to label each field group.
+/// A faint, small eyebrow caption used to label each field group. Sits one
+/// step quieter than body text so the value it introduces is what the eye
+/// lands on.
 fn dim_caption(text: String) -> egui::RichText {
-    egui::RichText::new(text).color(tokens::TEXT_DIM).small()
+    egui::RichText::new(text).color(tokens::TEXT_FAINT).small()
+}
+
+/// Group a 9-digit device ID into `123 456 789` for legibility. Non-9-digit
+/// ids (or anything non-numeric) pass through unchanged.
+fn group_id(id: &str) -> String {
+    if id.len() == 9 && id.bytes().all(|b| b.is_ascii_digit()) {
+        format!("{} {} {}", &id[0..3], &id[3..6], &id[6..9])
+    } else {
+        id.to_string()
+    }
 }
 
 fn locale_label(locale: &str) -> &str {
