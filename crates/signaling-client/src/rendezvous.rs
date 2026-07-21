@@ -28,6 +28,7 @@ fn candidate_for(local: SocketAddr) -> Candidate {
 }
 
 async fn ws_connect(url: &url::Url) -> Result<Ws, SignalingError> {
+    let url = normalize_signaling_url(url);
     let (ws, _) = timeout(
         CONNECT_TIMEOUT,
         tokio_tungstenite::connect_async(url.as_str()),
@@ -35,6 +36,45 @@ async fn ws_connect(url: &url::Url) -> Result<Ws, SignalingError> {
     .await
     .map_err(|_| SignalingError::Timeout { stage: "connect" })??;
     Ok(ws)
+}
+
+/// Auto-complete a signaling URL that omits the WebSocket path. The server
+/// exposes the signaling endpoint at `/signal`, but the client connects to the
+/// configured URL verbatim — so a user who enters just `ws://host:8080` would
+/// hit `/` and get a 404. When the URL carries no path (or only `/`), default
+/// it to `/signal`; an explicit path (e.g. a reverse-proxy prefix like
+/// `/proxy/signal`) is left untouched.
+fn normalize_signaling_url(url: &url::Url) -> url::Url {
+    let mut u = url.clone();
+    if u.path().is_empty() || u.path() == "/" {
+        u.set_path("/signal");
+    }
+    u
+}
+
+#[cfg(test)]
+mod url_norm_tests {
+    use super::normalize_signaling_url;
+
+    fn norm(s: &str) -> String {
+        normalize_signaling_url(&url::Url::parse(s).unwrap()).to_string()
+    }
+
+    #[test]
+    fn appends_signal_when_path_missing() {
+        assert_eq!(norm("ws://host:8080"), "ws://host:8080/signal");
+        assert_eq!(norm("ws://host:8080/"), "ws://host:8080/signal");
+        assert_eq!(
+            norm("ws://192.168.1.10:8080"),
+            "ws://192.168.1.10:8080/signal"
+        );
+    }
+
+    #[test]
+    fn preserves_explicit_path() {
+        assert_eq!(norm("ws://host:8080/signal"), "ws://host:8080/signal");
+        assert_eq!(norm("wss://host/proxy/signal"), "wss://host/proxy/signal");
+    }
 }
 
 async fn send_msg(ws: &mut Ws, m: &ClientMessage) -> Result<(), SignalingError> {
