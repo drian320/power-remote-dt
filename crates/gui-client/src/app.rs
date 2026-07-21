@@ -1006,18 +1006,11 @@ impl ClientApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.add_space(10.0);
-                let card = |ui: &mut egui::Ui| {
-                    egui::Frame::group(ui.style())
-                        .fill(tokens::SURFACE)
-                        .stroke(egui::Stroke::new(1.0, tokens::BORDER))
-                        .corner_radius(egui::CornerRadius::same(tokens::RADIUS_CARD))
-                        .inner_margin(egui::Margin::same(20))
-                };
                 ui.columns(2, |cols| {
-                    card(&mut cols[0]).show(&mut cols[0], |ui| {
+                    card_frame(cols[0].style()).show(&mut cols[0], |ui| {
                         self.draw_this_device(ui);
                     });
-                    card(&mut cols[1]).show(&mut cols[1], |ui| {
+                    card_frame(cols[1].style()).show(&mut cols[1], |ui| {
                         self.draw_connect(ui);
                     });
                 });
@@ -1058,6 +1051,7 @@ impl ClientApp {
         let mut do_regenerate = false;
         let mut do_start = false;
         let mut do_stop = false;
+        let mut do_save_signaling = false;
 
         // --- Device ID (AC-2 / AC-3) ---
         ui.label(dim_caption(t!("home-device-id-label")));
@@ -1078,16 +1072,13 @@ impl ClientApp {
                     }
                 });
             }
-            None => {
-                let msg = if signaling_configured {
-                    t!("home-unprovisioned")
-                } else {
-                    t!("home-unprovisioned-no-url")
-                };
-                ui.colored_label(tokens::WARN, msg);
-                ui.add_space(4.0);
+            None if signaling_configured => {
+                // A server is configured but no ID has been allocated yet
+                // (e.g. it was unreachable at launch). Offer a retry.
+                ui.colored_label(tokens::WARN, t!("home-unprovisioned"));
+                ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    ui.add_enabled_ui(!busy && signaling_configured, |ui| {
+                    ui.add_enabled_ui(!busy, |ui| {
                         if ui.button(t!("home-button-retry")).clicked() {
                             do_retry = true;
                         }
@@ -1097,6 +1088,44 @@ impl ClientApp {
                         ui.label(t!("home-provisioning"));
                     }
                 });
+            }
+            None => {
+                // No signaling URL yet — let the user set it right here instead
+                // of hunting through Settings (AC-3). Saving persists the URL,
+                // reloads the identity, and kicks off provisioning immediately.
+                ui.colored_label(tokens::WARN, t!("home-unprovisioned-no-url"));
+                ui.add_space(6.0);
+                ui.label(dim_caption(t!("home-signaling-url-label")));
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.settings_draft.config.host.signaling_url)
+                        .hint_text("ws://192.168.1.10:8080/signal")
+                        .desired_width(f32::INFINITY),
+                );
+                ui.add_space(6.0);
+                let can_save = !self
+                    .settings_draft
+                    .config
+                    .host
+                    .signaling_url
+                    .trim()
+                    .is_empty();
+                ui.add_enabled_ui(can_save && !busy, |ui| {
+                    let save = egui::Button::new(
+                        egui::RichText::new(t!("home-button-save-signaling"))
+                            .color(tokens::BG_DEEP),
+                    )
+                    .fill(tokens::ACCENT);
+                    if ui.add(save).clicked() {
+                        do_save_signaling = true;
+                    }
+                });
+                if busy {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(t!("home-provisioning"));
+                    });
+                }
             }
         }
         if let Some(s) = &self.provision_status {
@@ -1230,6 +1259,15 @@ impl ClientApp {
             self.pin_revealed = !self.pin_revealed;
         }
         if do_retry {
+            self.start_reprovision();
+        }
+        if do_save_signaling {
+            // Mirror the same URL to the viewer side so a one-server VPN setup
+            // both hosts and connects without a second entry, then persist +
+            // reload identity (via save_settings) and provision immediately.
+            self.settings_draft.config.viewer.signaling_url =
+                self.settings_draft.config.host.signaling_url.clone();
+            self.save_settings();
             self.start_reprovision();
         }
         if do_regenerate {
@@ -1467,10 +1505,10 @@ impl ClientApp {
             let d = &mut self.settings_draft;
 
             // General
-            ui.group(|ui| {
+            card_frame(ui.style()).show(ui, |ui| {
                 ui.heading("General");
                 ui.add_space(4.0);
-                ui.label("Locale");
+                ui.label(dim_caption("Locale".to_string()));
                 egui::ComboBox::from_id_salt("set-locale")
                     .selected_text(locale_label(&d.config.gui.locale))
                     .show_ui(ui, |ui| {
@@ -1483,7 +1521,7 @@ impl ClientApp {
 
             // Network
             ui.add_space(6.0);
-            ui.group(|ui| {
+            card_frame(ui.style()).show(ui, |ui| {
                 ui.heading("Network");
                 ui.add_space(4.0);
                 labeled_text(ui, "Host bind", &mut d.config.host.bind);
@@ -1500,10 +1538,10 @@ impl ClientApp {
 
             // Video — Host
             ui.add_space(6.0);
-            ui.group(|ui| {
+            card_frame(ui.style()).show(ui, |ui| {
                 ui.heading("Video \u{2014} Host");
                 ui.add_space(4.0);
-                ui.label("Encoder");
+                ui.label(dim_caption("Encoder".to_string()));
                 egui::ComboBox::from_id_salt("set-encoder")
                     .selected_text(&d.config.host.encoder)
                     .show_ui(ui, |ui| {
@@ -1517,10 +1555,10 @@ impl ClientApp {
 
             // Video — Viewer
             ui.add_space(6.0);
-            ui.group(|ui| {
+            card_frame(ui.style()).show(ui, |ui| {
                 ui.heading("Video \u{2014} Viewer");
                 ui.add_space(4.0);
-                ui.label("Decoder");
+                ui.label(dim_caption("Decoder".to_string()));
                 egui::ComboBox::from_id_salt("set-decoder")
                     .selected_text(&d.config.viewer.decoder)
                     .show_ui(ui, |ui| {
@@ -1528,7 +1566,7 @@ impl ClientApp {
                             ui.selectable_value(&mut d.config.viewer.decoder, opt.to_string(), opt);
                         }
                     });
-                ui.label("Codec");
+                ui.label(dim_caption("Codec".to_string()));
                 egui::ComboBox::from_id_salt("set-codec")
                     .selected_text(&d.config.viewer.codec)
                     .show_ui(ui, |ui| {
@@ -1546,7 +1584,7 @@ impl ClientApp {
 
             // Paths
             ui.add_space(6.0);
-            ui.group(|ui| {
+            card_frame(ui.style()).show(ui, |ui| {
                 ui.heading("Paths");
                 ui.add_space(4.0);
                 labeled_path(ui, "Host key file", &mut d.config.host.key_file);
@@ -1556,10 +1594,10 @@ impl ClientApp {
 
             // Security
             ui.add_space(6.0);
-            ui.group(|ui| {
+            card_frame(ui.style()).show(ui, |ui| {
                 ui.heading("Security");
                 ui.add_space(4.0);
-                ui.label("Auth mode");
+                ui.label(dim_caption("Auth mode".to_string()));
                 egui::ComboBox::from_id_salt("set-auth-mode")
                     .selected_text(auth_mode_label(d.host_auth.mode))
                     .show_ui(ui, |ui| {
@@ -1590,7 +1628,7 @@ impl ClientApp {
                     &mut d.host_auth.ephemeral_lifetime_seconds,
                 );
                 ui.add_space(4.0);
-                ui.label("Default permissions");
+                ui.label(dim_caption("Default permissions".to_string()));
                 ui.checkbox(&mut d.host_auth.default_permissions.input, "Input");
                 ui.checkbox(&mut d.host_auth.default_permissions.clipboard, "Clipboard");
                 ui.checkbox(
@@ -1617,12 +1655,28 @@ impl ClientApp {
 
     fn draw_logs(&mut self, ui: &mut egui::Ui) {
         ui.heading("Logs");
-        ui.add_space(8.0);
-        ui.colored_label(
-            tokens::TEXT_DIM,
-            "Recent activity is written to stderr; in-app log tailing is not yet wired here.",
-        );
+        ui.add_space(10.0);
+        card_frame(ui.style()).show(ui, |ui| {
+            ui.label(dim_caption("Activity".to_string()));
+            ui.add_space(4.0);
+            ui.colored_label(
+                tokens::TEXT_DIM,
+                "Recent activity is written to stderr; in-app log tailing is not yet wired here.",
+            );
+        });
     }
+}
+
+/// The shared surface card used across Home, Settings, and Logs — one visual
+/// language for the whole app: SURFACE fill, a hairline border, the soft card
+/// radius, and roomy padding. Every screen groups its content in these so the
+/// product reads as a single design system.
+fn card_frame(style: &egui::Style) -> egui::Frame {
+    egui::Frame::group(style)
+        .fill(tokens::SURFACE)
+        .stroke(egui::Stroke::new(1.0, tokens::BORDER))
+        .corner_radius(egui::CornerRadius::same(tokens::RADIUS_CARD))
+        .inner_margin(egui::Margin::same(20))
 }
 
 /// A faint, small eyebrow caption used to label each field group. Sits one
@@ -1658,41 +1712,38 @@ fn auth_mode_label(mode: AuthMode) -> &'static str {
     }
 }
 
-/// A label followed by a single-line text editor on its own row.
+/// An eyebrow caption above a full-width single-line text editor — the same
+/// field rhythm the Home screen uses, so Settings reads as one design system.
 fn labeled_text(ui: &mut egui::Ui, label: &str, value: &mut String) {
-    ui.horizontal(|ui| {
-        ui.label(label);
-        ui.add(egui::TextEdit::singleline(value).desired_width(280.0));
-    });
+    ui.label(dim_caption(label.to_string()));
+    ui.add(egui::TextEdit::singleline(value).desired_width(f32::INFINITY));
+    ui.add_space(6.0);
 }
 
-/// A label followed by a text editor bound to a `PathBuf` (edited as its
-/// lossy string form; written back verbatim).
+/// An eyebrow caption above a full-width editor bound to a `PathBuf` (edited as
+/// its lossy string form; written back verbatim).
 fn labeled_path(ui: &mut egui::Ui, label: &str, value: &mut PathBuf) {
     let mut text = value.to_string_lossy().into_owned();
-    ui.horizontal(|ui| {
-        ui.label(label);
-        if ui
-            .add(egui::TextEdit::singleline(&mut text).desired_width(280.0))
-            .changed()
-        {
-            *value = PathBuf::from(text);
-        }
-    });
+    ui.label(dim_caption(label.to_string()));
+    if ui
+        .add(egui::TextEdit::singleline(&mut text).desired_width(f32::INFINITY))
+        .changed()
+    {
+        *value = PathBuf::from(text);
+    }
+    ui.add_space(6.0);
 }
 
 fn labeled_drag_u32(ui: &mut egui::Ui, label: &str, value: &mut u32) {
-    ui.horizontal(|ui| {
-        ui.label(label);
-        ui.add(egui::DragValue::new(value));
-    });
+    ui.label(dim_caption(label.to_string()));
+    ui.add(egui::DragValue::new(value));
+    ui.add_space(6.0);
 }
 
 fn labeled_drag_u8(ui: &mut egui::Ui, label: &str, value: &mut u8) {
-    ui.horizontal(|ui| {
-        ui.label(label);
-        ui.add(egui::DragValue::new(value));
-    });
+    ui.label(dim_caption(label.to_string()));
+    ui.add(egui::DragValue::new(value));
+    ui.add_space(6.0);
 }
 
 /// Free function implementing the consent-poll logic so it can be tested
