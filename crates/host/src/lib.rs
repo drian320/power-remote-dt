@@ -704,6 +704,13 @@ pub async fn run_host(
     let mut need_rendezvous = true;
 
     loop {
+        // Reset any prior session state BEFORE the rendezvous/probe phase, not
+        // after it: the probe loop may drain the viewer's early NoiseE1 off the
+        // socket and stash it for handshake_as_server (triggered commit), and
+        // reset_session clears that stash — resetting after the probe would
+        // destroy the very E1 the handshake needs. First iteration is a no-op.
+        transport.reset_session().await;
+
         // === Signaling rendezvous phase =====================================
         // Keep the host registered and AVAILABLE until a viewer connects (or
         // the operator stops). On a `session_start` timeout or a transient WS
@@ -823,8 +830,6 @@ pub async fn run_host(
                 }
             }
         }
-
-        transport.reset_session().await;
 
         info!("waiting for Noise handshake");
         // The idle handshake wait is where the host spends most of its life.

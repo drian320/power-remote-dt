@@ -117,6 +117,15 @@ pub struct CustomUdpTransport {
     /// the wire packet so the receiver can call `set_receiving_nonce`
     /// before decrypt (necessary because UDP reorders chunks).
     send_nonce: AtomicU64,
+    /// NoiseE1 drained off the wire by `probe_and_commit_peer` when the peer
+    /// committed to us first (it entered its own Noise handshake and sent
+    /// NoiseE1 before we entered ours). During probing the probe loop is the
+    /// sole socket reader, so it is the one that dequeues that E1; without
+    /// stashing it here the payload would be dropped and `handshake_as_server`
+    /// would block forever waiting for a retransmit a one-shot client never
+    /// sends. Holds `(source_addr, e1_payload)`. Consumed by
+    /// `handshake_as_server` and cleared by `reset_session`.
+    pending_e1: AsyncMutex<Option<(SocketAddr, Vec<u8>)>>,
 }
 
 /// SO_RCVBUF target for the UDP socket. The viewer can spend ~100ms in NVDEC /
@@ -170,6 +179,7 @@ impl CustomUdpTransport {
             )),
             crypto: AsyncMutex::new(None),
             send_nonce: AtomicU64::new(0),
+            pending_e1: AsyncMutex::new(None),
         })
     }
 
@@ -199,6 +209,7 @@ impl CustomUdpTransport {
             )),
             crypto: AsyncMutex::new(None),
             send_nonce: AtomicU64::new(0),
+            pending_e1: AsyncMutex::new(None),
         })
     }
 
@@ -245,6 +256,9 @@ impl CustomUdpTransport {
         *self.peer.lock().await = None;
         *self.crypto.lock().await = None;
         self.send_nonce.store(0, Ordering::Relaxed);
+        // Drop any E1 stashed for a prior session so a stale handshake frame
+        // can't leak into the next `handshake_as_server`.
+        *self.pending_e1.lock().await = None;
     }
 
     async fn current_peer(&self) -> Result<SocketAddr, TransportError> {
@@ -271,31 +285,60 @@ impl CustomUdpTransport {
     ) -> Result<prdt_crypto::PubKey, TransportError> {
         use prdt_crypto::ServerHandshake;
 
-        let mut hs = Some(
-            ServerHandshake::new(server_keypair)
-                .map_err(|e| TransportError::Io(std::io::Error::other(format!("crypto: {e}"))))?,
-        );
+        let hs = ServerHandshake::new(server_keypair)
+            .map_err(|e| TransportError::Io(std::io::Error::other(format!("crypto: {e}"))))?;
+
+        // Fast path: `probe_and_commit_peer` may have already drained the
+        // initiator's NoiseE1 off the socket (it is the only reader during
+        // probing) and stashed it. If so, consume it directly instead of
+        // blocking on a recv for a retransmit a one-shot client never sends.
+        let stashed = self.pending_e1.lock().await.take();
+        if let Some((from, payload)) = stashed {
+            self.configure_peer(from).await;
+            return self.respond_noise_e1(hs, &payload).await;
+        }
+
+        let mut hs = Some(hs);
         loop {
-            match self.recv_raw_unencrypted().await? {
-                ReceivedMessage::Control(ControlMessage::NoiseE1 { payload }) => {
+            match self.recv_raw_unencrypted_from().await? {
+                (ReceivedMessage::Control(ControlMessage::NoiseE1 { payload }), _) => {
                     let hs_taken = hs.take().expect("handshake already consumed");
-                    let (e2_payload, session, peer_pubkey) =
-                        hs_taken.respond(&payload).map_err(|e| {
-                            TransportError::Io(std::io::Error::other(format!("crypto: {e}")))
-                        })?;
-                    // Send NoiseE2 unencrypted (session not yet installed).
-                    self.send_control_unencrypted(ControlMessage::NoiseE2 {
-                        payload: e2_payload,
-                    })
-                    .await?;
-                    // Install the session — all subsequent traffic will be
-                    // encrypted automatically by send_raw / recv.
-                    *self.crypto.lock().await = Some(session);
-                    return Ok(peer_pubkey);
+                    return self.respond_noise_e1(hs_taken, &payload).await;
                 }
-                _ => continue, // drop any non-handshake traffic during handshake
+                (ReceivedMessage::Control(ControlMessage::Probe { nonce }), from) => {
+                    // A peer still in its probe phase is racing us. Answer its
+                    // Probe so it can probe-commit and advance to sending
+                    // NoiseE1, rather than stranding it until timeout. Symmetric
+                    // to the Probe handling in `handshake_as_client`.
+                    let _ = self
+                        .send_control_to(ControlMessage::ProbeAck { nonce }, from)
+                        .await;
+                }
+                _ => continue, // drop any other non-handshake traffic
             }
         }
+    }
+
+    /// Complete the server side of the Noise handshake from an initiator's
+    /// NoiseE1 payload: respond with NoiseE2 (sent unencrypted — the session
+    /// is not yet installed), install the transport session so all subsequent
+    /// traffic is encrypted automatically, and return the initiator's
+    /// authenticated static public key. Shared by the stashed-E1 fast path and
+    /// the recv loop of [`handshake_as_server`](Self::handshake_as_server).
+    async fn respond_noise_e1(
+        &self,
+        hs: prdt_crypto::ServerHandshake,
+        e1_payload: &[u8],
+    ) -> Result<prdt_crypto::PubKey, TransportError> {
+        let (e2_payload, session, peer_pubkey) = hs
+            .respond(e1_payload)
+            .map_err(|e| TransportError::Io(std::io::Error::other(format!("crypto: {e}"))))?;
+        self.send_control_unencrypted(ControlMessage::NoiseE2 {
+            payload: e2_payload,
+        })
+        .await?;
+        *self.crypto.lock().await = Some(session);
+        Ok(peer_pubkey)
     }
 
     /// Send Probe to each candidate; concurrently listen for incoming Probes
@@ -415,6 +458,25 @@ impl CustomUdpTransport {
                                 return Ok(from);
                             }
                         }
+                        ControlMessage::NoiseE1 { payload } => {
+                            // The peer already committed to us and started its
+                            // client handshake — its NoiseE1 landed in this
+                            // probe loop because we are the sole socket reader
+                            // right now. Receiving it proves the peer nominated
+                            // us, so treat it as a triggered commit: stash the
+                            // payload for `handshake_as_server` (which would
+                            // otherwise block waiting for a retransmit) and
+                            // return this source as the winner. We deliberately
+                            // do NOT require `from` to be in `pending` — a NAT
+                            // may have rewritten the source address, and the
+                            // Noise IK handshake authenticates the peer
+                            // cryptographically, so committing to the E1 source
+                            // is safe: a spoofed source just fails closed.
+                            *self.pending_e1.lock().await = Some((from, payload));
+                            self.configure_peer(from).await;
+                            tracing::info!(peer = ?from, "probe winner (NoiseE1 triggered)");
+                            return Ok(from);
+                        }
                         _ => continue,
                     }
                 }
@@ -467,13 +529,23 @@ impl CustomUdpTransport {
 
         let result = tokio::time::timeout(timeout, async move {
             loop {
-                match self.recv_raw_unencrypted().await? {
-                    ReceivedMessage::Control(ControlMessage::NoiseE2 { payload }) => {
+                match self.recv_raw_unencrypted_from().await? {
+                    (ReceivedMessage::Control(ControlMessage::NoiseE2 { payload }), _) => {
                         let session = hs.finalize(&payload).map_err(|e| {
                             TransportError::Io(std::io::Error::other(format!("crypto: {e}")))
                         })?;
                         *self.crypto.lock().await = Some(session);
                         return Ok::<(), TransportError>(());
+                    }
+                    (ReceivedMessage::Control(ControlMessage::Probe { nonce }), from) => {
+                        // A late host probe arriving while we wait for NoiseE2.
+                        // Answer it so the host can probe-commit to us and go on
+                        // to send its NoiseE2, rather than the host stranding
+                        // until timeout. Symmetric to the Probe handling in
+                        // `handshake_as_server`.
+                        let _ = self
+                            .send_control_to(ControlMessage::ProbeAck { nonce }, from)
+                            .await;
                     }
                     _ => continue,
                 }
@@ -575,10 +647,13 @@ impl CustomUdpTransport {
         Ok(())
     }
 
-    /// Receive a single datagram without performing decryption. Used by the
-    /// handshake to read pre-session NoiseE1/E2 frames. Unlike `recv`, any
-    /// packet arriving with the ENCRYPTED flag set is dropped rather than
-    /// forwarded (we cannot decrypt it without a session).
+    /// Receive a single datagram without performing decryption, returning the
+    /// decoded message together with the packet's source address. Used by the
+    /// handshake to read pre-session NoiseE1/E2 frames; the source address lets
+    /// the Noise wait loops answer a racing peer's Probe with a ProbeAck sent
+    /// back to exactly that peer. Unlike `recv`, any packet arriving with the
+    /// ENCRYPTED flag set is dropped rather than forwarded (we cannot decrypt
+    /// it without a session).
     ///
     /// # WSAECONNRESET / ConnectionReset filtering
     ///
@@ -589,7 +664,9 @@ impl CustomUdpTransport {
     /// this method and `recv` silently swallow `ErrorKind::ConnectionReset`
     /// and loop back to wait for the next real datagram rather than propagating
     /// the error and causing the session loop to spin.
-    async fn recv_raw_unencrypted(&self) -> Result<ReceivedMessage, TransportError> {
+    async fn recv_raw_unencrypted_from(
+        &self,
+    ) -> Result<(ReceivedMessage, SocketAddr), TransportError> {
         let mut buf = vec![0u8; 4096];
         loop {
             let (n, from) = match self.socket.recv_from(&mut buf).await {
@@ -640,7 +717,7 @@ impl CustomUdpTransport {
             }
             let body = buf[HEADER_LEN..body_end].to_vec();
             if let Some(msg) = self.dispatch_packet(&hdr, &body).await? {
-                return Ok(msg);
+                return Ok((msg, from));
             }
         }
     }
