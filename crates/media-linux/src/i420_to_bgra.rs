@@ -7,12 +7,44 @@ use prdt_media_sw::I420Frame;
 
 /// Convert one I420Frame into BGRA. `out_bgra` must be width*height*4
 /// bytes long; the function writes B,G,R,A=0xFF per pixel.
-pub fn i420_to_bgra(i420: &I420Frame, out_bgra: &mut [u8]) {
+///
+/// Returns `Err` (instead of panicking) when the frame's plane lengths or the
+/// output buffer are inconsistent with its `width`/`height`/`stride` geometry —
+/// a decoded frame whose size disagrees with the render buffer must be skipped
+/// by the caller, never allowed to abort the viewer. The `debug_assert` that
+/// used to guard this is compiled out of the release viewer, so the bounds are
+/// checked explicitly here.
+pub fn i420_to_bgra(i420: &I420Frame, out_bgra: &mut [u8]) -> Result<(), String> {
     let w = i420.width as usize;
     let h = i420.height as usize;
-    debug_assert_eq!(out_bgra.len(), w * h * 4);
     let y_stride = i420.stride_y as usize;
     let uv_stride = i420.stride_uv as usize;
+    let expect_out = w.saturating_mul(h).saturating_mul(4);
+    if out_bgra.len() != expect_out {
+        return Err(format!(
+            "i420_to_bgra: out buffer {} bytes but geometry {w}x{h} needs {expect_out}",
+            out_bgra.len()
+        ));
+    }
+    if w != 0 && h != 0 {
+        // Worst-case indices reached on the final pixel (w-1, h-1):
+        // luma (h-1)*stride_y + (w-1); chroma ((h-1)/2)*stride_uv + (w-1)/2.
+        let y_need = (h - 1) * y_stride + w;
+        let c_need = ((h - 1) / 2) * uv_stride + (w - 1) / 2 + 1;
+        if i420.y.len() < y_need {
+            return Err(format!(
+                "i420_to_bgra: Y plane {} < {y_need} needed for {w}x{h} stride_y={y_stride}",
+                i420.y.len()
+            ));
+        }
+        if i420.u.len() < c_need || i420.v.len() < c_need {
+            return Err(format!(
+                "i420_to_bgra: U/V plane {}/{} < {c_need} needed for {w}x{h} stride_uv={uv_stride}",
+                i420.u.len(),
+                i420.v.len()
+            ));
+        }
+    }
     for j in 0..h {
         for i in 0..w {
             let y = i420.y[j * y_stride + i] as i32;
@@ -32,6 +64,7 @@ pub fn i420_to_bgra(i420: &I420Frame, out_bgra: &mut [u8]) {
             out_bgra[off + 3] = 0xFF;
         }
     }
+    Ok(())
 }
 
 #[inline]
@@ -62,7 +95,7 @@ mod tests {
     fn gray_yuv_yields_gray_bgra() {
         let i = gray_i420(8, 8, 128);
         let mut out = vec![0u8; 8 * 8 * 4];
-        i420_to_bgra(&i, &mut out);
+        i420_to_bgra(&i, &mut out).expect("consistent frame converts");
         // U=V=128 means u' = v' = 0, so BGR = (Y, Y, Y) = (128,128,128).
         for px in out.chunks_exact(4) {
             assert_eq!(px[0], 128);
@@ -76,7 +109,7 @@ mod tests {
     fn black_yuv_yields_black_bgra() {
         let i = gray_i420(4, 4, 0);
         let mut out = vec![0u8; 4 * 4 * 4];
-        i420_to_bgra(&i, &mut out);
+        i420_to_bgra(&i, &mut out).expect("consistent frame converts");
         for px in out.chunks_exact(4) {
             assert_eq!(px[0], 0);
             assert_eq!(px[1], 0);
@@ -89,7 +122,7 @@ mod tests {
     fn white_yuv_yields_near_white_bgra() {
         let i = gray_i420(4, 4, 255);
         let mut out = vec![0u8; 4 * 4 * 4];
-        i420_to_bgra(&i, &mut out);
+        i420_to_bgra(&i, &mut out).expect("consistent frame converts");
         for px in out.chunks_exact(4) {
             assert!(px[0] >= 250);
             assert!(px[1] >= 250);
@@ -150,12 +183,68 @@ mod tests {
     fn i420_to_bgra_gradient_golden_digest() {
         let frame = gradient_i420(64, 64);
         let mut out = vec![0u8; 64 * 64 * 4];
-        i420_to_bgra(&frame, &mut out);
+        i420_to_bgra(&frame, &mut out).expect("consistent frame converts");
         let digest = fnv1a64(&out);
         const GOLDEN: u64 = 0xe113_1b22_fd54_6e98;
         assert_eq!(
             digest, GOLDEN,
             "i420_to_bgra gradient digest changed: got {digest:#018x} (update GOLDEN if intentional)"
+        );
+    }
+
+    /// A frame header claiming 3840x2160 but carrying only 1920x1080-worth of
+    /// chroma must be rejected, not panic. Guards the same class of bug as the
+    /// NV12 viewer crash: a decoded size that disagrees with the plane buffers.
+    #[test]
+    fn i420_to_bgra_rejects_short_planes() {
+        let (w, h) = (3840u32, 2160u32);
+        // Y sized correctly for 3840x2160, but U/V hold only a 1920x1080 frame.
+        let y = vec![16u8; (w * h) as usize];
+        let u = vec![128u8; (1920 * 1080 / 4) as usize];
+        let v = vec![128u8; (1920 * 1080 / 4) as usize];
+        let frame = I420Frame {
+            width: w,
+            height: h,
+            y,
+            u,
+            v,
+            stride_y: w,
+            stride_uv: w / 2,
+        };
+        // out buffer is the header-consistent size, so only the short planes
+        // can trip the guard.
+        let mut out = vec![0u8; (w * h * 4) as usize];
+        let err = i420_to_bgra(&frame, &mut out).expect_err("short U/V plane must be rejected");
+        assert!(
+            err.contains("U/V plane"),
+            "error should name the short chroma plane, got: {err}"
+        );
+    }
+
+    /// A small, fully consistent frame with stride padding converts Ok and
+    /// fills the entire output buffer (no pixel left at the sentinel).
+    #[test]
+    fn i420_to_bgra_ok_with_padded_stride() {
+        let (w, h) = (64u32, 36u32);
+        let (stride_y, stride_uv) = (80u32, 40u32); // padded beyond w / w/2
+        let y = vec![120u8; (stride_y * h) as usize];
+        let u = vec![128u8; (stride_uv * (h / 2)) as usize];
+        let v = vec![128u8; (stride_uv * (h / 2)) as usize];
+        let frame = I420Frame {
+            width: w,
+            height: h,
+            y,
+            u,
+            v,
+            stride_y,
+            stride_uv,
+        };
+        let mut out = vec![7u8; (w * h * 4) as usize];
+        i420_to_bgra(&frame, &mut out).expect("consistent padded frame converts");
+        // Every alpha byte written => whole buffer covered.
+        assert!(
+            out.chunks_exact(4).all(|px| px[3] == 0xFF),
+            "converter must write every output pixel"
         );
     }
 }

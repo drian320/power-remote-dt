@@ -23,7 +23,8 @@ use rusty_ffmpeg::ffi::{
 };
 
 use crate::decoder_common::{
-    copy_nv12_planes, ffmpeg_to_decode_err, HevcDecoderBackend, AVERROR_EAGAIN, AVERROR_EOF,
+    copy_nv12_planes, copy_yuv420p_as_nv12_planes, ffmpeg_to_decode_err, HevcDecoderBackend,
+    AVERROR_EAGAIN, AVERROR_EOF,
 };
 use crate::error::FfmpegError;
 
@@ -69,11 +70,11 @@ impl HevcSwFfmpegDecoder {
             return Err(FfmpegError::OpenCodec(-1));
         }
 
-        // Pin the SW output format to NV12 so we can copy planes directly
-        // into our Nv12Frame carrier without a YUV420P→NV12 conversion
-        // step. libavcodec's generic `hevc` decoder honours this for
-        // 8-bit Main streams; 10-bit / Main10 would require AV_PIX_FMT_NV12LE
-        // (out of scope for P2).
+        // Request NV12 output as a best-effort hint. The generic `hevc`
+        // decoder is free to ignore it (and in practice emits YUV420P for
+        // 8-bit Main), so `drain_frame` branches on the AVFrame's actual
+        // format and interleaves planar chroma when needed — this field write
+        // only saves a conversion on the builds/streams that do honour it.
         // SAFETY: codec_ctx_ptr is freshly allocated and unopened; field write is in-bounds.
         unsafe {
             (*codec_ctx_ptr).pix_fmt = AV_PIX_FMT_NV12;
@@ -178,25 +179,46 @@ impl HevcDecoderBackend for HevcSwFfmpegDecoder {
             return Err(ffmpeg_to_decode_err(FfmpegError::Receive(ret)));
         }
 
-        // SAFETY: receive_frame succeeded; frame's planes / linesize / dims
-        // are valid and owned by self.frame until av_frame_unref.
-        let (y_ptr, uv_ptr, y_stride, uv_stride, w, h, pts) = unsafe {
+        // The generic `hevc` decoder ignores the NV12 `pix_fmt` we set on the
+        // context and emits its native **YUV420P** (planar U/V) for 8-bit
+        // Main; only some builds/streams yield NV12. Branch on the AVFrame's
+        // actual format so a planar frame is interleaved into NV12 rather than
+        // mis-wrapped (which copied only the quarter-size U plane and then read
+        // past its end — the reported viewer crash).
+        //
+        // SAFETY: receive_frame succeeded; frame's planes / linesize / dims /
+        // format are valid and owned by self.frame until av_frame_unref.
+        let out = unsafe {
             let f = &*frame;
-            (
-                f.data[0] as *const u8,
-                f.data[1] as *const u8,
-                f.linesize[0] as usize,
-                f.linesize[1] as usize,
-                f.width as u32,
-                f.height as u32,
-                f.pts as u64,
-            )
+            let (w, h, pts) = (f.width as u32, f.height as u32, f.pts as u64);
+            match f.format {
+                fmt if fmt == AV_PIX_FMT_NV12 => copy_nv12_planes(
+                    f.data[0] as *const u8,
+                    f.data[1] as *const u8,
+                    f.linesize[0] as usize,
+                    f.linesize[1] as usize,
+                    w,
+                    h,
+                    pts,
+                ),
+                fmt if fmt == AV_PIX_FMT_YUV420P => copy_yuv420p_as_nv12_planes(
+                    f.data[0] as *const u8,
+                    f.data[1] as *const u8,
+                    f.data[2] as *const u8,
+                    f.linesize[0] as usize,
+                    f.linesize[1] as usize,
+                    w,
+                    h,
+                    pts,
+                ),
+                other => {
+                    av_frame_unref(frame);
+                    return Err(DecodeError::Backend(format!(
+                        "ffmpeg-sw-hevc: decoded pixel format {other} is neither NV12 nor YUV420P"
+                    )));
+                }
+            }
         };
-
-        // SAFETY: copy_nv12_planes copies bytes out of the AVFrame's planes
-        // into owned Vecs; the source pointers are valid for the strides/dims
-        // we just read from the AVFrame.
-        let out = unsafe { copy_nv12_planes(y_ptr, uv_ptr, y_stride, uv_stride, w, h, pts) };
 
         // SAFETY: frame is the unique owner; release the libavcodec-owned data
         // ref so the next receive_frame can repopulate it.

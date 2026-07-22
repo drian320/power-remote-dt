@@ -127,10 +127,17 @@ pub struct SoftbufferRender {
     // both, so D = W = Arc<Window>.
     _ctx: softbuffer::Context<Arc<Window>>,
     surface: softbuffer::Surface<Arc<Window>, Arc<Window>>,
-    /// I420 → BGRA conversion scratch. Re-allocated on stream-size change.
+    /// I420/NV12/P010 → BGRA conversion scratch, sized to the decoded FRAME
+    /// (`last_size`). Re-allocated on frame-size change. Blitted (cropped /
+    /// letterboxed) into the window-sized `surface`.
     scratch_bgra: Vec<u8>,
-    /// Cached stream/surface dimensions to gate redundant resize calls.
+    /// Cached decoded-FRAME dimensions (== `scratch_bgra` geometry). Gates
+    /// redundant scratch reallocations.
     last_size: (u32, u32),
+    /// Cached softbuffer SURFACE dimensions (== the window's inner size, which
+    /// the OS may clamp below the frame size). Gates redundant surface resizes
+    /// and drives the crop/letterbox math in `blit_scratch_to_surface`.
+    surface_size: (u32, u32),
 }
 
 impl PlatformRender {
@@ -210,6 +217,7 @@ fn build_softbuffer_render(
         surface,
         scratch_bgra: vec![0u8; (width * height * 4) as usize],
         last_size: (width, height),
+        surface_size: (width, height),
     })
 }
 
@@ -571,12 +579,19 @@ fn present_frame_softbuffer(
             let stream_w = i420.width;
             let stream_h = i420.height;
 
-            resize_surface_if_needed(r, stream_w, stream_h)?;
+            resize_scratch_if_needed(r, stream_w, stream_h);
 
             // I420 → BGRA via the existing helper (BT.709 limited-range,
             // alpha 0xFF). Output layout matches softbuffer's LE u32 expectation
             // (B in lowest byte, A=0xFF in highest).
-            i420_to_bgra(i420, &mut r.scratch_bgra);
+            if let Err(e) = i420_to_bgra(i420, &mut r.scratch_bgra) {
+                tracing::warn!(
+                    target: "video.pipeline",
+                    error = %e,
+                    "skipping I420 frame: geometry inconsistent with render buffer"
+                );
+                return Ok(());
+            }
 
             composite_cursor(r, shared, stream_w, stream_h);
             blit_scratch_to_surface(r)?;
@@ -590,9 +605,16 @@ fn present_frame_softbuffer(
             let stream_w = nv12.width;
             let stream_h = nv12.height;
 
-            resize_surface_if_needed(r, stream_w, stream_h)?;
+            resize_scratch_if_needed(r, stream_w, stream_h);
 
-            nv12_to_bgra(nv12, &mut r.scratch_bgra);
+            if let Err(e) = nv12_to_bgra(nv12, &mut r.scratch_bgra) {
+                tracing::warn!(
+                    target: "video.pipeline",
+                    error = %e,
+                    "skipping NV12 frame: geometry inconsistent with render buffer"
+                );
+                return Ok(());
+            }
 
             composite_cursor(r, shared, stream_w, stream_h);
             blit_scratch_to_surface(r)?;
@@ -606,35 +628,70 @@ fn present_frame_softbuffer(
             let stream_w = nv12_10.width;
             let stream_h = nv12_10.height;
 
-            resize_surface_if_needed(r, stream_w, stream_h)?;
+            resize_scratch_if_needed(r, stream_w, stream_h);
 
-            p010_to_bgra_sdr_tonemap(nv12_10, &mut r.scratch_bgra);
+            if let Err(e) = p010_to_bgra_sdr_tonemap(nv12_10, &mut r.scratch_bgra) {
+                tracing::warn!(
+                    target: "video.pipeline",
+                    error = %e,
+                    "skipping P010 frame: geometry inconsistent with render buffer"
+                );
+                return Ok(());
+            }
 
             composite_cursor(r, shared, stream_w, stream_h);
             blit_scratch_to_surface(r)?;
         }
     }
 
-    let _ = &r.window; // suppress unused-field warning; kept to extend Surface lifetime
     Ok(())
 }
 
-/// Resize the softbuffer surface and BGRA scratch buffer when the stream
-/// dimensions change. Extracted from the pre-P2 `present_frame` body so
-/// both the I420 and NV12 arms can share the path.
-fn resize_surface_if_needed(
-    r: &mut SoftbufferRender,
-    stream_w: u32,
-    stream_h: u32,
-) -> Result<(), super::RenderError> {
-    if r.last_size != (stream_w, stream_h) {
-        let nz_w = NonZeroU32::new(stream_w.max(1)).expect("non-zero stream width");
-        let nz_h = NonZeroU32::new(stream_h.max(1)).expect("non-zero stream height");
+/// Resize the BGRA conversion scratch to the decoded FRAME dimensions. The
+/// converters write exactly `frame_w * frame_h * 4` bytes and the cursor is
+/// composited in frame space, so the scratch tracks the frame — independent of
+/// the window-sized `surface` (see `resize_surface_to_window`). Cannot fail;
+/// the surface resize (which can) is a separate step.
+fn resize_scratch_if_needed(r: &mut SoftbufferRender, frame_w: u32, frame_h: u32) {
+    if r.last_size != (frame_w, frame_h) {
+        tracing::info!(
+            target: "video.pipeline",
+            from_w = r.last_size.0,
+            from_h = r.last_size.1,
+            to_w = frame_w,
+            to_h = frame_h,
+            "softbuffer scratch resized to decoded frame dimensions"
+        );
+        r.scratch_bgra
+            .resize(frame_w as usize * frame_h as usize * 4, 0);
+        r.last_size = (frame_w, frame_h);
+    }
+}
+
+/// Ensure the softbuffer surface matches the window's current inner size.
+/// softbuffer presents into the window's drawable, so the surface must track
+/// the WINDOW — never the decoded frame, which is often larger (the OS clamps
+/// the window to the screen while the host captures at full resolution).
+/// Presenting a frame-sized buffer into a smaller window is what rendered the
+/// NVDEC session as garbage.
+fn resize_surface_to_window(r: &mut SoftbufferRender) -> Result<(), super::RenderError> {
+    let size = r.window.inner_size();
+    let (w, h) = (size.width.max(1), size.height.max(1));
+    if r.surface_size != (w, h) {
+        tracing::info!(
+            target: "video.pipeline",
+            from_w = r.surface_size.0,
+            from_h = r.surface_size.1,
+            to_w = w,
+            to_h = h,
+            "softbuffer surface resized to window inner size"
+        );
+        let nz_w = NonZeroU32::new(w).expect("non-zero window width");
+        let nz_h = NonZeroU32::new(h).expect("non-zero window height");
         r.surface
             .resize(nz_w, nz_h)
             .map_err(|e| super::RenderError::Present(format!("Surface::resize: {e}")))?;
-        r.scratch_bgra.resize((stream_w * stream_h * 4) as usize, 0);
-        r.last_size = (stream_w, stream_h);
+        r.surface_size = (w, h);
     }
     Ok(())
 }
@@ -672,18 +729,59 @@ fn composite_cursor(
     }
 }
 
-/// Blit `r.scratch_bgra` into the softbuffer surface and present.
+/// Blit `r.scratch_bgra` (sized to the decoded FRAME) into the softbuffer
+/// surface (sized to the WINDOW) and present. Frame and window routinely
+/// differ — the OS clamps the window to the screen while the host streams at
+/// capture size — so this crops the frame to the window and letterboxes any
+/// surplus window area with black, top-left aligned at 1:1.
+///
+/// The old code `copy_from_slice`d the whole frame into the surface, which
+/// only worked when the two were byte-identical; once the window was clamped
+/// smaller than the frame it presented an oversized buffer that the backend
+/// rendered as garbage. All row math is bounded by the surface buffer's real
+/// length so a stale tracked size can never overrun it.
 fn blit_scratch_to_surface(r: &mut SoftbufferRender) -> Result<(), super::RenderError> {
+    resize_surface_to_window(r)?;
+
+    let (frame_w, frame_h) = (r.last_size.0 as usize, r.last_size.1 as usize);
+    let win_w = r.surface_size.0 as usize;
+    let src = &r.scratch_bgra;
+
     let mut buf = r
         .surface
         .buffer_mut()
         .map_err(|e| super::RenderError::Present(format!("Surface::buffer_mut: {e}")))?;
-    debug_assert_eq!(buf.len() * 4, r.scratch_bgra.len());
-    let buf_bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut buf);
-    buf_bytes.copy_from_slice(&r.scratch_bgra);
+    let dst: &mut [u8] = bytemuck::cast_slice_mut(&mut buf);
+    blit_crop_letterbox(src, frame_w, frame_h, dst, win_w);
+
     buf.present()
         .map_err(|e| super::RenderError::Present(format!("Surface::present: {e}")))?;
     Ok(())
+}
+
+/// Copy a frame-sized BGRA source (`frame_w` × `frame_h`) into a window-sized
+/// BGRA destination (`win_w` × derived rows), cropping the frame to the window
+/// and letterboxing surplus window area with black, top-left aligned at 1:1.
+///
+/// `dst` is the softbuffer surface's raw byte buffer. Its length is treated as
+/// authoritative for the row count, so a stale `win_w`/window-height can never
+/// index past it. `src` must be exactly `frame_w * frame_h * 4` bytes (the
+/// converters and `resize_scratch_if_needed` guarantee this).
+fn blit_crop_letterbox(src: &[u8], frame_w: usize, frame_h: usize, dst: &mut [u8], win_w: usize) {
+    let stride = win_w * 4;
+    let rows = if stride == 0 { 0 } else { dst.len() / stride };
+    let copy_w = frame_w.min(win_w);
+    let copy_h = frame_h.min(rows);
+    for y in 0..rows {
+        let drow = &mut dst[y * stride..y * stride + stride];
+        if y < copy_h && frame_w != 0 {
+            let s = y * frame_w * 4;
+            drow[..copy_w * 4].copy_from_slice(&src[s..s + copy_w * 4]);
+            drow[copy_w * 4..].fill(0); // letterbox to the right of the frame
+        } else {
+            drow.fill(0); // letterbox below the frame
+        }
+    }
 }
 
 /// NV12 (Y plane + interleaved UV plane) → BGRA. BT.709 limited-range,
@@ -694,12 +792,27 @@ fn blit_scratch_to_surface(r: &mut SoftbufferRender) -> Result<(), super::Render
     feature = "ffmpeg-decode-hevc-vaapi-any",
     feature = "ffmpeg-decode-hevc-nvdec-any"
 ))]
-fn nv12_to_bgra(nv12: &Nv12Frame, out_bgra: &mut [u8]) {
+fn nv12_to_bgra(nv12: &Nv12Frame, out_bgra: &mut [u8]) -> Result<(), String> {
     let w = nv12.width as usize;
     let h = nv12.height as usize;
-    debug_assert_eq!(out_bgra.len(), w * h * 4);
     let y_stride = nv12.stride_y as usize;
     let uv_stride = nv12.stride_uv as usize;
+    // Validate up front: a decoded frame whose header geometry does not match
+    // its plane buffers (or a scratch buffer sized for a different frame) must
+    // be rejected, not indexed blindly — `debug_assert` is compiled out of the
+    // release viewer, so the raw indexing below would panic in production.
+    // These bounds mirror the exact worst-case indices the loop touches.
+    if let Err(e) = check_nv12_like_geometry(
+        w,
+        h,
+        y_stride,
+        uv_stride,
+        nv12.y.len(),
+        nv12.uv.len(),
+        out_bgra.len(),
+    ) {
+        return Err(format!("nv12_to_bgra: {e}"));
+    }
     for j in 0..h {
         for i in 0..w {
             let y = nv12.y[j * y_stride + i] as i32;
@@ -718,6 +831,60 @@ fn nv12_to_bgra(nv12: &Nv12Frame, out_bgra: &mut [u8]) {
             out_bgra[off + 3] = 0xFF;
         }
     }
+    Ok(())
+}
+
+/// Validate that a NV12/P010-shaped frame's plane lengths and the caller's
+/// output buffer are all consistent with the `width`/`height`/`stride`
+/// geometry, so the interleaved-chroma converters (`nv12_to_bgra`,
+/// `p010_to_bgra_sdr_tonemap`) can index without bounds checks. `y_len` and
+/// `uv_len` are element counts (bytes for NV12, u16 elements for P010 — the
+/// access pattern is identical). Returns the offending geometry as an error
+/// string so the caller can log actual-vs-expected before skipping the frame.
+///
+/// The bounds are the exact worst-case indices the converters reach on the
+/// final pixel `(w-1, h-1)`: chroma row `(h-1)/2`, chroma column pair
+/// `((w-1)/2)*2 + 1`. A `saturating_mul` for the output size and an explicit
+/// zero-dimension short-circuit keep the `(h-1)` math from underflowing.
+#[cfg(any(
+    feature = "ffmpeg-decode-hevc-sw-any",
+    feature = "ffmpeg-decode-hevc-vaapi-any",
+    feature = "ffmpeg-decode-hevc-nvdec-any",
+    feature = "ffmpeg-decode-hevc-sw-main10-any",
+    feature = "ffmpeg-decode-hevc-vaapi-main10-any",
+    feature = "ffmpeg-decode-hevc-nvdec-main10-any"
+))]
+fn check_nv12_like_geometry(
+    w: usize,
+    h: usize,
+    y_stride: usize,
+    uv_stride: usize,
+    y_len: usize,
+    uv_len: usize,
+    out_len: usize,
+) -> Result<(), String> {
+    let expect_out = w.saturating_mul(h).saturating_mul(4);
+    if out_len != expect_out {
+        return Err(format!(
+            "out buffer {out_len} bytes but geometry {w}x{h} needs {expect_out}"
+        ));
+    }
+    if w == 0 || h == 0 {
+        return Ok(());
+    }
+    let y_need = (h - 1) * y_stride + w;
+    let uv_need = ((h - 1) / 2) * uv_stride + ((w - 1) / 2) * 2 + 2;
+    if y_len < y_need {
+        return Err(format!(
+            "Y plane {y_len} elems < {y_need} needed for {w}x{h} stride_y={y_stride}"
+        ));
+    }
+    if uv_len < uv_need {
+        return Err(format!(
+            "UV plane {uv_len} elems < {uv_need} needed for {w}x{h} stride_uv={uv_stride}"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(any(
@@ -742,12 +909,26 @@ fn r_clamp(v: i32) -> u8 {
     feature = "ffmpeg-decode-hevc-vaapi-main10-any",
     feature = "ffmpeg-decode-hevc-nvdec-main10-any"
 ))]
-fn p010_to_bgra_sdr_tonemap(nv12_10: &Nv12Frame16, out_bgra: &mut [u8]) {
+fn p010_to_bgra_sdr_tonemap(nv12_10: &Nv12Frame16, out_bgra: &mut [u8]) -> Result<(), String> {
     let w = nv12_10.width as usize;
     let h = nv12_10.height as usize;
-    debug_assert_eq!(out_bgra.len(), w * h * 4);
     let y_stride = nv12_10.stride_y as usize;
     let uv_stride = nv12_10.stride_uv as usize;
+    // Same total-function contract as `nv12_to_bgra`: reject a frame whose
+    // u16 plane lengths or the output buffer disagree with the header geometry
+    // instead of indexing past the plane (the `debug_assert` is gone in
+    // release). Plane lengths here are u16-element counts.
+    if let Err(e) = check_nv12_like_geometry(
+        w,
+        h,
+        y_stride,
+        uv_stride,
+        nv12_10.y.len(),
+        nv12_10.uv.len(),
+        out_bgra.len(),
+    ) {
+        return Err(format!("p010_to_bgra_sdr_tonemap: {e}"));
+    }
 
     for j in 0..h {
         for i in 0..w {
@@ -811,6 +992,7 @@ fn p010_to_bgra_sdr_tonemap(nv12_10: &Nv12Frame16, out_bgra: &mut [u8]) {
             out_bgra[off + 3] = 0xFF;
         }
     }
+    Ok(())
 }
 
 /// CPU alpha-blend a BGRA source rectangle onto a BGRA destination
@@ -871,10 +1053,10 @@ fn alpha_blend_bgra(
     }
 }
 
-/// Resize the renderer. softbuffer auto-resizes on the next
-/// `present_frame` based on stream size, so window-resize events are
-/// no-ops there (kept for API symmetry with Windows). The wgpu backend
-/// reconfigures its surface to the new window size.
+/// Resize the renderer. The softbuffer backend reconciles its surface to the
+/// window's inner size inside `present_frame` (see `resize_surface_to_window`),
+/// so explicit window-resize events are no-ops there (kept for API symmetry
+/// with Windows). The wgpu backend reconfigures its surface to the new size.
 pub fn resize_renderer(
     r: &mut PlatformRender,
     width: u32,
@@ -1196,12 +1378,141 @@ mod tests {
             pts_us: 0,
         };
         let mut out = vec![0u8; w * h * 4];
-        nv12_to_bgra(&frame, &mut out);
+        nv12_to_bgra(&frame, &mut out).expect("consistent frame converts");
         let digest = fnv1a64(&out);
         const GOLDEN: u64 = 0xe113_1b22_fd54_6e98;
         assert_eq!(
             digest, GOLDEN,
             "nv12_to_bgra gradient digest changed: got {digest:#018x} (update GOLDEN if intentional)"
+        );
+    }
+
+    /// Reproduces the production crash shape: a frame header claiming
+    /// 3840x2160 whose UV plane holds only 1920x1080-worth of chroma. The
+    /// converter must return Err (and let the caller skip the frame), not
+    /// index past `uv` and abort the viewer.
+    #[cfg(any(
+        feature = "ffmpeg-decode-hevc-sw-any",
+        feature = "ffmpeg-decode-hevc-vaapi-any",
+        feature = "ffmpeg-decode-hevc-nvdec-any"
+    ))]
+    #[test]
+    fn nv12_to_bgra_rejects_short_uv_plane() {
+        let (w, h) = (3840u32, 2160u32);
+        let y = vec![16u8; (w * h) as usize];
+        // UV sized for 1920x1080 (interleaved: 1920 bytes/row * 540 rows).
+        let uv = vec![128u8; (1920 * 540) as usize];
+        let frame = Nv12Frame {
+            width: w,
+            height: h,
+            y,
+            uv,
+            stride_y: w,
+            stride_uv: w,
+            pts_us: 0,
+        };
+        let mut out = vec![0u8; (w * h * 4) as usize];
+        let err = nv12_to_bgra(&frame, &mut out).expect_err("short UV plane must be rejected");
+        assert!(
+            err.contains("UV plane"),
+            "error should name the short UV plane, got: {err}"
+        );
+    }
+
+    /// A small, fully consistent frame (with stride padding beyond width, and
+    /// an ODD height that exercises the ceil-chroma-row bound) converts Ok and
+    /// writes every pixel of the output buffer.
+    #[cfg(any(
+        feature = "ffmpeg-decode-hevc-sw-any",
+        feature = "ffmpeg-decode-hevc-vaapi-any",
+        feature = "ffmpeg-decode-hevc-nvdec-any"
+    ))]
+    #[test]
+    fn nv12_to_bgra_ok_roundtrip() {
+        let (w, h) = (64u32, 36u32);
+        let stride_y = 80u32; // padded beyond width
+        let stride_uv = 80u32; // interleaved UV byte stride, padded
+        let y = vec![120u8; (stride_y * h) as usize];
+        // ceil(h/2) chroma rows so an odd height would also be covered.
+        let uv = vec![128u8; (stride_uv * h.div_ceil(2)) as usize];
+        let frame = Nv12Frame {
+            width: w,
+            height: h,
+            y,
+            uv,
+            stride_y,
+            stride_uv,
+            pts_us: 0,
+        };
+        let mut out = vec![7u8; (w * h * 4) as usize];
+        nv12_to_bgra(&frame, &mut out).expect("consistent padded frame converts");
+        assert!(
+            out.chunks_exact(4).all(|px| px[3] == 0xFF),
+            "converter must write every output pixel"
+        );
+    }
+
+    /// A padded-stride NV12 frame (linesize > width, as HW downloads deliver)
+    /// must convert to the exact same BGRA as the equivalent tight-stride
+    /// frame — proving the converter indexes by stride, not width, so padding
+    /// never shears or bleeds into the image.
+    #[cfg(any(
+        feature = "ffmpeg-decode-hevc-sw-any",
+        feature = "ffmpeg-decode-hevc-vaapi-any",
+        feature = "ffmpeg-decode-hevc-nvdec-any"
+    ))]
+    #[test]
+    fn nv12_to_bgra_padded_stride_matches_tight() {
+        let (w, h) = (16usize, 8usize);
+        // Tight planes.
+        let mut y_t = vec![0u8; w * h];
+        let mut uv_t = vec![0u8; w * (h / 2)];
+        for j in 0..h {
+            for i in 0..w {
+                y_t[j * w + i] = ((i * 7 + j * 3) & 0xff) as u8;
+            }
+        }
+        for j in 0..(h / 2) {
+            for i in 0..(w / 2) {
+                uv_t[j * w + i * 2] = ((i * 11 + j * 5) & 0xff) as u8; // U
+                uv_t[j * w + i * 2 + 1] = ((i * 13 + j * 17) & 0xff) as u8; // V
+            }
+        }
+        // Padded planes carrying the same logical rows (stride = w + 8).
+        let (sy, su) = (w + 8, w + 8);
+        let mut y_p = vec![0xAAu8; sy * h];
+        let mut uv_p = vec![0x55u8; su * (h / 2)];
+        for j in 0..h {
+            y_p[j * sy..j * sy + w].copy_from_slice(&y_t[j * w..j * w + w]);
+        }
+        for j in 0..(h / 2) {
+            uv_p[j * su..j * su + w].copy_from_slice(&uv_t[j * w..j * w + w]);
+        }
+        let tight = Nv12Frame {
+            width: w as u32,
+            height: h as u32,
+            y: y_t,
+            uv: uv_t,
+            stride_y: w as u32,
+            stride_uv: w as u32,
+            pts_us: 0,
+        };
+        let padded = Nv12Frame {
+            width: w as u32,
+            height: h as u32,
+            y: y_p,
+            uv: uv_p,
+            stride_y: sy as u32,
+            stride_uv: su as u32,
+            pts_us: 0,
+        };
+        let mut out_t = vec![0u8; w * h * 4];
+        let mut out_p = vec![0u8; w * h * 4];
+        nv12_to_bgra(&tight, &mut out_t).expect("tight converts");
+        nv12_to_bgra(&padded, &mut out_p).expect("padded converts");
+        assert_eq!(
+            out_t, out_p,
+            "padded-stride NV12 must convert identically to tight-stride"
         );
     }
 
@@ -1241,12 +1552,102 @@ mod tests {
             hdr10: None,
         };
         let mut out = vec![0u8; w * h * 4];
-        p010_to_bgra_sdr_tonemap(&frame, &mut out);
+        p010_to_bgra_sdr_tonemap(&frame, &mut out).expect("consistent frame converts");
         let digest = fnv1a64(&out);
         const GOLDEN: u64 = 0x2706_6b09_316e_181e;
         assert_eq!(
             digest, GOLDEN,
             "p010_to_bgra_sdr_tonemap gradient digest changed: got {digest:#018x} (update GOLDEN if intentional)"
+        );
+    }
+
+    /// P010 sibling of `nv12_to_bgra_rejects_short_uv_plane`: a header claiming
+    /// 3840x2160 with a UV plane holding only 1920x1080-worth of u16 chroma
+    /// must return Err rather than index past the plane.
+    #[cfg(any(
+        feature = "ffmpeg-decode-hevc-sw-main10-any",
+        feature = "ffmpeg-decode-hevc-vaapi-main10-any",
+        feature = "ffmpeg-decode-hevc-nvdec-main10-any"
+    ))]
+    #[test]
+    fn p010_to_bgra_sdr_tonemap_rejects_short_uv_plane() {
+        let (w, h) = (3840u32, 2160u32);
+        let y = vec![0u16; (w * h) as usize];
+        // UV sized for 1920x1080 (interleaved u16: 1920 elems/row * 540 rows).
+        let uv = vec![0u16; (1920 * 540) as usize];
+        let frame = Nv12Frame16 {
+            width: w,
+            height: h,
+            y,
+            uv,
+            stride_y: w,
+            stride_uv: w,
+            pts_us: 0,
+            hdr10: None,
+        };
+        let mut out = vec![0u8; (w * h * 4) as usize];
+        let err = p010_to_bgra_sdr_tonemap(&frame, &mut out)
+            .expect_err("short UV plane must be rejected");
+        assert!(
+            err.contains("UV plane"),
+            "error should name the short UV plane, got: {err}"
+        );
+    }
+
+    /// A frame taller than the window (the 3840x2160-into-3840x2088 case that
+    /// garbled the NVDEC session) is cropped to the window's rows, each kept
+    /// row copied verbatim — no shear, no overrun.
+    #[test]
+    fn blit_crop_letterbox_crops_taller_frame() {
+        let (fw, fh) = (4usize, 4usize);
+        let mut src = vec![0u8; fw * fh * 4];
+        for (i, b) in src.iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+        let (ww, wh) = (4usize, 2usize); // window shorter than the frame
+        let mut dst = vec![0xEEu8; ww * wh * 4];
+        blit_crop_letterbox(&src, fw, fh, &mut dst, ww);
+        assert_eq!(
+            dst.as_slice(),
+            &src[..ww * wh * 4],
+            "cropped rows must copy verbatim"
+        );
+    }
+
+    /// A frame smaller than the window is placed top-left and the surplus
+    /// window area is black-filled (letterbox), never left stale or wrapped.
+    #[test]
+    fn blit_crop_letterbox_letterboxes_smaller_frame() {
+        let (fw, fh) = (2usize, 2usize);
+        let src = vec![0x7Fu8; fw * fh * 4];
+        let (ww, wh) = (4usize, 3usize);
+        let mut dst = vec![0xEEu8; ww * wh * 4];
+        blit_crop_letterbox(&src, fw, fh, &mut dst, ww);
+        for y in 0..wh {
+            for x in 0..ww {
+                let off = (y * ww + x) * 4;
+                let expect = if x < fw && y < fh { 0x7F } else { 0x00 };
+                assert!(
+                    dst[off..off + 4].iter().all(|&b| b == expect),
+                    "pixel {x},{y} expected {expect:#x}"
+                );
+            }
+        }
+    }
+
+    /// A destination shorter than `win_w * win_h` (a stale/oversized tracked
+    /// size) must not panic: the row count is derived from `dst.len()`.
+    #[test]
+    fn blit_crop_letterbox_bounded_by_dst_len() {
+        let (fw, fh) = (8usize, 8usize);
+        let src = vec![1u8; fw * fh * 4];
+        // Claim width 8 but hand over a buffer only 3 rows tall.
+        let mut dst = vec![9u8; 8 * 3 * 4];
+        blit_crop_letterbox(&src, fw, fh, &mut dst, 8);
+        assert_eq!(
+            dst.as_slice(),
+            &src[..8 * 3 * 4],
+            "only dst-bounded rows written, no panic"
         );
     }
 }

@@ -22,11 +22,12 @@ use rusty_ffmpeg::ffi::{
     av_hwframe_transfer_data as hw_download, av_packet_alloc, av_packet_free, av_packet_unref,
     avcodec_alloc_context3, avcodec_find_decoder_by_name, avcodec_free_context, avcodec_open2,
     avcodec_receive_frame, avcodec_send_packet, AVCodecContext, AVFrame, AVPacket, AVPixelFormat,
-    AV_PIX_FMT_NONE, AV_PIX_FMT_VAAPI,
+    AV_PIX_FMT_NONE, AV_PIX_FMT_NV12, AV_PIX_FMT_VAAPI, AV_PIX_FMT_YUV420P,
 };
 
 use crate::decoder_common::{
-    copy_nv12_planes, ffmpeg_to_decode_err, HevcDecoderBackend, AVERROR_EAGAIN, AVERROR_EOF,
+    copy_nv12_planes, copy_yuv420p_as_nv12_planes, ffmpeg_to_decode_err, HevcDecoderBackend,
+    AVERROR_EAGAIN, AVERROR_EOF,
 };
 use crate::error::FfmpegError;
 use crate::hwdevice::VaapiHwDevice;
@@ -248,22 +249,44 @@ impl HevcDecoderBackend for HevcVaapiFfmpegDecoder {
             return Err(ffmpeg_to_decode_err(FfmpegError::Transfer(xfer)));
         }
 
-        // SAFETY: hw_download populated sw with the CPU-side NV12 planes.
-        let (y_ptr, uv_ptr, y_stride, uv_stride, w, h, pts) = unsafe {
+        // The downloaded CPU frame is normally NV12, but the hwframe transfer
+        // can also surface planar YUV420P; branch on the actual format so a
+        // planar download is interleaved into NV12 instead of mis-wrapping the
+        // quarter-size U plane as interleaved chroma (garbled/overrun output).
+        // SAFETY: hw_download populated sw; its planes / linesize / dims /
+        // format are valid until av_frame_unref.
+        let out = unsafe {
             let f = &*sw;
-            (
-                f.data[0] as *const u8,
-                f.data[1] as *const u8,
-                f.linesize[0] as usize,
-                f.linesize[1] as usize,
-                f.width as u32,
-                f.height as u32,
-                f.pts as u64,
-            )
+            let (w, h, pts) = (f.width as u32, f.height as u32, f.pts as u64);
+            match f.format {
+                fmt if fmt == AV_PIX_FMT_NV12 => copy_nv12_planes(
+                    f.data[0] as *const u8,
+                    f.data[1] as *const u8,
+                    f.linesize[0] as usize,
+                    f.linesize[1] as usize,
+                    w,
+                    h,
+                    pts,
+                ),
+                fmt if fmt == AV_PIX_FMT_YUV420P => copy_yuv420p_as_nv12_planes(
+                    f.data[0] as *const u8,
+                    f.data[1] as *const u8,
+                    f.data[2] as *const u8,
+                    f.linesize[0] as usize,
+                    f.linesize[1] as usize,
+                    w,
+                    h,
+                    pts,
+                ),
+                other => {
+                    av_frame_unref(sw);
+                    av_frame_unref(hw);
+                    return Err(DecodeError::Backend(format!(
+                        "ffmpeg-vaapi-hevc: downloaded pixel format {other} is neither NV12 nor YUV420P"
+                    )));
+                }
+            }
         };
-
-        // SAFETY: copy_nv12_planes copies bytes out of sw's planes into owned Vecs.
-        let out = unsafe { copy_nv12_planes(y_ptr, uv_ptr, y_stride, uv_stride, w, h, pts) };
 
         // SAFETY: hw and sw are the unique owners.
         unsafe {
