@@ -225,7 +225,7 @@ const _: fn(u64) -> EncodedFrame = make_p_frame;
 #[test]
 fn large_idr_round_trip() {
     let policy = FecPolicy::standard();
-    // 180 KB → k = ceil(180000/1200) = 150, m = ceil(150*10/100) = 15
+    // 180 KB → k = ceil(180000/1200) = 150, m = ceil(150*20/100) = 30
     let payload: Vec<u8> = (0..=255u8).cycle().take(180_000).collect();
     let frame = EncodedFrame {
         seq: 7,
@@ -237,11 +237,11 @@ fn large_idr_round_trip() {
         codec: Codec::H264,
     };
     let pkts = packetize(&frame, 1200, &policy).expect("packetize large IDR");
-    assert_eq!(pkts.len(), 150 + 15, "expected 165 packets");
+    assert_eq!(pkts.len(), 150 + 30, "expected 180 packets");
 
     // Feed all 150 source packets through the assembler. The codec needs
     // to match the (k, m) that packetize used.
-    let fec = FecCodec::new(150, 15).expect("fec 150/15");
+    let fec = FecCodec::new(150, 30).expect("fec 150/30");
     let mut asm = FrameAssembler::new(1920, 1080, Codec::H264);
     let mut completed: Option<EncodedFrame> = None;
     for p in pkts.iter().take(150).cloned() {
@@ -271,7 +271,7 @@ fn large_idr_round_trip() {
 /// length, appending garbage zeros to every such NAL unit.
 ///
 /// 101 376 B / 1200 B = 85 source chunks (last = 576 B), m =
-/// ceil(85×10/100) = 9 parity → 94 packets. Dropping index 84 (the
+/// ceil(85×20/100) = 17 parity → 102 packets. Dropping index 84 (the
 /// last source chunk) forces FEC reconstruction of the partial chunk.
 #[test]
 fn last_source_chunk_loss_reassembles_exact_length() {
@@ -289,7 +289,7 @@ fn last_source_chunk_loss_reassembles_exact_length() {
     let (k, m) = policy
         .compute_k_m(payload.len(), 1200)
         .expect("compute_k_m");
-    assert_eq!((k, m), (85, 9), "expected k=85, m=9 for 101376 B");
+    assert_eq!((k, m), (85, 17), "expected k=85, m=17 for 101376 B");
     let pkts = packetize(&frame, 1200, &policy).expect("packetize");
 
     // Drop the last source chunk (index k-1 = 84). It is the only
@@ -325,7 +325,7 @@ fn last_source_chunk_loss_reassembles_exact_length() {
 }
 
 /// Drop 5 deterministic source packets from a 180 KB IDR; FEC must
-/// reconstruct the missing chunks via parity (m = 15 ≥ 5).
+/// reconstruct the missing chunks via parity (m = 30 ≥ 5).
 #[test]
 fn large_idr_with_loss_recovery() {
     let policy = FecPolicy::standard();
@@ -340,9 +340,9 @@ fn large_idr_with_loss_recovery() {
         codec: Codec::H264,
     };
     let pkts = packetize(&frame, 1200, &policy).expect("packetize");
-    assert_eq!(pkts.len(), 165);
+    assert_eq!(pkts.len(), 180);
 
-    // Drop 5 deterministic source indices + keep all 15 parity.
+    // Drop 5 deterministic source indices + keep all 30 parity.
     let drop_indices = [3usize, 42, 87, 120, 149];
     let kept: Vec<_> = pkts
         .iter()
@@ -350,9 +350,9 @@ fn large_idr_with_loss_recovery() {
         .filter(|(i, _)| !drop_indices.contains(i))
         .map(|(_, p)| p.clone())
         .collect();
-    assert_eq!(kept.len(), 165 - 5);
+    assert_eq!(kept.len(), 180 - 5);
 
-    let fec = FecCodec::new(150, 15).expect("fec 150/15");
+    let fec = FecCodec::new(150, 30).expect("fec 150/30");
     let mut asm = FrameAssembler::new(1920, 1080, Codec::H264);
     let mut completed: Option<EncodedFrame> = None;
     for p in kept {

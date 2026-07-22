@@ -6,9 +6,10 @@ use crate::fec::FecCodec;
 /// Max source chunks per frame. Raised from 128 (Plan 3 / 4 era) to 200
 /// to accommodate VAAPI HW-encoded 1080p60 IDRs which reach ~170 KB
 /// (= 142 chunks of 1200 B). Reed-Solomon GF(8) supports k + m ≤ 255,
-/// so 200 leaves room for up to m = 55 parity per frame. With the
-/// production `FecPolicy::standard()` (parity_ratio_pct = 10, max_m =
-/// 20) the realistic worst case is k = 200, m = 20 → 220 chunks total.
+/// so 200 leaves room for up to m = 40 parity per frame. With the
+/// production `FecPolicy::standard()` (parity_ratio_pct = 20, max_m =
+/// 40) the worst case is k = 200, m = 40 → 240 chunks total, exactly
+/// `FecCodec::MAX_SHARDS`.
 pub const MAX_SOURCE_CHUNKS: usize = 200;
 
 // Compile-time consistency: FecPolicy::standard()'s worst case (k=max_k +
@@ -27,8 +28,10 @@ const _: () = {
 /// from the frame size and clamps to `max_k`; `m` is derived from `k`
 /// via `parity_ratio_pct` with floor `min_m` and ceiling `max_m`.
 ///
-/// Default is tuned for VAAPI 1080p60 5 Mbps where IDRs reach ~170 KB:
-/// `k` up to 200, `m` up to 20, 10 % parity, m ≥ 1.
+/// Default is tuned for jittery WAN paths (Tailscale/WireGuard links saw
+/// ~12 % real UDP loss in the field): 20 % parity with floor m ≥ 2, so
+/// even single-chunk frames survive one lost packet, `k` up to 200, `m`
+/// up to 40 (k + m capped at `FecCodec::MAX_SHARDS` = 240).
 #[derive(Debug, Clone, Copy)]
 pub struct FecPolicy {
     pub max_k: usize,
@@ -42,9 +45,9 @@ impl FecPolicy {
     pub const fn standard() -> Self {
         Self {
             max_k: 200,
-            max_m: 20,
-            parity_ratio_pct: 10,
-            min_m: 1,
+            max_m: 40,
+            parity_ratio_pct: 20,
+            min_m: 2,
         }
     }
 
@@ -259,27 +262,27 @@ mod tests {
     fn fec_policy_standard_defaults_match_spec() {
         let p = FecPolicy::standard();
         assert_eq!(p.max_k, 200);
-        assert_eq!(p.max_m, 20);
-        assert_eq!(p.parity_ratio_pct, 10);
-        assert_eq!(p.min_m, 1);
+        assert_eq!(p.max_m, 40);
+        assert_eq!(p.parity_ratio_pct, 20);
+        assert_eq!(p.min_m, 2);
     }
 
     #[test]
     fn fec_policy_compute_k_m_tiny_frame() {
         let p = FecPolicy::standard();
-        assert_eq!(p.compute_k_m(100, 1200), Some((1, 1)));
+        assert_eq!(p.compute_k_m(100, 1200), Some((1, 2)));
     }
 
     #[test]
     fn fec_policy_compute_k_m_medium_frame() {
         let p = FecPolicy::standard();
-        assert_eq!(p.compute_k_m(5000, 1200), Some((5, 1)));
+        assert_eq!(p.compute_k_m(5000, 1200), Some((5, 2)));
     }
 
     #[test]
     fn fec_policy_compute_k_m_idr_frame() {
         let p = FecPolicy::standard();
-        assert_eq!(p.compute_k_m(168000, 1200), Some((140, 14)));
+        assert_eq!(p.compute_k_m(168000, 1200), Some((140, 28)));
     }
 
     #[test]
@@ -291,7 +294,7 @@ mod tests {
     #[test]
     fn fec_policy_compute_k_m_zero_byte_frame_still_one_chunk() {
         let p = FecPolicy::standard();
-        assert_eq!(p.compute_k_m(0, 1200), Some((1, 1)));
+        assert_eq!(p.compute_k_m(0, 1200), Some((1, 2)));
     }
 
     #[test]
@@ -325,26 +328,27 @@ mod tests {
         let policy = FecPolicy::standard();
         let payload = vec![0xAB; 10];
         let pkts = packetize(&make_frame(&payload), 1200, &policy).unwrap();
-        // tiny frame → k=1, m=1, total 2 packets
-        assert_eq!(pkts.len(), 2);
+        // tiny frame → k=1, m=2 (min_m floor), total 3 packets
+        assert_eq!(pkts.len(), 3);
         assert_eq!(pkts[0].source_chunks, 1);
-        assert_eq!(pkts[0].parity_chunks, 1);
+        assert_eq!(pkts[0].parity_chunks, 2);
         assert!(pkts[0].is_keyframe());
         assert!(!pkts[0].is_parity());
         assert_eq!(pkts[0].payload_bytes, 10);
         assert!(pkts[1].is_parity());
+        assert!(pkts[2].is_parity());
     }
 
     #[test]
     fn packetize_new_signature_idr_frame() {
         let policy = FecPolicy::standard();
-        // 168 KB frame → k=140, m=14
+        // 168 KB frame → k=140, m=28 (20 % parity)
         let payload = vec![0x42; 168_000];
         let pkts = packetize(&make_frame(&payload), 1200, &policy).unwrap();
-        assert_eq!(pkts.len(), 140 + 14);
+        assert_eq!(pkts.len(), 140 + 28);
         for p in pkts.iter().take(140) {
             assert_eq!(p.source_chunks, 140);
-            assert_eq!(p.parity_chunks, 14);
+            assert_eq!(p.parity_chunks, 28);
             assert!(!p.is_parity());
         }
         for p in pkts.iter().skip(140) {

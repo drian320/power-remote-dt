@@ -368,15 +368,15 @@ mod tests {
 
     #[test]
     fn late_parity_after_completion_is_not_reemitted() {
-        // 50 bytes at chunk_payload_len=1200 → k=1, m=1, total=2. Matches
-        // the field-observed shape (asm seq=6 k=1 m=1) that produced a
-        // duplicate POC: source chunk completes the frame, then a parity
-        // chunk for the same seq arrives late and must not re-emit it.
-        let fec = FecCodec::new(1, 1).unwrap();
+        // 50 bytes at chunk_payload_len=1200 → k=1, m=2 (min_m floor),
+        // total=3. Matches the field-observed shape (asm seq=6 k=1) that
+        // produced a duplicate POC: source chunk completes the frame, then a
+        // parity chunk for the same seq arrives late and must not re-emit it.
+        let fec = FecCodec::new(1, 2).unwrap();
         let policy = FecPolicy::standard();
         let frame = make_frame(6, &[0xEE; 50]);
         let pkts = packetize(&frame, 1200, &policy).unwrap();
-        assert_eq!(pkts.len(), 2);
+        assert_eq!(pkts.len(), 3);
         let mut asm = FrameAssembler::new(1920, 1080, Codec::H265);
 
         let r1 = asm.feed(pkts[0].clone(), &fec).unwrap();
