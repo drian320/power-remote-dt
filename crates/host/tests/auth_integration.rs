@@ -14,6 +14,7 @@ use prdt_host::auth::{AuthValidator, AuthVerdict};
 use prdt_host::auth_config::{AuthMode, HostAuthConfig};
 use prdt_host::{apply_audio_permission_gate, channel_allowed, handle_input_event};
 use prdt_protocol::{AuthMethod, Codec, ControlMessage, HelloRejectCode, PermissionSet};
+use prdt_transport::handshake::HELLO_PROTOCOL_VERSION;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -47,7 +48,7 @@ async fn pin_auth_success() {
     let known = Arc::new(RwLock::new(KnownPeers { peers: vec![] }));
     let v = AuthValidator::new(cfg, known);
 
-    let hello = make_hello(AuthMethod::Pin, b"hunter2", 3);
+    let hello = make_hello(AuthMethod::Pin, b"hunter2", HELLO_PROTOCOL_VERSION);
     let verdict = v.validate(&hello, "peerA").await;
 
     match verdict {
@@ -76,7 +77,7 @@ async fn pin_auth_wrong_then_correct() {
 
     // Two wrong attempts.
     for _ in 0..2 {
-        let hello = make_hello(AuthMethod::Pin, b"wrong", 3);
+        let hello = make_hello(AuthMethod::Pin, b"wrong", HELLO_PROTOCOL_VERSION);
         let verdict = v.validate(&hello, "peerA").await;
         assert!(
             matches!(
@@ -91,7 +92,7 @@ async fn pin_auth_wrong_then_correct() {
     }
 
     // Correct PIN succeeds and resets the counter.
-    let hello = make_hello(AuthMethod::Pin, b"hunter2", 3);
+    let hello = make_hello(AuthMethod::Pin, b"hunter2", HELLO_PROTOCOL_VERSION);
     assert!(
         matches!(
             v.validate(&hello, "peerA").await,
@@ -115,12 +116,12 @@ async fn pin_auth_lockout_after_max_attempts() {
 
     // Exhaust all attempts.
     for _ in 0..3 {
-        let hello = make_hello(AuthMethod::Pin, b"wrong", 3);
+        let hello = make_hello(AuthMethod::Pin, b"wrong", HELLO_PROTOCOL_VERSION);
         let _ = v.validate(&hello, "peerA").await;
     }
 
     // Even the correct PIN is rejected while locked out.
-    let hello = make_hello(AuthMethod::Pin, b"hunter2", 3);
+    let hello = make_hello(AuthMethod::Pin, b"hunter2", HELLO_PROTOCOL_VERSION);
     let verdict = v.validate(&hello, "peerA").await;
     assert!(
         matches!(
@@ -148,7 +149,11 @@ async fn ephemeral_auth_success() {
     let v = AuthValidator::new(cfg, known);
     let eph = v.rotate_ephemeral().await;
 
-    let hello = make_hello(AuthMethod::Ephemeral, eph.as_bytes(), 3);
+    let hello = make_hello(
+        AuthMethod::Ephemeral,
+        eph.as_bytes(),
+        HELLO_PROTOCOL_VERSION,
+    );
     let verdict = v.validate(&hello, "peerA").await;
     assert!(
         matches!(verdict, AuthVerdict::Granted { .. }),
@@ -166,7 +171,7 @@ async fn ephemeral_auth_wrong_rejected() {
     let v = AuthValidator::new(cfg, known);
     let _real = v.rotate_ephemeral().await;
 
-    let hello = make_hello(AuthMethod::Ephemeral, b"WRONG123", 3);
+    let hello = make_hello(AuthMethod::Ephemeral, b"WRONG123", HELLO_PROTOCOL_VERSION);
     let verdict = v.validate(&hello, "peerA").await;
     assert!(
         matches!(
@@ -194,7 +199,11 @@ async fn ephemeral_expired_rejected() {
     // Wait for the ephemeral to expire (1.5 s > 1 s lifetime).
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 
-    let hello = make_hello(AuthMethod::Ephemeral, eph.as_bytes(), 3);
+    let hello = make_hello(
+        AuthMethod::Ephemeral,
+        eph.as_bytes(),
+        HELLO_PROTOCOL_VERSION,
+    );
     let verdict = v.validate(&hello, "peerA").await;
     assert!(
         matches!(
@@ -222,7 +231,7 @@ async fn pin_required_when_viewer_sends_tofu_to_pin_host() {
     let known = Arc::new(RwLock::new(KnownPeers { peers: vec![] }));
     let v = AuthValidator::new(cfg, known);
 
-    let hello = make_hello(AuthMethod::Tofu, b"", 3);
+    let hello = make_hello(AuthMethod::Tofu, b"", HELLO_PROTOCOL_VERSION);
     let verdict = v.validate(&hello, "peerA").await;
     assert!(
         matches!(
@@ -246,7 +255,7 @@ async fn ephemeral_required_when_viewer_sends_tofu_to_ephemeral_host() {
     let v = AuthValidator::new(cfg, known);
     let _ = v.rotate_ephemeral().await;
 
-    let hello = make_hello(AuthMethod::Tofu, b"", 3);
+    let hello = make_hello(AuthMethod::Tofu, b"", HELLO_PROTOCOL_VERSION);
     let verdict = v.validate(&hello, "peerA").await;
     assert!(
         matches!(
@@ -270,7 +279,7 @@ async fn protocol_version_mismatch_rejected() {
     let known = Arc::new(RwLock::new(KnownPeers { peers: vec![] }));
     let v = AuthValidator::new(cfg, known);
 
-    let hello = make_hello(AuthMethod::Tofu, b"", 2); // pre-P6
+    let hello = make_hello(AuthMethod::Tofu, b"", HELLO_PROTOCOL_VERSION - 1); // deliberately stale
     let verdict = v.validate(&hello, "peerA").await;
     assert!(
         matches!(
@@ -307,7 +316,7 @@ async fn tofu_known_peer_grants_without_prompt() {
     let known = Arc::new(RwLock::new(KnownPeers { peers: vec![peer] }));
     let v = AuthValidator::new(cfg, known);
 
-    let hello = make_hello(AuthMethod::Tofu, b"", 3);
+    let hello = make_hello(AuthMethod::Tofu, b"", HELLO_PROTOCOL_VERSION);
     let verdict = v.validate(&hello, "peerA").await;
     match verdict {
         AuthVerdict::Granted { permissions, .. } => assert_eq!(permissions, custom_perms),
@@ -321,7 +330,7 @@ async fn tofu_unknown_peer_needs_consent() {
     let known = Arc::new(RwLock::new(KnownPeers { peers: vec![] }));
     let v = AuthValidator::new(cfg, known);
 
-    let hello = make_hello(AuthMethod::Tofu, b"", 3);
+    let hello = make_hello(AuthMethod::Tofu, b"", HELLO_PROTOCOL_VERSION);
     let verdict = v.validate(&hello, "peerA").await;
     assert!(
         matches!(verdict, AuthVerdict::NeedsConsent { .. }),
@@ -356,7 +365,7 @@ async fn pin_known_peer_still_requires_pin() {
     let v = AuthValidator::new(cfg, known);
 
     // Wrong PIN doesn't auto-pass even for a known peer.
-    let hello = make_hello(AuthMethod::Pin, b"wrong", 3);
+    let hello = make_hello(AuthMethod::Pin, b"wrong", HELLO_PROTOCOL_VERSION);
     let verdict = v.validate(&hello, "peerA").await;
     assert!(
         matches!(
@@ -370,7 +379,7 @@ async fn pin_known_peer_still_requires_pin() {
     );
 
     // Correct PIN grants with the *saved* peer permissions (not the default).
-    let hello = make_hello(AuthMethod::Pin, b"hunter2", 3);
+    let hello = make_hello(AuthMethod::Pin, b"hunter2", HELLO_PROTOCOL_VERSION);
     let verdict = v.validate(&hello, "peerA").await;
     match verdict {
         AuthVerdict::Granted { permissions, .. } => {
@@ -404,7 +413,7 @@ async fn auth_payload_oversize_rejected() {
     let v = AuthValidator::new(cfg, known);
 
     let huge = vec![b'A'; 65]; // > 64-byte cap (MAX_AUTH_PAYLOAD_BYTES)
-    let hello = make_hello(AuthMethod::Pin, &huge, 3);
+    let hello = make_hello(AuthMethod::Pin, &huge, HELLO_PROTOCOL_VERSION);
     let verdict = v.validate(&hello, "peerA").await;
     assert!(
         matches!(

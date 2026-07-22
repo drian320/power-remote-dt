@@ -22,7 +22,10 @@ use subtle::ConstantTimeEq;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 
-const PROTOCOL_VERSION_REQUIRED: u8 = 4;
+/// Required wire protocol version. Sourced from the transport crate's
+/// canonical constant rather than a local copy so a future version bump
+/// cannot leave this gate (or the tests that drive it) silently stale.
+const PROTOCOL_VERSION_REQUIRED: u8 = prdt_transport::handshake::HELLO_PROTOCOL_VERSION;
 const AUTH_PAYLOAD_MAX_BYTES: usize = 64;
 
 /// The result of a single Hello-time auth decision.
