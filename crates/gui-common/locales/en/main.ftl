@@ -108,6 +108,13 @@ nav-home = Home
 nav-settings = Settings
 nav-logs = Logs
 
+# Logs view (in-app tail of the rolling GUI log file)
+logs-heading = Logs
+logs-card-eyebrow = Activity
+logs-file-path-label = Log file
+logs-empty = No log output yet. Start sharing or connect to generate activity.
+logs-no-path = Could not resolve the log directory.
+
 home-identity-error = Failed to initialise device identity: { $error }
 home-identity-error-hint = Check the host key file and config directory permissions, then restart.
 

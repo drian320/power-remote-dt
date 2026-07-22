@@ -108,6 +108,13 @@ nav-home = ホーム
 nav-settings = 設定
 nav-logs = ログ
 
+# ログ画面（ローリングGUIログファイルのアプリ内テール表示）
+logs-heading = ログ
+logs-card-eyebrow = アクティビティ
+logs-file-path-label = ログファイル
+logs-empty = まだログ出力はありません。共有を開始するか接続すると記録されます。
+logs-no-path = ログディレクトリを解決できませんでした。
+
 home-identity-error = 識別情報の初期化に失敗しました: { $error }
 home-identity-error-hint = ホスト鍵ファイルと設定ディレクトリの権限を確認し、再起動してください。
 

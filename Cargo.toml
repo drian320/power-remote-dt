@@ -52,6 +52,9 @@ reed-solomon-erasure = "6.0"
 thiserror = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"] }
+# Rolling-file log sink for the GUI (persists in-process host listener logs that
+# would otherwise be lost when launched by double-click / elevated relaunch).
+tracing-appender = "0.2"
 
 # CLI
 clap = { version = "4.5", features = ["derive"] }

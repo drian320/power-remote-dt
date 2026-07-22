@@ -183,6 +183,12 @@ pub struct ClientApp {
     /// (non-elevated) window because an elevated copy is taking over hosting.
     /// Always false on non-Windows.
     request_exit: bool,
+
+    /// Logs view tail cache: the last-rendered tail text and when it was read.
+    /// The rolling log file is re-read at most once per second (see `draw_logs`)
+    /// rather than every frame.
+    logs_tail: String,
+    logs_last_read: Option<Instant>,
 }
 
 /// Editable mirror of the persisted config, used by the Settings view so that
@@ -280,6 +286,8 @@ impl ClientApp {
             settings_status: None,
             pending_autostart: autostart_host,
             request_exit: false,
+            logs_tail: String::new(),
+            logs_last_read: None,
         }
     }
 
@@ -1654,17 +1662,125 @@ impl ClientApp {
     }
 
     fn draw_logs(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Logs");
+        ui.heading(t!("logs-heading"));
         ui.add_space(10.0);
+
+        // Resolve the current rolling log file (tracing-appender suffixes the
+        // base name with the date, so we pick the newest `prdt-gui.log*`).
+        let log_file = prdt_gui_common::logs_dir()
+            .as_deref()
+            .and_then(latest_log_file);
+
+        // Refresh the cached tail at most once per second, not every frame.
+        let now = Instant::now();
+        let stale = self
+            .logs_last_read
+            .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1));
+        if stale {
+            self.logs_last_read = Some(now);
+            self.logs_tail = log_file.as_deref().map(read_log_tail).unwrap_or_default();
+        }
+        // Keep the tail live even without user interaction (drives the 1 Hz
+        // refresh above).
+        ui.ctx().request_repaint_after(Duration::from_secs(1));
+
         card_frame(ui.style()).show(ui, |ui| {
-            ui.label(dim_caption("Activity".to_string()));
+            ui.label(dim_caption(t!("logs-card-eyebrow")));
             ui.add_space(4.0);
-            ui.colored_label(
-                tokens::TEXT_DIM,
-                "Recent activity is written to stderr; in-app log tailing is not yet wired here.",
-            );
+
+            // Log file path as selectable text so the user can copy it / open
+            // the file in an external viewer.
+            ui.label(dim_caption(t!("logs-file-path-label")));
+            match &log_file {
+                Some(path) => {
+                    let mut path_str = path.display().to_string();
+                    ui.add(egui::TextEdit::singleline(&mut path_str).desired_width(f32::INFINITY));
+                }
+                None => {
+                    ui.colored_label(tokens::TEXT_DIM, t!("logs-no-path"));
+                }
+            }
+            ui.add_space(8.0);
+
+            if self.logs_tail.is_empty() {
+                ui.colored_label(tokens::TEXT_DIM, t!("logs-empty"));
+                return;
+            }
+
+            if ui.button(t!("common-button-copy")).clicked() {
+                ui.ctx().copy_text(self.logs_tail.clone());
+            }
+            ui.add_space(6.0);
+
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(&self.logs_tail).monospace()).wrap(),
+                    );
+                });
         });
     }
+}
+
+/// Find the current rolling log file: the most recently modified entry named
+/// `prdt-gui.log*` in `dir`. tracing-appender's daily roller suffixes the base
+/// name with the date (`prdt-gui.log.YYYY-MM-DD`), so the exact name can't be
+/// hardcoded; newest-mtime is also robust to the UTC-vs-local date boundary.
+fn latest_log_file(dir: &std::path::Path) -> Option<PathBuf> {
+    let mut newest: Option<(SystemTime, PathBuf)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        let is_log = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("prdt-gui.log"));
+        if !is_log || !path.is_file() {
+            continue;
+        }
+        let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        if newest.as_ref().is_none_or(|(best, _)| mtime > *best) {
+            newest = Some((mtime, path));
+        }
+    }
+    newest.map(|(_, p)| p)
+}
+
+/// Read the last ~200 lines (bounded to the final 64 KiB) of `path`, oldest
+/// first, for display in the Logs view. Returns an empty string if the file
+/// can't be read yet (e.g. no host session has started, so no log exists).
+fn read_log_tail(path: &std::path::Path) -> String {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    const MAX_BYTES: u64 = 64 * 1024;
+    const MAX_LINES: usize = 200;
+
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = len.saturating_sub(MAX_BYTES);
+    if start > 0 && file.seek(SeekFrom::Start(start)).is_err() {
+        return String::new();
+    }
+    let mut bytes = Vec::new();
+    if file.read_to_end(&mut bytes).is_err() {
+        return String::new();
+    }
+    // Lossy so a multibyte char sliced at the 64 KiB cut can't error.
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines: Vec<&str> = text.lines().collect();
+    // A mid-file seek almost certainly lands inside a line — drop that partial
+    // first line.
+    if start > 0 && !lines.is_empty() {
+        lines.remove(0);
+    }
+    if lines.len() > MAX_LINES {
+        lines.drain(..lines.len() - MAX_LINES);
+    }
+    lines.join("\n")
 }
 
 /// The shared surface card used across Home, Settings, and Logs — one visual

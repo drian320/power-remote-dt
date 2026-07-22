@@ -25,7 +25,7 @@ pub use identity::{
     DeviceIdentity, IdentityError, IdentityPaths, IdentityRecord, ProvisioningState,
 };
 pub use log_tail::{TailHandle, TailLayer};
-pub use paths::{config_root, default_config_path};
+pub use paths::{config_root, default_config_path, logs_dir};
 pub use qr::generate as generate_qr;
 pub use style::install_jp_font;
 pub use theme::{apply_theme, install_theme};

@@ -12,6 +12,14 @@ pub fn default_config_path() -> Option<PathBuf> {
     config_root().map(|d| d.join("config.toml"))
 }
 
+/// Directory for rolling log files: `config_root()/logs`. The unified client
+/// GUI writes its daily-rolling `prdt-gui.log` here so that the in-process host
+/// listener's logs survive a double-click / elevated-relaunch launch, where
+/// stderr is discarded. Callers create the directory on first use.
+pub fn logs_dir() -> Option<PathBuf> {
+    config_root().map(|d| d.join("logs"))
+}
+
 /// Default path for the identity record (`identity.toml`) — the persisted
 /// `{host_id, key_fingerprint, server_authority, provisioning_state}` produced
 /// by offline-first provisioning (AC-9).

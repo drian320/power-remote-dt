@@ -13,6 +13,8 @@ anyhow = "1"
 tokio = { workspace = true }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
 # GUI modernization P2: the unified launcher is now cross-platform (Linux +
 # Windows). These deps moved out of [target.'cfg(windows)'] — ClientApp's
 # logic is platform-neutral (spawns `prdt connect`, runs the host listener
