@@ -25,3 +25,10 @@ host-key.bin
 # scripts/fetch-ci-artifacts.{ps1,sh} + scripts/e2e-smoke.{ps1,sh} work dir:
 # downloaded CI binaries, per-run Noise identity keys, and smoke-test logs.
 /.smoke-artifacts/
+
+# stray host identity + smoke downloads at repo root (created when prdt runs with repo-root CWD)
+/host-id.txt
+/host-key.bin.lock
+/known-host-ids
+/known-host-ids.lock
+/smoke/

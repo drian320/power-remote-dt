@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -35,6 +35,13 @@ pub struct FrameAssembler {
     partials: HashMap<u64, Partial>,
     /// Highest frame_seq we've ever completed or declined. Used for stale-drop.
     high_water_seq: u64,
+    /// frame_seqs whose frame has already been completed and emitted.
+    /// A late-arriving parity chunk (or a duplicate source chunk) for one
+    /// of these seqs must be dropped rather than re-completing the frame,
+    /// which would otherwise feed the decoder the same frame twice.
+    /// Pruned on every completion to entries within `STALE_SEQ_WINDOW` of
+    /// `high_water_seq`, so it stays bounded.
+    completed: BTreeSet<u64>,
     timeout: Duration,
     width: u32,
     height: u32,
@@ -58,11 +65,27 @@ impl FrameAssembler {
         Self {
             partials: HashMap::new(),
             high_water_seq: 0,
+            completed: BTreeSet::new(),
             timeout: DEFAULT_ASSEMBLY_TIMEOUT,
             width,
             height,
             codec,
         }
+    }
+
+    /// Number of tracked completed-frame entries. Test-only introspection
+    /// for verifying the completed-set stays bounded (see `prune_completed`).
+    #[cfg(test)]
+    pub(crate) fn completed_len(&self) -> usize {
+        self.completed.len()
+    }
+
+    /// Drop `completed` entries older than `STALE_SEQ_WINDOW` behind
+    /// `high_water_seq`, mirroring the existing stale-drop window so the
+    /// set can't grow unboundedly over a long session.
+    fn prune_completed(&mut self) {
+        let threshold = self.high_water_seq.saturating_sub(STALE_SEQ_WINDOW);
+        self.completed = self.completed.split_off(&threshold);
     }
 
     pub fn set_timeout(&mut self, d: Duration) {
@@ -74,6 +97,22 @@ impl FrameAssembler {
     pub fn feed(&mut self, pkt: VideoPacket, fec: &FecCodec) -> Result<FeedResult, TransportError> {
         // Drop stale frames (older than high_water - window).
         if pkt.frame_seq + STALE_SEQ_WINDOW < self.high_water_seq.saturating_add(1) {
+            return Ok(FeedResult::Stale);
+        }
+
+        // Drop chunks for a frame that has already been completed and
+        // emitted. Without this, a late parity chunk (or a duplicate
+        // source chunk) arriving after emission would re-create the
+        // `partials` entry via `entry().or_insert_with()` below and, for
+        // k=1 frames, complete and emit the same frame a second time —
+        // corrupting the decoder with a duplicate POC.
+        if self.completed.contains(&pkt.frame_seq) {
+            tracing::trace!(
+                target: "frame.trace",
+                "asm seq={} chunk_idx={} dropped: frame already completed",
+                pkt.frame_seq,
+                pkt.chunk_idx,
+            );
             return Ok(FeedResult::Stale);
         }
 
@@ -117,6 +156,8 @@ impl FrameAssembler {
                 Ok(Some(frame)) => {
                     self.high_water_seq = self.high_water_seq.max(seq);
                     self.partials.remove(&seq);
+                    self.completed.insert(seq);
+                    self.prune_completed();
                     return Ok(FeedResult::Complete(frame));
                 }
                 Ok(None) => return Ok(FeedResult::Pending),
@@ -323,5 +364,84 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
         let purged = asm.purge();
         assert_eq!(purged, vec![1]);
+    }
+
+    #[test]
+    fn late_parity_after_completion_is_not_reemitted() {
+        // 50 bytes at chunk_payload_len=1200 → k=1, m=1, total=2. Matches
+        // the field-observed shape (asm seq=6 k=1 m=1) that produced a
+        // duplicate POC: source chunk completes the frame, then a parity
+        // chunk for the same seq arrives late and must not re-emit it.
+        let fec = FecCodec::new(1, 1).unwrap();
+        let policy = FecPolicy::standard();
+        let frame = make_frame(6, &[0xEE; 50]);
+        let pkts = packetize(&frame, 1200, &policy).unwrap();
+        assert_eq!(pkts.len(), 2);
+        let mut asm = FrameAssembler::new(1920, 1080, Codec::H265);
+
+        let r1 = asm.feed(pkts[0].clone(), &fec).unwrap();
+        assert!(
+            matches!(r1, FeedResult::Complete(_)),
+            "source chunk should complete the frame, got {:?}",
+            r1
+        );
+
+        // Late parity chunk for the already-completed seq must be dropped,
+        // not re-complete/re-emit the frame.
+        let r2 = asm.feed(pkts[1].clone(), &fec).unwrap();
+        assert!(
+            !matches!(r2, FeedResult::Complete(_)),
+            "late parity after completion must not re-emit the frame, got {:?}",
+            r2
+        );
+    }
+
+    #[test]
+    fn late_duplicate_source_after_completion_is_dropped() {
+        // Same k=1, m=1 shape, but the duplicate is a re-delivered copy of
+        // the source chunk itself rather than parity (e.g. a network-level
+        // retransmit), which must be dropped identically.
+        let fec = FecCodec::new(1, 1).unwrap();
+        let policy = FecPolicy::standard();
+        let frame = make_frame(6, &[0xEE; 50]);
+        let pkts = packetize(&frame, 1200, &policy).unwrap();
+        let mut asm = FrameAssembler::new(1920, 1080, Codec::H265);
+
+        let r1 = asm.feed(pkts[0].clone(), &fec).unwrap();
+        assert!(matches!(r1, FeedResult::Complete(_)));
+
+        let r2 = asm.feed(pkts[0].clone(), &fec).unwrap();
+        assert!(
+            !matches!(r2, FeedResult::Complete(_)),
+            "duplicate source chunk after completion must not re-emit the frame, got {:?}",
+            r2
+        );
+    }
+
+    #[test]
+    fn completed_set_is_pruned() {
+        // Complete many far-apart seqs and confirm the completed-set
+        // doesn't grow unboundedly: it should stay within one
+        // STALE_SEQ_WINDOW's worth of entries of the current high-water mark.
+        let fec = FecCodec::new(1, 1).unwrap();
+        let policy = FecPolicy::standard();
+        let mut asm = FrameAssembler::new(1920, 1080, Codec::H265);
+
+        for seq in 0..200u64 {
+            let frame = make_frame(seq, &[0xAB; 50]);
+            let pkts = packetize(&frame, 1200, &policy).unwrap();
+            let r = asm.feed(pkts[0].clone(), &fec).unwrap();
+            assert!(
+                matches!(r, FeedResult::Complete(_)),
+                "seq {seq} should complete, got {:?}",
+                r
+            );
+        }
+
+        assert!(
+            asm.completed_len() <= STALE_SEQ_WINDOW as usize + 1,
+            "completed set should stay bounded to ~STALE_SEQ_WINDOW entries, got {}",
+            asm.completed_len()
+        );
     }
 }
