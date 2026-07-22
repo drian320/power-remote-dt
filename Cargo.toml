@@ -73,6 +73,9 @@ base64 = "0.22"
 stun_codec = "0.3"
 bytecodec = "0.4"
 
+# Local interface enumeration (host ICE candidate gathering on wildcard binds)
+if-addrs = "0.13"
+
 # TURN auth
 hmac = "0.12"
 sha1 = "0.10"
