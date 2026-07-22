@@ -392,6 +392,21 @@ impl CustomUdpTransport {
                             let _ = self
                                 .send_control_to(ControlMessage::ProbeAck { nonce }, from)
                                 .await;
+                            // Triggered-check commit (ICE-style): if `from` is a
+                            // candidate we are actively probing, receiving its Probe
+                            // — plus the ProbeAck we just sent back — is enough to
+                            // nominate it. Without this, whichever side gets its
+                            // ProbeAck first commits and leaves probe mode before
+                            // answering the peer's Probe, stranding the peer until
+                            // timeout: the peer then reaches its Noise handshake
+                            // while we never reach ours (observed as a viewer
+                            // "Noise handshake HandshakeTimeout" over a link where
+                            // the Probe round-trip already succeeded).
+                            if pending.values().any(|&a| a == from) {
+                                self.configure_peer(from).await;
+                                tracing::info!(peer = ?from, "probe winner (peer-probe triggered)");
+                                return Ok(from);
+                            }
                         }
                         ControlMessage::ProbeAck { nonce } => {
                             if pending.contains_key(&nonce) {
