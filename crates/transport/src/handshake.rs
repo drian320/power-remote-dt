@@ -54,7 +54,15 @@ pub trait AuthHook: Send + Sync {
 }
 
 pub const DEFAULT_HELLO_TIMEOUT: Duration = Duration::from_secs(3);
-pub const DEFAULT_HELLO_RETRIES: u8 = 3;
+/// Number of Hello (re)sends the viewer attempts before giving up.
+///
+/// Sized so the total patience budget — `DEFAULT_HELLO_TIMEOUT *
+/// DEFAULT_HELLO_RETRIES` = 3s × 22 = 66s — comfortably exceeds the host's
+/// default consent-dialog window (`consent_timeout_seconds`, 60s). For an
+/// unknown peer the host displays a consent prompt for up to 60s BEFORE it
+/// ever reads a Hello; a viewer that gave up sooner would time out while the
+/// host operator is still deciding, even though the connection is healthy.
+pub const DEFAULT_HELLO_RETRIES: u8 = 22;
 
 /// Wire-level protocol_version that this build of the codebase speaks.
 /// Bumped to 4 in P5B-2b for the CursorUpdate variant + cursor_mode=Metadata
@@ -193,6 +201,21 @@ pub struct HostHandshakeResult {
 /// Auth is delegated to `hook` — after codec/version checks pass, the hook
 /// receives the raw Hello and the peer's Noise pubkey and returns either
 /// `AuthDecision::Grant(perms)` or `AuthDecision::Reject { .. }`.
+///
+/// # Multi-round auth contract
+///
+/// A single call may span several Hello → HelloReject rounds over the SAME
+/// crypto session. The viewer auth flow is multi-round: the first Hello may
+/// carry no credential, the host answers `HelloReject(PinRequired)` (or
+/// `EphemeralRequired`), and the viewer resends a Hello carrying the PIN/token.
+/// When the hook returns `AuthDecision::Reject` with one of these
+/// *continuation* codes — `PinRequired`, `EphemeralRequired`, or `AuthFailed`
+/// — this function sends the HelloReject and loops back to await the viewer's
+/// next Hello **without** returning; the caller's session stays alive. Only
+/// *fatal* codes (`AuthLockout`, `ConsentDenied`, and anything else) end the
+/// call with `Err(TransportError::HelloRejected)`. The whole exchange, across
+/// all rounds, is bounded by `wait_timeout` — the timeout is not reset per
+/// round.
 #[allow(clippy::too_many_arguments)]
 pub async fn host_handshake<T: Transport, A: AuthHook, F>(
     transport: &T,
@@ -259,6 +282,27 @@ where
             // Delegate auth decision to the hook (after wire-level checks pass).
             let granted_permissions = match hook.evaluate(&hello, peer_pubkey_b64).await {
                 AuthDecision::Grant(perms) => perms,
+                // Continuation rejects: the viewer is expected to resend a Hello
+                // carrying the missing/corrected credential over the SAME crypto
+                // session. Send the HelloReject and loop back to await that next
+                // Hello without tearing the session down. A send failure here is
+                // fatal (the channel is gone), so propagate it as Err instead of
+                // swallowing it with `let _ =`.
+                AuthDecision::Reject {
+                    code:
+                        code @ (HelloRejectCode::PinRequired
+                        | HelloRejectCode::EphemeralRequired
+                        | HelloRejectCode::AuthFailed),
+                    reason,
+                } => {
+                    transport
+                        .send_control(ControlMessage::HelloReject { reason, code })
+                        .await?;
+                    continue;
+                }
+                // Fatal rejects (AuthLockout, ConsentDenied, and anything else):
+                // no viewer action recovers this session, so send the reject
+                // best-effort and tear the session down with an error.
                 AuthDecision::Reject { code, reason } => {
                     let _ = transport
                         .send_control(ControlMessage::HelloReject {
@@ -556,14 +600,17 @@ mod tests {
 
     #[tokio::test]
     async fn auth_hook_reject_is_surfaced_as_hello_rejected() {
-        /// Hook that always rejects with AuthFailed.
+        /// Hook that always rejects with a *fatal* code (ConsentDenied). Note:
+        /// AuthFailed / PinRequired / EphemeralRequired are now *continuation*
+        /// codes that keep the session alive for a retry Hello, so a fatal code
+        /// is required to exercise the "reject surfaces as HelloRejected" path.
         struct RejectAllHook;
         #[async_trait::async_trait]
         impl AuthHook for RejectAllHook {
             async fn evaluate(&self, _hello: &ControlMessage, _peer: &str) -> AuthDecision {
                 AuthDecision::Reject {
-                    code: HelloRejectCode::AuthFailed,
-                    reason: "auth failed in test".into(),
+                    code: HelloRejectCode::ConsentDenied,
+                    reason: "consent denied in test".into(),
                 }
             }
         }
@@ -616,5 +663,186 @@ mod tests {
             .await
             .ok()
             .and_then(|r| r.ok())
+    }
+
+    /// Receive the next `ControlMessage`, skipping any non-control frames.
+    /// Returns `None` if nothing arrives within the recv timeout.
+    async fn recv_control<T: Transport>(t: &T) -> Option<ControlMessage> {
+        loop {
+            match transport_trait_recv_one(t).await {
+                Some(ReceivedMessage::Control(m)) => return Some(m),
+                Some(_) => continue,
+                None => return None,
+            }
+        }
+    }
+
+    /// Regression test for the multi-round PIN contract: a viewer sends a Hello
+    /// with no PIN, the host replies HelloReject(PinRequired), and the viewer
+    /// resends a Hello carrying the PIN over the SAME session. A SINGLE
+    /// `host_handshake` call must survive the continuation reject and return Ok
+    /// — proving the session is not torn down between rounds.
+    #[tokio::test]
+    async fn pin_required_then_with_pin_succeeds() {
+        /// Grants only Hellos whose `auth_payload` equals the expected PIN;
+        /// otherwise rejects with the continuation code `PinRequired`.
+        struct PinGateHook {
+            expected_pin: Vec<u8>,
+        }
+        #[async_trait::async_trait]
+        impl AuthHook for PinGateHook {
+            async fn evaluate(&self, hello: &ControlMessage, _peer: &str) -> AuthDecision {
+                let payload = match hello {
+                    ControlMessage::Hello { auth_payload, .. } => auth_payload.as_slice(),
+                    _ => &[],
+                };
+                if payload == self.expected_pin.as_slice() {
+                    AuthDecision::Grant(PermissionSet::all())
+                } else {
+                    AuthDecision::Reject {
+                        code: HelloRejectCode::PinRequired,
+                        reason: "host is in PIN mode; viewer must set auth_method=Pin".into(),
+                    }
+                }
+            }
+        }
+
+        let (viewer, host) = InProcTransport::pair(LoopbackOptions::default());
+        let hook = PinGateHook {
+            expected_pin: b"1234".to_vec(),
+        };
+
+        let host_task = tokio::spawn(async move {
+            host_handshake(
+                &host,
+                &hook,
+                "peer-pin",
+                0x5151,
+                0,
+                10_000_000,
+                MonitorRect::new(0, 0, 1920, 1080),
+                MonitorRect::new(0, 0, 1920, 1080),
+                &[Codec::H265],
+                |_| vec![Codec::H265],
+                Duration::from_secs(2),
+            )
+            .await
+        });
+
+        let viewer_task = tokio::spawn(async move {
+            // Round 1: Hello with no PIN → expect HelloReject(PinRequired).
+            let no_pin = ControlMessage::Hello {
+                protocol_version: HELLO_PROTOCOL_VERSION,
+                req_width: 1920,
+                req_height: 1080,
+                req_fps: 60,
+                codec: Codec::H265,
+                auth_method: AuthMethod::Tofu,
+                auth_payload: vec![],
+            };
+            viewer.send_control(no_pin).await.unwrap();
+            let reject = recv_control(&viewer).await;
+            assert!(
+                matches!(
+                    reject,
+                    Some(ControlMessage::HelloReject {
+                        code: HelloRejectCode::PinRequired,
+                        ..
+                    })
+                ),
+                "expected HelloReject(PinRequired), got {reject:?}"
+            );
+
+            // Round 2: resend Hello carrying the PIN over the SAME session.
+            let with_pin = ControlMessage::Hello {
+                protocol_version: HELLO_PROTOCOL_VERSION,
+                req_width: 1920,
+                req_height: 1080,
+                req_fps: 60,
+                codec: Codec::H265,
+                auth_method: AuthMethod::Pin,
+                auth_payload: b"1234".to_vec(),
+            };
+            viewer.send_control(with_pin).await.unwrap();
+            let ack = recv_control(&viewer).await;
+            assert!(
+                matches!(ack, Some(ControlMessage::HelloAck { .. })),
+                "expected HelloAck after PIN, got {ack:?}"
+            );
+        });
+
+        let (h, v) = tokio::join!(host_task, viewer_task);
+        v.unwrap();
+        // The single host_handshake call returned Ok despite the earlier reject.
+        let result = h.unwrap().unwrap();
+        assert_eq!(result.granted_permissions, PermissionSet::all());
+        assert_eq!(result.req.codec, Codec::H265);
+    }
+
+    /// A fatal reject (`AuthLockout`) must end the single `host_handshake` call
+    /// with Err, and the viewer must receive a HelloReject carrying that code.
+    #[tokio::test]
+    async fn lockout_reject_is_fatal() {
+        struct LockoutHook;
+        #[async_trait::async_trait]
+        impl AuthHook for LockoutHook {
+            async fn evaluate(&self, _hello: &ControlMessage, _peer: &str) -> AuthDecision {
+                AuthDecision::Reject {
+                    code: HelloRejectCode::AuthLockout,
+                    reason: "too many attempts; locked out".into(),
+                }
+            }
+        }
+
+        let (viewer, host) = InProcTransport::pair(LoopbackOptions::default());
+
+        let host_task = tokio::spawn(async move {
+            host_handshake(
+                &host,
+                &LockoutHook,
+                "peer-lock",
+                0x6262,
+                0,
+                10_000_000,
+                MonitorRect::new(0, 0, 1920, 1080),
+                MonitorRect::new(0, 0, 1920, 1080),
+                &[Codec::H265],
+                |_| vec![Codec::H265],
+                Duration::from_secs(2),
+            )
+            .await
+        });
+
+        let viewer_task = tokio::spawn(async move {
+            let hello = ControlMessage::Hello {
+                protocol_version: HELLO_PROTOCOL_VERSION,
+                req_width: 1920,
+                req_height: 1080,
+                req_fps: 60,
+                codec: Codec::H265,
+                auth_method: AuthMethod::Pin,
+                auth_payload: b"9999".to_vec(),
+            };
+            viewer.send_control(hello).await.unwrap();
+            recv_control(&viewer).await
+        });
+
+        let (h, v) = tokio::join!(host_task, viewer_task);
+        let h_err = h.unwrap().unwrap_err();
+        assert!(
+            matches!(h_err, TransportError::HelloRejected(_)),
+            "expected HelloRejected, got {h_err:?}"
+        );
+        let reject = v.unwrap();
+        assert!(
+            matches!(
+                reject,
+                Some(ControlMessage::HelloReject {
+                    code: HelloRejectCode::AuthLockout,
+                    ..
+                })
+            ),
+            "expected HelloReject(AuthLockout), got {reject:?}"
+        );
     }
 }

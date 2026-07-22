@@ -50,7 +50,7 @@
 #   --peer-addr <ip:port>   viewer mode: remote host's address
 #   --peer-pubkey <b64>     viewer mode: remote host's pubkey
 #   --host-id <id>          TODO(signaling): Task #2 ID/PIN provisioning path
-#   --pin <pin>             PIN auth (host and/or viewer)
+#   --pin <pin>             viewer-side PIN only; host PIN via --host-auth-file (mode=Pin)
 #   --signaling-url <url>   TODO(signaling): Task #2 ID/PIN provisioning path
 #   --encoder <name>        host --encoder, default auto
 #   --decoder <name>        viewer --decoder, default auto
@@ -225,7 +225,8 @@ loopback)
         --host-auth-file "$OUT_DIR/host-auth.toml"
         --host-peers-file "$OUT_DIR/host-peers.toml")
     [[ "$SILENT_ALLOW" -eq 1 ]] && HOST_ARGS+=(--silent-allow)
-    [[ -n "$PIN" ]] && HOST_ARGS+=(--pin "$PIN")
+    # Host-side PIN comes from --host-auth-file (mode = "Pin"), not --pin;
+    # PIN-mode e2e coverage lives in the Rust transport tests.
 
     echo "Starting host: $BIND_ADDR"
     "$PRDT" "${HOST_ARGS[@]}" >"$HOST_LOG" 2>"$HOST_LOG.err" &
@@ -287,7 +288,7 @@ host)
         --host-auth-file "$OUT_DIR/host-auth.toml"
         --host-peers-file "$OUT_DIR/host-peers.toml")
     [[ "$SILENT_ALLOW" -eq 1 ]] && HOST_ARGS+=(--silent-allow)
-    [[ -n "$PIN" ]] && HOST_ARGS+=(--pin "$PIN")
+    # Host-side PIN comes from --host-auth-file (mode = "Pin"), not --pin.
     if [[ -n "$SIGNALING_URL" ]]; then
         # TODO(signaling): Task #2 ID/PIN provisioning path -- lets the host
         # register under --host-id instead of requiring a manually-shared

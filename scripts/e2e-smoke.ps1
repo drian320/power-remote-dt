@@ -67,8 +67,11 @@
   exercised by this harness.
 
 .PARAMETER Pin
-  PIN to supply for host-side PIN auth (--pin). Also used by the
-  TODO(signaling) ID/PIN path once available.
+  Viewer-side PIN only, passed through to the viewer's --pin. The host CLI no
+  longer accepts --pin: host-side PIN auth is configured via the file passed to
+  --host-auth-file (with mode = "Pin"). End-to-end PIN-mode coverage lives in
+  the Rust transport tests, not this harness. Also used by the TODO(signaling)
+  ID/PIN path once available.
 
 .PARAMETER SignalingUrl
   TODO(signaling): --signaling-url passthrough for host/viewer modes, for
@@ -280,7 +283,7 @@ switch ($Mode) {
             "--host-peers-file", (Join-Path $OutDir "host-peers.toml")
         )
         if ($SilentAllow) { $hostArgs += "--silent-allow" }
-        if ($Pin) { $hostArgs += @("--pin", $Pin) }
+        # Host-side PIN comes from --host-auth-file (mode = "Pin"), not --pin.
 
         Write-Host "Starting host: $bindAddr"
         $hostProc = Start-Process -FilePath $prdt -ArgumentList $hostArgs `
@@ -351,7 +354,7 @@ switch ($Mode) {
             "--host-peers-file", (Join-Path $OutDir "host-peers.toml")
         )
         if ($SilentAllow) { $hostArgs += "--silent-allow" }
-        if ($Pin) { $hostArgs += @("--pin", $Pin) }
+        # Host-side PIN comes from --host-auth-file (mode = "Pin"), not --pin.
         if ($SignalingUrl) {
             # TODO(signaling): once Task #2's ID/PIN provisioning ships, this
             # lets the host register with a signaling server under --host-id

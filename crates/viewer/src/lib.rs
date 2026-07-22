@@ -1526,7 +1526,16 @@ where
                 transport.send_hello(hello).await?;
                 match tokio::time::timeout(attempt_timeout, transport.recv_response()).await {
                     Ok(r) => break 'retry r?,
-                    Err(_timeout) => continue, // resend Hello
+                    Err(_timeout) => {
+                        // One low-noise line per resend. The host may still be
+                        // showing its consent dialog for an unknown peer (up to
+                        // consent_timeout_seconds, default 60s) before it reads
+                        // any Hello, so a silent timeout here is expected early on.
+                        tracing::info!(
+                            "no HelloAck yet; retrying (host may be waiting on its consent dialog)"
+                        );
+                        continue; // resend Hello
+                    }
                 }
             }
             return Err(AuthLoopError::Timeout);
