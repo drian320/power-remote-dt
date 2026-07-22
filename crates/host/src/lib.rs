@@ -1309,6 +1309,14 @@ pub async fn run_host(
                                 let nal_len = frame.nal_units.len();
                                 let is_kf = frame.is_keyframe;
                                 let bytes_in_frame = frame.nal_units.len() as u64;
+                                if prdt_protocol::frame_trace::enabled() {
+                                    let seq = frame.seq;
+                                    let fnv = prdt_protocol::frame_trace::fnv1a64(&frame.nal_units);
+                                    info!(
+                                        target: "frame.trace",
+                                        "tx seq={seq} len={nal_len} kf={is_kf} fnv={fnv:016x}"
+                                    );
+                                }
                                 if let Err(e) = tx_video.send_video(frame).await {
                                     send_errors += 1;
                                     warn!(?e, nal_len, is_kf, "send_video error; continuing");

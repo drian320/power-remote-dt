@@ -179,6 +179,15 @@ impl FrameAssembler {
             buf.extend_from_slice(&shard[..valid]);
         }
 
+        if prdt_protocol::frame_trace::enabled() {
+            let m = entry.parity_chunks as usize;
+            let fnv = prdt_protocol::frame_trace::fnv1a64(&buf);
+            tracing::info!(
+                target: "frame.trace",
+                "asm seq={seq} k={k} m={m} reconstructed={missing_source} len={total_bytes} fnv={fnv:016x}"
+            );
+        }
+
         let _ = entry.parity_chunks; // silence unused-field lint if ever triggered
 
         Ok(Some(EncodedFrame {

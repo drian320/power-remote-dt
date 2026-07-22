@@ -565,6 +565,10 @@ fn submit_ffmpeg_hevc_packet<B>(
 ) where
     B: prdt_media_linux::HevcDecoderBackend,
 {
+    if prdt_protocol::frame_trace::enabled() {
+        let fnv = prdt_protocol::frame_trace::fnv1a64(&frame.nal_units);
+        info!(target: "frame.trace", "feed seq={seq} len={nal_len} fnv={fnv:016x}");
+    }
     if let Err(e) = decoder.feed_packet(&frame.nal_units, host_ts_us) {
         warn!(error = %e, seq, is_kf, nal_len, "linux ffmpeg hevc feed_packet failed");
         idr_req.mark();
@@ -619,6 +623,10 @@ fn submit_ffmpeg_hevc_main10_packet<B>(
 ) where
     B: prdt_media_linux::HevcDecoderBackend10,
 {
+    if prdt_protocol::frame_trace::enabled() {
+        let fnv = prdt_protocol::frame_trace::fnv1a64(&frame.nal_units);
+        info!(target: "frame.trace", "feed seq={seq} len={nal_len} fnv={fnv:016x}");
+    }
     if let Err(e) = decoder.feed_packet(&frame.nal_units, host_ts_us) {
         warn!(error = %e, seq, is_kf, nal_len, "linux ffmpeg hevc-main10 feed_packet failed");
         idr_req.mark();

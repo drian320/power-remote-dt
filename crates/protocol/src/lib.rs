@@ -5,6 +5,7 @@ pub mod clock;
 pub mod control;
 pub mod error;
 pub mod frame;
+pub mod frame_trace;
 pub mod input;
 pub mod video_pipeline;
 pub mod wire;
