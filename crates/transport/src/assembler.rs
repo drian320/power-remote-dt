@@ -42,6 +42,18 @@ pub struct FrameAssembler {
     /// Pruned on every completion to entries within `STALE_SEQ_WINDOW` of
     /// `high_water_seq`, so it stays bounded.
     completed: BTreeSet<u64>,
+    /// Cumulative count of frames that were *entirely* lost — every chunk of
+    /// the frame was dropped, so no `Partial` was ever created and the purge
+    /// path never saw them. Such a frame is invisible to purge-based loss
+    /// detection; it shows up only as a hole in the completed-seq sequence.
+    /// Drained (and reset) by `take_wholesale_gaps`. See the completion path
+    /// in `feed` for the counting invariant that avoids double-counting
+    /// against the purge and stale-drop flows.
+    wholesale_gaps: u64,
+    /// Whether at least one frame has completed. The first completion only
+    /// anchors the wholesale-gap baseline: a viewer joining an in-progress
+    /// stream must not retro-count every seq that preceded it as a gap.
+    saw_first_completion: bool,
     timeout: Duration,
     width: u32,
     height: u32,
@@ -66,6 +78,8 @@ impl FrameAssembler {
             partials: HashMap::new(),
             high_water_seq: 0,
             completed: BTreeSet::new(),
+            wholesale_gaps: 0,
+            saw_first_completion: false,
             timeout: DEFAULT_ASSEMBLY_TIMEOUT,
             width,
             height,
@@ -90,6 +104,15 @@ impl FrameAssembler {
 
     pub fn set_timeout(&mut self, d: Duration) {
         self.timeout = d;
+    }
+
+    /// Return and reset the count of wholesale-lost frames observed since the
+    /// last call — frames that were entirely lost (no chunk arrived, so no
+    /// partial ever purged). The viewer's adaptive-bitrate tick folds this
+    /// into its per-window loss so that wholesale loss, not just partial-frame
+    /// purges, drives the controller.
+    pub fn take_wholesale_gaps(&mut self) -> u64 {
+        std::mem::take(&mut self.wholesale_gaps)
     }
 
     /// Feed one VideoPacket. `fec` is used for reconstruction if enough
@@ -154,6 +177,33 @@ impl FrameAssembler {
             let maybe_frame = self.try_complete(seq, total, shard_len, ts, frame_is_kf, fec);
             match maybe_frame {
                 Ok(Some(frame)) => {
+                    // Wholesale-gap detection. As the high-water mark advances
+                    // from its previous value to `seq`, every intermediate seq
+                    // is a frame we should have seen. Classify each one:
+                    //   * still pending as a `Partial` → skip; it will time out
+                    //     and be reported by `purge`, which owns that loss (so
+                    //     counting it here would double-count).
+                    //   * already in `completed` → skip; it arrived out of order.
+                    //   * otherwise → no chunk of it ever arrived: a wholesale
+                    //     gap.
+                    // Seqs an earlier `purge` skipped already sit at/below the
+                    // high-water mark, so they fall outside this exclusive
+                    // (prev_high_water, seq) range and are never revisited —
+                    // no double count with purge. The high-water mark only
+                    // moves forward, so a given seq falls in exactly one such
+                    // range and is counted at most once. The first completion
+                    // merely anchors the baseline (mid-stream join guard).
+                    let prev_high_water = self.high_water_seq;
+                    if self.saw_first_completion && seq > prev_high_water.saturating_add(1) {
+                        for gap_seq in (prev_high_water + 1)..seq {
+                            if !self.partials.contains_key(&gap_seq)
+                                && !self.completed.contains(&gap_seq)
+                            {
+                                self.wholesale_gaps = self.wholesale_gaps.saturating_add(1);
+                            }
+                        }
+                    }
+                    self.saw_first_completion = true;
                     self.high_water_seq = self.high_water_seq.max(seq);
                     self.partials.remove(&seq);
                     self.completed.insert(seq);
@@ -415,6 +465,92 @@ mod tests {
             !matches!(r2, FeedResult::Complete(_)),
             "duplicate source chunk after completion must not re-emit the frame, got {:?}",
             r2
+        );
+    }
+
+    #[test]
+    fn wholesale_gap_counts_never_seen_seqs() {
+        // Complete seq 0 (baseline), then seq 3 while seqs 1 and 2 were never
+        // seen at all → 2 wholesale gaps. take_wholesale_gaps resets the count.
+        let fec = FecCodec::new(1, 2).unwrap();
+        let policy = FecPolicy::standard();
+        let mut asm = FrameAssembler::new(1920, 1080, Codec::H265);
+
+        let f0 = make_frame(0, &[0xAA; 50]);
+        let p0 = packetize(&f0, 1200, &policy).unwrap();
+        assert!(matches!(
+            asm.feed(p0[0].clone(), &fec).unwrap(),
+            FeedResult::Complete(_)
+        ));
+        // Baseline established; no gaps counted for the first completion.
+        assert_eq!(asm.take_wholesale_gaps(), 0);
+
+        let f3 = make_frame(3, &[0xBB; 50]);
+        let p3 = packetize(&f3, 1200, &policy).unwrap();
+        assert!(matches!(
+            asm.feed(p3[0].clone(), &fec).unwrap(),
+            FeedResult::Complete(_)
+        ));
+        // seqs 1 and 2 never arrived → 2 wholesale gaps.
+        assert_eq!(asm.take_wholesale_gaps(), 2);
+        // Draining resets the counter.
+        assert_eq!(asm.take_wholesale_gaps(), 0);
+    }
+
+    #[test]
+    fn partial_then_purged_seq_is_not_counted_as_wholesale_gap() {
+        // seq 1 arrives as an incomplete partial (1 of 2 source chunks), so it
+        // never completes and will purge. When seq 2 completes and high-water
+        // passes seq 1, seq 1 must NOT be counted as a wholesale gap — the
+        // purge path owns that loss and reports it separately.
+        let fec = FecCodec::new(2, 2).unwrap();
+        let policy = FecPolicy::strict_small();
+        let mut asm = FrameAssembler::new(1920, 1080, Codec::H265);
+        asm.set_timeout(Duration::from_millis(1));
+
+        // seq 0: complete (feed both source chunks) → anchors the baseline.
+        let f0 = make_frame(0, &[0x11; 200]);
+        let p0 = packetize(&f0, 100, &policy).unwrap();
+        let mut done0 = false;
+        for p in p0.into_iter().take(2) {
+            if matches!(asm.feed(p, &fec).unwrap(), FeedResult::Complete(_)) {
+                done0 = true;
+            }
+        }
+        assert!(done0, "seq 0 should complete");
+
+        // seq 1: only one of two source chunks → stays a pending partial.
+        let f1 = make_frame(1, &[0x22; 200]);
+        let p1 = packetize(&f1, 100, &policy).unwrap();
+        assert!(matches!(
+            asm.feed(p1[0].clone(), &fec).unwrap(),
+            FeedResult::Pending
+        ));
+
+        // seq 2: completes while seq 1 is still a pending partial.
+        let f2 = make_frame(2, &[0x33; 200]);
+        let p2 = packetize(&f2, 100, &policy).unwrap();
+        let mut done2 = false;
+        for p in p2.into_iter().take(2) {
+            if matches!(asm.feed(p, &fec).unwrap(), FeedResult::Complete(_)) {
+                done2 = true;
+            }
+        }
+        assert!(done2, "seq 2 should complete");
+        assert_eq!(
+            asm.take_wholesale_gaps(),
+            0,
+            "pending partial owned by purge, not a wholesale gap"
+        );
+
+        // seq 1 now times out and is purged; purge reports the loss.
+        std::thread::sleep(Duration::from_millis(5));
+        let purged = asm.purge();
+        assert_eq!(purged, vec![1]);
+        assert_eq!(
+            asm.take_wholesale_gaps(),
+            0,
+            "purge must not add a wholesale gap"
         );
     }
 

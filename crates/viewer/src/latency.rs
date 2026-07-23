@@ -1,12 +1,21 @@
 //! Per-frame M1 latency instrumentation for the viewer.
 //!
 //! Records timestamped events for each frame and emits periodic p50/p95/p99
-//! reports. The timestamps all come from `prdt_protocol::now_monotonic_us`
-//! so host-produced and viewer-side events share an epoch on in-process
-//! loopback (the M2 scenario). On cross-machine runs the deltas still
-//! measure viewer-internal stages (recv → decode → present) accurately; the
-//! `host_to_*` deltas need a Ping/Pong clock-offset correction that's not
-//! yet applied here (deferred to Plan 4 M3).
+//! reports. All timestamps come from `prdt_protocol::now_monotonic_us`, which
+//! is a *per-process* monotonic epoch.
+//!
+//! The `decode` and `present` stages are measured viewer-locally: from the
+//! frame's own `recv_us` (recv → decode, recv → present). These are correct
+//! regardless of clock sync and are always non-zero once the pipeline runs.
+//!
+//! The `arrival` stage (`recv_us - host_ts_us`) is the one cross-clock delta.
+//! On in-process loopback (the M2 scenario) the host and viewer share one
+//! epoch, so it is accurate. On a cross-machine session the host's capture
+//! epoch is unrelated to the viewer's — and because the host process has
+//! usually been alive longer, `host_ts_us` exceeds the viewer's `now`, so the
+//! subtraction saturates to 0. Turning `arrival` (and a true host_capture →
+//! present glass-to-glass delta) into wall-clock numbers needs the Ping/Pong
+//! clock-offset correction deferred to Plan 4 M3.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
@@ -20,20 +29,22 @@ const SAMPLE_WINDOW: usize = 240;
 struct Inner {
     /// Per-frame record of stage timestamps, keyed by frame_seq.
     frames: HashMap<u64, FrameStages>,
-    /// Rolling `recv_us - host_ts_us` samples.
+    /// Rolling `recv_us - host_ts_us` samples (cross-clock; accurate only when
+    /// host and viewer share an epoch, i.e. in-process loopback — see module
+    /// docs). Saturates to 0 across machines until M3 clock-offset correction.
     arrival_lag_samples: VecDeque<u64>,
-    /// Rolling `decode_done_us - host_ts_us` samples.
+    /// Rolling `decode_done_us - recv_us` samples (viewer-local recv → decode).
     decode_done_samples: VecDeque<u64>,
-    /// Rolling `present_us - host_ts_us` samples (glass-to-glass if clocks
-    /// share an epoch).
+    /// Rolling `present_us - recv_us` samples (viewer-local recv → present).
     present_samples: VecDeque<u64>,
 }
 
 #[derive(Default, Clone, Copy)]
 struct FrameStages {
     host_ts_us: u64,
-    #[allow(dead_code)]
     recv_us: Option<u64>,
+    /// Written for completeness/debugging; the decode latency is derived from
+    /// `recv_us` at record time, so this field itself is not read back.
     #[allow(dead_code)]
     decode_done_us: Option<u64>,
 }
@@ -69,7 +80,7 @@ impl LatencyProbe {
         push_capped(&mut g.arrival_lag_samples, lag, SAMPLE_WINDOW);
     }
 
-    /// Record that the MF decoder produced a texture for frame `seq`.
+    /// Record that the decoder produced a texture for frame `seq`.
     pub fn record_decoded(&self, seq: u64) {
         let now = now_monotonic_us();
         let mut g = self.inner.lock().unwrap();
@@ -77,7 +88,16 @@ impl LatencyProbe {
             return;
         };
         stages.decode_done_us = Some(now);
-        let lag = now.saturating_sub(stages.host_ts_us);
+        // Measure decode latency on the viewer's OWN clock (recv → decode),
+        // not against `host_ts_us`. The host capture timestamp lives on the
+        // host process's monotonic epoch; on a cross-machine session that
+        // epoch is unrelated to the viewer's, and (because the host process
+        // has usually been alive far longer) `host_ts_us` exceeds the
+        // viewer's `now`, so `now - host_ts_us` saturates to 0. Anchoring at
+        // `recv_us` yields a real, non-zero viewer-local latency regardless
+        // of clock sync.
+        let recv_us = stages.recv_us;
+        let lag = recv_us.map(|r| now.saturating_sub(r)).unwrap_or(0);
         push_capped(&mut g.decode_done_samples, lag, SAMPLE_WINDOW);
     }
 
@@ -89,8 +109,22 @@ impl LatencyProbe {
         }
         let now = now_monotonic_us();
         let mut g = self.inner.lock().unwrap();
-        let lag = now.saturating_sub(host_ts_us);
-        push_capped(&mut g.present_samples, lag, SAMPLE_WINDOW);
+        // Measure present latency on the viewer's OWN clock (recv → present).
+        // The render thread only knows the frame by its host capture stamp, so
+        // join back to the frame's `recv_us` via `host_ts_us`. Subtracting the
+        // host stamp directly would saturate to 0 across machines (see
+        // `record_decoded`); anchoring at `recv_us` gives a real viewer-local
+        // number. The full glass-to-glass (host_capture → present) delta needs
+        // the Ping/Pong clock-offset correction deferred to Plan 4 M3.
+        let recv_us = g
+            .frames
+            .values()
+            .find(|s| s.host_ts_us == host_ts_us)
+            .and_then(|s| s.recv_us);
+        if let Some(recv_us) = recv_us {
+            let lag = now.saturating_sub(recv_us);
+            push_capped(&mut g.present_samples, lag, SAMPLE_WINDOW);
+        }
         // Drop any entries whose host_ts is older than the one we just
         // presented — they're past-and-done.
         g.frames.retain(|_, s| s.host_ts_us > host_ts_us);
@@ -210,5 +244,39 @@ mod tests {
         let probe = LatencyProbe::new();
         probe.record_decoded(999); // no record_recv for seq 999
         assert!(probe.snapshot().decode_done.is_none());
+    }
+
+    #[test]
+    fn viewer_local_stages_nonzero_despite_unsynced_host_clock() {
+        // Regression: field logs showed present/decode percentiles all 0µs
+        // because the stages were measured against `host_ts_us`, which on a
+        // cross-machine session sits on the host process's epoch and (the host
+        // having run longer) exceeds the viewer's `now`, saturating every
+        // delta to 0. Simulate that skew with a host stamp far in the future
+        // and confirm the recv-anchored decode/present stages are non-zero.
+        let probe = LatencyProbe::new();
+        let host_ts = now_monotonic_us().saturating_add(10_000_000); // 10s ahead
+        probe.record_recv(7, host_ts);
+        // Real viewer-local time must elapse before decode + present.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        probe.record_decoded(7);
+        probe.record_present_for_host_ts(host_ts);
+
+        let snap = probe.snapshot();
+        let d = snap.decode_done.expect("decode sample recorded");
+        let p = snap.present.expect("present sample recorded");
+        assert!(
+            d.p50_us > 0,
+            "decode latency must be viewer-local non-zero, got {}",
+            d.p50_us
+        );
+        assert!(
+            p.p50_us > 0,
+            "present latency must be viewer-local non-zero, got {}",
+            p.p50_us
+        );
+        // The cross-clock arrival stage still saturates to 0 under this skew
+        // (documented; needs M3 clock-offset correction).
+        assert_eq!(snap.arrival.map(|s| s.p50_us), Some(0));
     }
 }

@@ -143,6 +143,29 @@ mod tests {
     }
 
     #[test]
+    fn wholesale_gap_loss_triggers_multiplicative_decrease() {
+        // Mirror the viewer tick's loss accounting after wiring wholesale
+        // gaps in: a gap frame existed but was entirely lost, so it counts
+        // toward BOTH the lost and the total frame counts for the window.
+        // 88 frames received + 12 wholesale gaps (0 purges) = 12% loss, which
+        // is above loss_high (2%) and must trigger a multiplicative decrease.
+        // Before the gap counter was wired in, wholesale loss produced no
+        // purge, so `lost` was 0 and the controller never reacted.
+        let mut c = BitrateController::new(cfg_max(10_000_000));
+        let received = 88u64;
+        let gaps = 12u64;
+        let purges = 0u64;
+        let lost = purges + gaps;
+        let total = received + lost;
+        c.observe(lost, total);
+        c.aimd_step(Instant::now());
+        let bps = c.target_bps();
+        assert!(bps < 10_000_000, "gap loss must trigger MD, got {bps}");
+        // 10M * 0.7 = 7M; allow off-by-one for f32 rounding.
+        assert!((bps as i64 - 7_000_000).abs() <= 1, "got {bps}");
+    }
+
+    #[test]
     fn aimd_hold_in_band() {
         let mut c = BitrateController::new(cfg_max(10_000_000));
         c.observe(15, 1000); // 1.5%, between low (0.5%) and high (2%)

@@ -137,13 +137,36 @@ pub struct CustomUdpTransport {
 /// sized to absorb several seconds of 30Mbps video on top of the IDR while
 /// the consumer warms up; OS will silently clamp if `net.ipv4.udp_rmem_max`
 /// (Linux) / per-socket maximum (Windows) is smaller, which is fine.
-const UDP_RCVBUF_TARGET: usize = 4 * 1024 * 1024;
+const UDP_RCVBUF_TARGET: usize = 8 * 1024 * 1024;
+const UDP_SNDBUF_TARGET: usize = 8 * 1024 * 1024;
 
-/// Build a tokio `UdpSocket` whose underlying file descriptor has SO_RCVBUF
-/// set to [`UDP_RCVBUF_TARGET`]. Returns `Err` if the OS rejects the bind;
-/// SO_RCVBUF setting is best-effort — failures are logged and ignored, since
-/// the socket is still functional with the default size.
-fn bind_with_rcvbuf(addr: SocketAddr) -> std::io::Result<UdpSocket> {
+/// Sender pacing stripe: number of packets sent back-to-back before inserting
+/// a [`PACE_GAP`] pause. A scene-change keyframe packetizes into ~190 UDP
+/// datagrams; blasting them all at once overruns the receiver's socket buffer
+/// and intermediate switch queues, dropping tail chunks so the frame never
+/// reassembles. Spreading a 190-packet frame across ~6 stripes (~3 ms total)
+/// is negligible added latency but far kinder to those buffers. Frames of this
+/// many packets or fewer are sent without any pacing.
+const PACE_STRIPE_PKTS: usize = 32;
+/// Pause inserted between successive [`PACE_STRIPE_PKTS`]-packet stripes.
+const PACE_GAP: std::time::Duration = std::time::Duration::from_micros(500);
+
+/// Build a tokio `UdpSocket` whose underlying socket has SO_RCVBUF and
+/// SO_SNDBUF raised to [`UDP_RCVBUF_TARGET`] / [`UDP_SNDBUF_TARGET`].
+///
+/// A scene-change keyframe packetizes into ~190 UDP datagrams (100-230 KB)
+/// sent back-to-back. The platform-default receive buffer (~212 KB on Linux)
+/// overflows before the viewer's recv loop drains it, so tail chunks are
+/// dropped in the kernel and the frame never reassembles (a visible noise
+/// burst until the next IDR). A larger receive buffer absorbs the burst; the
+/// matching send buffer smooths bursty transmits.
+///
+/// Buffer sizing is best-effort — failures are logged and ignored, since the
+/// socket still works at the default size. Applies to the direct-socket path
+/// only; the TURN relay path ([`CustomUdpTransport::bind_with_relay`]) uses
+/// its own socket and is unaffected. Returns `Err` only if the OS rejects the
+/// socket creation or bind.
+fn bind_with_socket_buffers(addr: SocketAddr) -> std::io::Result<UdpSocket> {
     use socket2::{Domain, Protocol, Socket as Sock2, Type};
     let domain = if addr.is_ipv6() {
         Domain::IPV6
@@ -159,14 +182,32 @@ fn bind_with_rcvbuf(addr: SocketAddr) -> std::io::Result<UdpSocket> {
             "set_recv_buffer_size failed; using default"
         );
     }
+    if let Err(e) = sock.set_send_buffer_size(UDP_SNDBUF_TARGET) {
+        tracing::warn!(
+            ?e,
+            target = UDP_SNDBUF_TARGET,
+            "set_send_buffer_size failed; using default"
+        );
+    }
     sock.bind(&addr.into())?;
+    // Read the sizes back: the kernel may clamp to a system max or (on Linux)
+    // double the requested value, so log what is actually in effect.
+    let effective_rcvbuf = sock.recv_buffer_size().unwrap_or(0);
+    let effective_sndbuf = sock.send_buffer_size().unwrap_or(0);
+    tracing::debug!(
+        requested_rcvbuf = UDP_RCVBUF_TARGET,
+        requested_sndbuf = UDP_SNDBUF_TARGET,
+        effective_rcvbuf,
+        effective_sndbuf,
+        "udp socket buffers sized"
+    );
     let std_sock: std::net::UdpSocket = sock.into();
     UdpSocket::from_std(std_sock)
 }
 
 impl CustomUdpTransport {
     pub async fn bind(addr: SocketAddr, cfg: UdpTransportConfig) -> Result<Self, TransportError> {
-        let socket = Socket::Direct(Arc::new(bind_with_rcvbuf(addr)?));
+        let socket = Socket::Direct(Arc::new(bind_with_socket_buffers(addr)?));
         Ok(Self {
             socket,
             cfg,
@@ -791,13 +832,31 @@ impl CustomUdpTransport {
         let mut asm = self.assembler.lock().await;
         asm.purge()
     }
+
+    /// Drain and reset the assembler's wholesale-lost-frame counter — frames
+    /// that were entirely lost (every chunk dropped, so no partial ever
+    /// existed to purge). The viewer's adaptive-bitrate tick folds this into
+    /// its per-window loss so wholesale loss, not just partial-frame purges,
+    /// drives the controller.
+    pub async fn take_wholesale_gaps(&self) -> u64 {
+        let mut asm = self.assembler.lock().await;
+        asm.take_wholesale_gaps()
+    }
 }
 
 #[async_trait]
 impl Transport for CustomUdpTransport {
     async fn send_video(&self, frame: EncodedFrame) -> Result<(), TransportError> {
         let pkts = packetize(&frame, self.cfg.chunk_payload_len, &self.cfg.fec_policy)?;
-        for pkt in pkts {
+        // Pace large frames only: a frame that fits in one stripe is sent
+        // straight through. See [`PACE_STRIPE_PKTS`] for the rationale.
+        let pace = pkts.len() > PACE_STRIPE_PKTS;
+        for (i, pkt) in pkts.into_iter().enumerate() {
+            // At each stripe boundary (after every PACE_STRIPE_PKTS packets),
+            // yield for PACE_GAP so the receiver's socket buffer can drain.
+            if pace && i > 0 && i % PACE_STRIPE_PKTS == 0 {
+                tokio::time::sleep(PACE_GAP).await;
+            }
             let body = pkt.encode();
             let hdr = PacketHeader {
                 packet_type: PacketType::Video,
@@ -959,6 +1018,9 @@ pub use prdt_protocol::now_monotonic_us;
 mod tests {
     use super::*;
     use crate::UdpTransportConfig;
+    use bytes::Bytes;
+    use prdt_protocol::frame::Codec;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn reset_session_nulls_state() {
@@ -981,5 +1043,97 @@ mod tests {
             0,
             "send_nonce should be reset to 0"
         );
+    }
+
+    // Task D1: binding sizes SO_RCVBUF/SO_SNDBUF via socket2, and the socket
+    // must remain fully functional afterward.
+    #[tokio::test]
+    async fn bind_sizes_buffers_and_socket_still_works() {
+        let cfg = UdpTransportConfig::default();
+        let a = CustomUdpTransport::bind("127.0.0.1:0".parse().unwrap(), cfg)
+            .await
+            .unwrap();
+        let b = CustomUdpTransport::bind("127.0.0.1:0".parse().unwrap(), cfg)
+            .await
+            .unwrap();
+        let a_addr = a.local_addr().unwrap();
+        let b_addr = b.local_addr().unwrap();
+        a.configure_peer(b_addr).await;
+        b.configure_peer(a_addr).await;
+
+        // Buffer sizing must not break ordinary send/recv.
+        a.send_control(ControlMessage::RequestIdr).await.unwrap();
+        let m = tokio::time::timeout(Duration::from_millis(500), b.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            m,
+            ReceivedMessage::Control(ControlMessage::RequestIdr)
+        ));
+
+        // Where the OS lets us read it back, the receive buffer should be well
+        // above the tiny platform default (Linux ~212 KB). Linux commonly
+        // doubles the requested value; assert only a conservative 1 MiB floor.
+        #[cfg(unix)]
+        {
+            let sock = a.socket();
+            let rcv = socket2::SockRef::from(&*sock).recv_buffer_size().unwrap();
+            assert!(rcv >= 1024 * 1024, "rcvbuf {rcv} below 1 MiB floor");
+        }
+    }
+
+    // Task D2: a frame larger than PACE_STRIPE_PKTS packets is paced on send,
+    // and every packet must still arrive so the frame fully reassembles.
+    #[tokio::test]
+    async fn send_video_large_frame_delivers_all_packets() {
+        let cfg = UdpTransportConfig {
+            session_id: 7,
+            ..Default::default()
+        };
+        let a = CustomUdpTransport::bind("127.0.0.1:0".parse().unwrap(), cfg)
+            .await
+            .unwrap();
+        let b = CustomUdpTransport::bind("127.0.0.1:0".parse().unwrap(), cfg)
+            .await
+            .unwrap();
+        let a_addr = a.local_addr().unwrap();
+        let b_addr = b.local_addr().unwrap();
+        a.configure_peer(b_addr).await;
+        b.configure_peer(a_addr).await;
+
+        // 128 KiB keyframe → well over PACE_STRIPE_PKTS datagrams, exercising
+        // the pacing path (the ~190-packet scene-change burst from the field).
+        let payload = vec![0x5A_u8; 128 * 1024];
+        let frame = EncodedFrame {
+            seq: 1,
+            timestamp_host_us: 123,
+            is_keyframe: true,
+            nal_units: Bytes::copy_from_slice(&payload),
+            width: 1920,
+            height: 1080,
+            codec: Codec::H265,
+        };
+        let npkts = packetize(&frame, cfg.chunk_payload_len, &cfg.fec_policy)
+            .unwrap()
+            .len();
+        assert!(
+            npkts > PACE_STRIPE_PKTS,
+            "frame only {npkts} pkts; needs > {PACE_STRIPE_PKTS} to exercise pacing"
+        );
+
+        a.send_video(frame).await.unwrap();
+        let m = tokio::time::timeout(Duration::from_secs(2), b.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match m {
+            ReceivedMessage::Video(got) => {
+                assert_eq!(got.seq, 1);
+                assert_eq!(got.nal_units.len(), payload.len());
+                assert_eq!(&got.nal_units[..], &payload[..]);
+            }
+            other => panic!("unexpected {:?}", other),
+        }
     }
 }

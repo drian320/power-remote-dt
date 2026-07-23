@@ -2886,7 +2886,10 @@ fn spawn_worker_tasks(
                         present_p50_us = present.p50_us,
                         present_p95_us = present.p95_us,
                         present_p99_us = present.p99_us,
-                        "M1 latency (host_capture → viewer_present)",
+                        // decode/present are viewer-local (anchored at recv);
+                        // arrival is host_capture→recv and is only meaningful
+                        // once host/viewer clocks are offset-corrected (M3).
+                        "M1 latency (viewer-local recv→decode→present; arrival is host_capture→recv)",
                     );
                 } else if let Some(arrival) = snap.arrival {
                     info!(
@@ -2902,8 +2905,16 @@ fn spawn_worker_tasks(
                 // of LatencyProbe.samples which is capped at SAMPLE_WINDOW=240 and
                 // would saturate after ~10s, making delta_total=0 → spurious 100%
                 // loss on any purge.
-                let lost = purged_since_tick_latency
+                let purged = purged_since_tick_latency
                     .swap(0, std::sync::atomic::Ordering::Relaxed);
+                // Wholesale frame loss (every chunk of a frame dropped) never
+                // produces a purge, so the assembler tracks it separately.
+                // A gap frame is a frame that existed and was entirely lost, so
+                // fold it into BOTH the lost count and the total count for this
+                // window — otherwise the controller is blind to it (see the
+                // `p_frame_wholesale_loss_not_detected_by_purge` regression).
+                let gaps = bitrate_transport.take_wholesale_gaps().await;
+                let lost = purged.saturating_add(gaps);
                 let received_in_window = frames_recv_since_tick_latency
                     .swap(0, std::sync::atomic::Ordering::Relaxed);
                 let total_window = received_in_window.saturating_add(lost);
