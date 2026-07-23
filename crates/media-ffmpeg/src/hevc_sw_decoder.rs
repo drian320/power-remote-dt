@@ -82,6 +82,20 @@ impl HevcSwFfmpegDecoder {
             // the stream's actual format differs; YUV420P is the codec's
             // native shape so the internal converter knows the source.
             (*codec_ctx_ptr).sw_pix_fmt = AV_PIX_FMT_YUV420P;
+            // Latency: the generic `hevc` decoder defaults to frame-threading,
+            // which withholds output until ~thread_count frames are queued to
+            // fill the pipeline (a full frame or more of added delay). The
+            // stream carries zero B-frames, so no output reorder is ever needed:
+            //   - AV_CODEC_FLAG_LOW_DELAY (1<<19) emits each picture as soon as
+            //     it is decoded instead of holding it for reorder.
+            //   - thread_type = FF_THREAD_SLICE (2) keeps intra-frame slice
+            //     parallelism for throughput but drops the frame-thread delay.
+            // Both are defined locally to avoid depending on the FFI crate
+            // re-exporting them.
+            const AV_CODEC_FLAG_LOW_DELAY: i32 = 1 << 19;
+            const FF_THREAD_SLICE: i32 = 2;
+            (*codec_ctx_ptr).flags |= AV_CODEC_FLAG_LOW_DELAY;
+            (*codec_ctx_ptr).thread_type = FF_THREAD_SLICE;
         }
 
         // SAFETY: codec_ctx_ptr is valid and not yet opened; no priv_data dict needed for SW.

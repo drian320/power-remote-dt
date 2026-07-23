@@ -123,6 +123,13 @@ impl HevcVaapiFfmpegDecoder {
             (*codec_ctx_ptr).get_format = Some(get_vaapi_format);
             (*codec_ctx_ptr).width = cfg.width as i32;
             (*codec_ctx_ptr).height = cfg.height as i32;
+            // Latency: zero B-frames upstream, so the decoder never needs to
+            // reorder output. AV_CODEC_FLAG_LOW_DELAY (1<<19) makes libavcodec
+            // emit each frame as soon as it is decoded instead of holding it
+            // for reorder. Defined locally to avoid depending on the FFI crate
+            // re-exporting it.
+            const AV_CODEC_FLAG_LOW_DELAY: i32 = 1 << 19;
+            (*codec_ctx_ptr).flags |= AV_CODEC_FLAG_LOW_DELAY;
         }
 
         // SAFETY: codec_ctx_ptr is valid; no priv_data dict needed for VAAPI decode.

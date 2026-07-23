@@ -14,11 +14,12 @@ mod inner {
 
     use prdt_media_core::{DecodeError, Nv12Frame16};
     use rusty_ffmpeg_win::ffi::{
-        av_buffer_ref, av_buffer_unref, av_frame_alloc, av_frame_free, av_frame_unref,
-        av_hwdevice_ctx_create, av_hwframe_transfer_data as hw_download, av_packet_alloc,
-        av_packet_free, av_packet_unref, avcodec_alloc_context3, avcodec_find_decoder_by_name,
-        avcodec_free_context, avcodec_open2, avcodec_receive_frame, avcodec_send_packet,
-        AVBufferRef, AVCodecContext, AVFrame, AVPacket, AV_HWDEVICE_TYPE_CUDA,
+        av_buffer_ref, av_buffer_unref, av_dict_free, av_dict_set, av_frame_alloc, av_frame_free,
+        av_frame_unref, av_hwdevice_ctx_create, av_hwframe_transfer_data as hw_download,
+        av_packet_alloc, av_packet_free, av_packet_unref, avcodec_alloc_context3,
+        avcodec_find_decoder_by_name, avcodec_free_context, avcodec_open2, avcodec_receive_frame,
+        avcodec_send_packet, AVBufferRef, AVCodecContext, AVDictionary, AVFrame, AVPacket,
+        AV_HWDEVICE_TYPE_CUDA,
     };
 
     use crate::error::MediaError;
@@ -122,11 +123,27 @@ mod inner {
                 (*codec_ctx_ptr).hw_device_ctx = dev_ref;
                 (*codec_ctx_ptr).width = cfg.width as i32;
                 (*codec_ctx_ptr).height = cfg.height as i32;
+                // Latency: zero B-frames upstream, so the decoder never reorders
+                // output. AV_CODEC_FLAG_LOW_DELAY (1<<19) makes hevc_cuvid emit
+                // each frame as soon as it is decoded instead of holding it for
+                // reorder. Defined locally to avoid depending on the FFI crate
+                // re-exporting it.
+                const AV_CODEC_FLAG_LOW_DELAY: i32 = 1 << 19;
+                (*codec_ctx_ptr).flags |= AV_CODEC_FLAG_LOW_DELAY;
             }
 
             // Open codec.
-            // SAFETY: codec_ctx_ptr is valid; no priv_data dict needed for NVDEC.
-            let ret = unsafe { avcodec_open2(codec_ctx_ptr, codec, ptr::null_mut()) };
+            // Latency: also ask hevc_cuvid to emit pictures without extra output
+            // delay via the private `delay=0` option (belt-and-suspenders with
+            // the LOW_DELAY flag above); cuvid ignores option keys it does not
+            // recognize, leaving them in `opts` to be freed below.
+            let mut opts: *mut AVDictionary = ptr::null_mut();
+            // SAFETY: opts is a valid out-param; c-string literals are valid C strings.
+            unsafe { av_dict_set(&mut opts, c"delay".as_ptr(), c"0".as_ptr(), 0) };
+            // SAFETY: codec_ctx_ptr is valid; avcodec_open2 consumes recognized opts.
+            let ret = unsafe { avcodec_open2(codec_ctx_ptr, codec, &mut opts) };
+            // SAFETY: free any options cuvid did not consume (freeing to NULL is a no-op).
+            unsafe { av_dict_free(&mut opts) };
             if ret < 0 {
                 let mut c = codec_ctx_ptr;
                 // SAFETY: codec_ctx_ptr is the unique owner (hw_device_ctx ref freed on context free).
