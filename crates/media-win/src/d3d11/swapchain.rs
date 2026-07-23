@@ -27,8 +27,8 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory2, IDXGIFactory2, IDXGISwapChain1, DXGI_CREATE_FACTORY_FLAGS, DXGI_PRESENT,
-    DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
+    CreateDXGIFactory2, IDXGIDevice1, IDXGIFactory2, IDXGISwapChain1, DXGI_CREATE_FACTORY_FLAGS,
+    DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
     DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
 
@@ -90,6 +90,10 @@ impl SwapChain {
             let swap: IDXGISwapChain1 = factory
                 .CreateSwapChainForHwnd(dev.device(), hwnd, &desc, None, None)
                 .map_err(|e| MediaError::dxgi("CreateSwapChainForHwnd", e))?;
+
+            // Clamp DXGI's present queue to a single in-flight frame so the
+            // viewer never shows a stale, buffered frame (see cap_frame_latency).
+            cap_frame_latency(dev)?;
 
             let mut out = Self {
                 dev: dev.clone(),
@@ -242,6 +246,10 @@ impl SwapChain {
             probe3
                 .SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)
                 .map_err(|e| MediaError::dxgi("SetColorSpace1", e))?;
+
+            // Clamp DXGI's present queue to a single in-flight frame so the
+            // viewer never shows a stale, buffered frame (see cap_frame_latency).
+            cap_frame_latency(dev)?;
 
             let mut out = Self {
                 dev: dev.clone(),
@@ -425,6 +433,34 @@ impl SwapChain {
         }
         Ok(())
     }
+}
+
+/// Cap DXGI's maximum queued-frame depth at 1 for `dev`.
+///
+/// A flip-model swapchain created without `FRAME_LATENCY_WAITABLE_OBJECT`
+/// inherits DXGI's default maximum frame latency of 3, so the present queue
+/// can buffer up to three rendered frames ahead of the display. On a viewer
+/// that presents continuously (one present per decoded frame) that queue is
+/// pure input→screen lag — up to ~2 extra frames. Querying the device's
+/// `IDXGIDevice1` and setting the latency to 1 is the lowest-risk,
+/// highest-impact lever: it caps the queue to a single in-flight frame
+/// without a waitable handle or any per-present blocking wait (unlike the
+/// `IDXGISwapChain2::SetMaximumFrameLatency` waitable-object route, which
+/// requires waiting on the frame-latency object before each present).
+fn cap_frame_latency(dev: &D3d11Device) -> Result<()> {
+    // SAFETY: an `ID3D11Device` always exposes `IDXGIDevice1` (DXGI 1.2+);
+    // `cast()` is a checked QueryInterface. `SetMaximumFrameLatency` only
+    // updates a device-global counter and has no aliasing requirements.
+    unsafe {
+        let dxgi_device: IDXGIDevice1 = dev
+            .device()
+            .cast()
+            .map_err(|e| MediaError::dxgi("D3D11 device -> IDXGIDevice1 cast", e))?;
+        dxgi_device
+            .SetMaximumFrameLatency(1)
+            .map_err(|e| MediaError::dxgi("SetMaximumFrameLatency(1)", e))?;
+    }
+    Ok(())
 }
 
 // The `IDXGISwapChain1` COM pointer is thread-safe to hold; presenting

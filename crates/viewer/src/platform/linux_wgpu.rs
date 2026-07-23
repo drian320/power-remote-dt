@@ -148,20 +148,33 @@ impl WgpuRender {
             .or_else(|| caps.formats.first().copied())
             .ok_or_else(|| super::RenderError::Init("wgpu: no surface formats".to_string()))?;
 
+        // Lowest-latency present mode the surface can offer. Mailbox keeps
+        // presenting the newest frame without tearing and never blocks on
+        // vblank; Immediate skips the vblank wait but may tear; Fifo (always
+        // available per the WebGPU spec) is the vsync-locked fallback that
+        // can add up to one refresh interval of lag. We only ever fall back
+        // to Fifo when neither of the low-latency modes is advertised.
+        let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+            wgpu::PresentMode::Mailbox
+        } else if caps.present_modes.contains(&wgpu::PresentMode::Immediate) {
+            wgpu::PresentMode::Immediate
+        } else {
+            wgpu::PresentMode::Fifo
+        };
+        tracing::info!(?present_mode, "wgpu presenter: selected present mode");
+
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width: width.max(1),
             height: height.max(1),
-            present_mode: caps
-                .present_modes
-                .iter()
-                .copied()
-                .find(|m| *m == wgpu::PresentMode::Fifo)
-                .unwrap_or(caps.present_modes[0]),
+            present_mode,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
-            desired_maximum_frame_latency: 2,
+            // Cap the swapchain's in-flight frame depth at 1 (wgpu 25 field)
+            // so the presenter never queues a frame behind the newest one —
+            // the GPU analogue of the DXGI SetMaximumFrameLatency(1) cap.
+            desired_maximum_frame_latency: 1,
         };
         surface.configure(&device, &config);
 

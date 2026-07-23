@@ -359,7 +359,14 @@ pub fn present_frame(
         }
     }
 
-    match r.swap.present(true) {
+    // Present immediately (sync_interval = 0) rather than gating to the next
+    // vertical blank. For a remote-desktop viewer the freshest frame beats a
+    // tear-free one: vsync would hold each present until the monitor's next
+    // refresh, adding up to a full refresh interval (~16.6 ms at 60 Hz) of
+    // input→screen lag. Tearing is acceptable here and is what low-latency
+    // remote-desktop tools do. Combined with the frame-latency cap of 1 in
+    // SwapChain::new_for_hwnd, this keeps the present path at minimum latency.
+    match r.swap.present(false) {
         Ok(()) => Ok(()),
         Err(e) if e.is_device_removed() => Err(super::RenderError::DeviceLost(format!(
             "D3D11 device removed: {e}"
