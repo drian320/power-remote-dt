@@ -342,7 +342,7 @@ pub(super) fn pick_encoder(
                     fps_numerator: 60,
                     fps_denominator: 1,
                     bitrate_bps,
-                    gop_length: 60,
+                    gop_length: crate::SESSION_GOP_FRAMES,
                 };
                 let enc = NvencEncoder::new(dev, &cfg).context("NvencEncoder::new")?;
                 return Ok(VideoEncoderBackend::Hw(HwHevcEncoder::from(enc)));
@@ -366,7 +366,7 @@ pub(super) fn pick_encoder(
                 fps_numerator: 60,
                 fps_denominator: 1,
                 bitrate_bps,
-                gop_length: 60,
+                gop_length: crate::SESSION_GOP_FRAMES,
             };
             let enc = MfH265Encoder::new(dev, &cfg).context("MfH265Encoder::new")?;
             Ok(VideoEncoderBackend::Hw(HwHevcEncoder::from(enc)))
@@ -400,7 +400,7 @@ pub(super) fn pick_encoder(
                 fps_numerator: 60,
                 fps_denominator: 1,
                 bitrate_bps,
-                gop_length: 60,
+                gop_length: crate::SESSION_GOP_FRAMES,
             };
             let enc = MfH265Encoder::new(dev, &cfg).context("MfH265Encoder::new")?;
             Ok(VideoEncoderBackend::Hw(HwHevcEncoder::from(enc)))
@@ -421,7 +421,7 @@ pub(super) fn pick_encoder(
                 height,
                 fps: 60,
                 initial_bitrate_bps: bitrate_bps,
-                gop_size: 60,
+                gop_size: crate::SESSION_GOP_FRAMES,
             };
             let enc = prdt_media_win::ffmpeg::HevcNvencFfmpegEncoderWindowsAdapter::new(
                 dev.clone(),
@@ -450,7 +450,7 @@ pub(super) fn pick_encoder(
                     height,
                     fps: 60,
                     initial_bitrate_bps: bitrate_bps,
-                    gop_size: 60,
+                    gop_size: crate::SESSION_GOP_FRAMES,
                 };
             let enc = prdt_media_win::ffmpeg::HevcNvencMain10FfmpegEncoderWindowsAdapter::new(
                 dev.clone(),

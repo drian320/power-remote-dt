@@ -237,7 +237,7 @@ pub fn build_video_producer(
             height,
             fps,
             initial_bitrate_bps: bitrate_bps,
-            gop_size: fps,
+            gop_size: crate::SESSION_GOP_FRAMES,
             render_node: vaapi_render_node_from_env(),
         };
         let enc = HevcVaapiFfmpegEncoder::new(cfg)
@@ -271,7 +271,7 @@ pub fn build_video_producer(
             height,
             fps,
             initial_bitrate_bps: bitrate_bps,
-            gop_size: fps,
+            gop_size: crate::SESSION_GOP_FRAMES,
             cuda_device_index: None,
         };
         let enc = HevcNvencFfmpegEncoder::new(cfg)
@@ -306,7 +306,7 @@ pub fn build_video_producer(
             height,
             fps,
             initial_bitrate_bps: bitrate_bps,
-            gop_size: fps,
+            gop_size: crate::SESSION_GOP_FRAMES,
             cuda_device_index: None,
         };
         let enc = HevcNvencNppFfmpegEncoder::new(cfg).context("HevcNvencNppFfmpegEncoder::new")?;
@@ -327,7 +327,7 @@ pub fn build_video_producer(
             height,
             fps,
             initial_bitrate_bps: bitrate_bps,
-            gop_size: fps,
+            gop_size: crate::SESSION_GOP_FRAMES,
             render_node: vaapi_render_node_from_env(),
         };
         let enc =
@@ -348,7 +348,7 @@ pub fn build_video_producer(
             height,
             fps,
             initial_bitrate_bps: bitrate_bps,
-            gop_size: fps,
+            gop_size: crate::SESSION_GOP_FRAMES,
             cuda_device_index: None,
         };
         let enc =

@@ -136,6 +136,13 @@ const OUTGOING_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// larger user-supplied `--signaling-timeout`, and does not change
 /// `signaling_timeout`'s meaning for other callers (viewer / provisioning).
 const SIGNALING_REGISTER_WAIT_SECS: u64 = 60;
+/// Session encoder GOP length in frames. Remote desktop does not need
+/// periodic IDRs: every session starts with one (fresh encoder), and loss
+/// recovery is viewer-driven via `RequestIdr` (see the force_idr_flag flow),
+/// so frequent keyframes only waste bitrate and show up as a once-per-GOP
+/// "quality pulse" (observed at the old value of 60 = 1s at 60fps). 600
+/// (10s at 60fps) keeps a slow safety refresh while removing the pulse.
+pub(crate) const SESSION_GOP_FRAMES: u32 = 600;
 /// Initial backoff between signaling re-register attempts (doubles up to
 /// [`SIGNALING_BACKOFF_MAX`]). Prevents a tight spin on fast-failing errors
 /// (connection refused, `HostAlreadyRegistered` race) while the common
